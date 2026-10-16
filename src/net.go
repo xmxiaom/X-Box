@@ -323,7 +323,12 @@ func readResolvConf() []string {
 	for _, line := range strings.Split(string(b), "\n") {
 		f := strings.Fields(line)
 		if len(f) >= 2 && f[0] == "nameserver" {
-			out = append(out, f[1])
+			ns := f[1]
+			// 去 IPv6 zone id（如 fe80::1%enp3s0-ovs → fe80::1），界面只展示地址本身
+			if i := strings.Index(ns, "%"); i >= 0 {
+				ns = ns[:i]
+			}
+			out = append(out, ns)
 		}
 	}
 	return out
