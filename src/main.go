@@ -29,7 +29,7 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.7"
+	version    = "1.2.8"
 	listenAddr = ":8899"
 )
 
@@ -77,6 +77,8 @@ func main() {
 	mux.HandleFunc("POST /api/proxy/del", srv.handleProxyDel)
 	mux.HandleFunc("GET /api/nvme-sleep", handleNVMeSleepList)
 	mux.HandleFunc("POST /api/nvme-sleep", handleNVMeSleepSet)
+	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
+	mux.HandleFunc("POST /api/update/download", handleUpdateDownload)
 	mux.HandleFunc("GET /", srv.handleRoot)
 
 	log.Printf("X-Box v%s 启动，监听 %s（无登录，请勿暴露公网）", version, listenAddr)

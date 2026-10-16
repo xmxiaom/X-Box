@@ -288,6 +288,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 12l7-4"/><circle cx="12" cy="12" r="2.5"/><path d="M4.5 19l2-2M19.5 19l-2-2"/></svg>
         掉盘修复
       </div>
+      <div class="menu-item" data-page="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        系统设置
+      </div>
     </div>
     <div class="content">
 
@@ -413,6 +417,20 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="rows" id="diskfix-rows"><div class="empty">加载中…</div></div>
       </div>
 
+      <!-- 系统设置（检查更新） -->
+      <div class="page" id="page-settings">
+        <div class="page-head"><h2>系统设置</h2><span class="sub" id="settings-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" id="btn-upd-check" onclick="checkUpdate()">检查更新</button></div>
+        <div class="card" style="margin-bottom:14px">
+          <h3>ℹ️ 关于</h3>
+          <div class="kv"><span class="k">当前版本</span><span class="v mono" id="upd-current">—</span></div>
+          <div class="kv"><span class="k">开源项目</span><span class="v mono">github.com/xmxiaom/X-Box</span></div>
+        </div>
+        <div class="card" id="upd-card" style="display:none">
+          <h3>🔄 检查更新 <span class="h-action"><span class="badge badge-blue" id="upd-latest-badge"></span></span></h3>
+          <div id="upd-body"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -466,7 +484,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, proxy:loadProxy, diskfix:loadDiskFix}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, proxy:loadProxy, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -831,6 +849,55 @@ async function setDiskSleep(pci, enable, name){
       loadDiskFix();
     }catch(e){ toast(e.message,'err'); }
   }, '确认');
+}
+
+/* ---------- 系统设置（检查更新） ---------- */
+async function checkUpdate(){
+  const btn = document.getElementById('btn-upd-check');
+  const card = document.getElementById('upd-card');
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin spin-dark" style="width:12px;height:12px"></span> 检查中'; }
+  card.style.display = 'block';
+  document.getElementById('upd-body').innerHTML = '<div class="empty"><span class="spin spin-dark"></span> 正在连接 GitHub 查询最新版本…</div>';
+  try{
+    const j = await api('/api/update/check');
+    renderUpdate(j.update||{});
+  }catch(e){
+    document.getElementById('upd-body').innerHTML = '<div class="empty" style="color:var(--danger)">检查失败：'+esc(e.message)+'</div>';
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '检查更新'; }
+  }
+}
+function renderUpdate(u){
+  document.getElementById('upd-current').textContent = u.current||'—';
+  const badge = document.getElementById('upd-latest-badge');
+  const body = document.getElementById('upd-body');
+  if(u.hasUpdate){
+    badge.textContent = '发现新版本 v'+(u.latest||'');
+    badge.className = 'badge badge-green';
+    body.innerHTML = `
+      <div class="kv"><span class="k">最新版本</span><span class="v" style="font-weight:700;color:var(--success)">v${esc(u.latest)}</span></div>
+      <div class="kv"><span class="k">发布时间</span><span class="v">${esc(u.publishedAt||'—')}</span></div>
+      ${u.notes?`<div class="kv"><span class="k">更新说明</span><span class="v" style="text-align:right;max-width:65%;font-weight:400;white-space:pre-wrap">${esc(u.notes.slice(0,600))}</span></div>`:''}
+      <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+        <button class="btn btn-primary" id="btn-upd-dl" onclick="downloadUpdate('${esc(u.downloadUrl||'')}','${esc(u.assetName||'X-Box.fpk')}')">⬇️ 下载更新（${esc(u.assetName||'X-Box.fpk')}）</button>
+      </div>
+      <div class="warn-box" style="margin-top:10px">下载完成后，请到<b>飞牛 应用中心 → 手动安装</b>选择下载的 fpk 文件完成覆盖安装（配置与数据保留）。应用不会自动替换自身运行中的程序，这是为了防止升级中断连。</div>`;
+  }else{
+    badge.textContent = u.note || '已是最新版本';
+    badge.className = 'badge badge-gray';
+    body.innerHTML = `<div class="empty" style="padding:18px 0">${esc(u.note||'当前已是最新版本')}${u.latest?`（最新 v${esc(u.latest)}）`:''}</div>`;
+  }
+}
+async function downloadUpdate(url, name){
+  if(!url){ toast('该 Release 未提供 fpk 下载资源','err'); return; }
+  const btn = document.getElementById('btn-upd-dl');
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 下载中…'; }
+  try{
+    const j = await api('/api/update/download',{method:'POST',body:JSON.stringify({url, name})});
+    toast(j.message||'已下载','good');
+    document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" style="margin-top:10px">📦 文件位置：<span class="mono">${esc(j.path||'')}</span><br>安装：飞牛 应用中心 → 手动安装 → 选择上述 fpk（覆盖安装，配置保留）</div>`);
+  }catch(e){ toast(e.message,'err'); }
+  if(btn){ btn.disabled = false; btn.innerHTML = '⬇️ 下载更新（'+name+'）'; }
 }
 
 /* ---------- 进程服务（风格对齐飞牛资源监控） ---------- */

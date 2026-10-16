@@ -126,6 +126,15 @@ const MOCK = {
       { name: 'nvme2', model: 'XXX NVMe SSD 119.2GB', sizeText: '119.2G', pciAddr: '0000:07:00.0', state: 'live', down: false, d3coldOk: '0', deepBanned: true, mount: '/' },
     ],
   },
+  '/api/update/check': {
+    ok: true,
+    update: {
+      current: '1.2.7', latest: '1.2.8', hasUpdate: true,
+      notes: '1. 新增「系统设置」检查更新\n2. 修复若干问题',
+      assetName: 'X-Box.fpk', downloadUrl: 'https://github.com/xmxiaom/X-Box/releases/download/v1.2.8/X-Box.fpk',
+      publishedAt: '2026-10-17 00:10:00', checkedAt: '2026-10-17 00:11:00',
+    },
+  },
   '/api/scan': {
     ok: true, durationMs: 328, scannedAt: '2026-10-16 13:30:12', totalBytes: 61244064, totalFiles: 491,
     categories: [
