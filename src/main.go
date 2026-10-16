@@ -29,7 +29,7 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.13"
+	version    = "1.2.15"
 	// 仅监听本机回环：fnOS 桌面窗口（iframe）在本机加载，手机 APP 经系统网关反代，
 	// 均不需要对外暴露端口；局域网/公网其它主机无法直接访问 8899。
 	listenAddr = "127.0.0.1:8899"
@@ -82,6 +82,7 @@ func main() {
 	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
 	mux.HandleFunc("POST /api/update/download", handleUpdateDownload)
 	mux.HandleFunc("GET /api/update/dirs", handleUpdateDirs)
+	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
 	mux.HandleFunc("GET /", srv.handleRoot)
 
 	log.Printf("X-Box v%s 启动，监听 %s（无登录，请勿暴露公网）", version, listenAddr)

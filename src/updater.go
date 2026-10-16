@@ -294,6 +294,51 @@ func handleUpdateDirs(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"dirs": updateDirCandidates()})
 }
 
+// handleUpdateFile GET /api/update/file?path=...：把已下载的 fpk 经本服务回传给浏览器
+// （"下载到电脑"的可靠路径——iframe/APP WebView 会拦截 window.open 外链，
+// 同源 attachment 响应则可正常触发本机下载）。
+// 安全：只允许回传应用 updates 目录内的 .fpk 文件，防任意文件读取。
+func handleUpdateFile(w http.ResponseWriter, r *http.Request) {
+	reqPath := r.URL.Query().Get("path")
+	if reqPath == "" {
+		fail(w, 400, "缺少 path 参数")
+		return
+	}
+	clean := filepath.Clean(reqPath)
+	if !strings.HasSuffix(clean, ".fpk") || !filepath.IsAbs(clean) {
+		fail(w, 400, "仅支持回传 fpk 文件")
+		return
+	}
+	// 必须落在应用 updates 目录内
+	allowed := false
+	for _, base := range []string{updateDownloadDir(), "/vol1/@appdata/X-Box/updates", "/vol2/@appdata/X-Box/updates", "/tmp/X-Box-updates"} {
+		if base == "" {
+			continue
+		}
+		b := filepath.Clean(base)
+		if clean == b {
+			continue
+		}
+		if strings.HasPrefix(clean, b+string(filepath.Separator)) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		fail(w, 403, "该路径不在允许的更新目录内")
+		return
+	}
+	fi, err := os.Stat(clean)
+	if err != nil || fi.IsDir() {
+		fail(w, 404, "文件不存在")
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(clean)+`"`)
+	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+	http.ServeFile(w, r, clean)
+}
+
 // handleUpdateDownload POST /api/update/download {url,name,dir}：下载 fpk 到指定目录并校验。
 // dir 为空时用默认目录；自定义目录必须已存在且非系统敏感目录。
 func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
