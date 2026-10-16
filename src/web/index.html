@@ -889,42 +889,52 @@ function renderUpdate(u){
 }
 async function downloadUpdate(url, name){
   if(!url){ toast('该 Release 未提供 fpk 下载资源','err'); return; }
-  // 弹出保存位置选择：NAS 存储目录（可选/自定义）或 浏览器直下到电脑
-  let dirOptions = '<option value="">默认目录（/vol*/@appdata/X-Box/updates）</option>';
+  // 单选组明确三种去向，选择状态一目了然（避免"不确定选的是默认还是自定义"）
+  let dirOptions = '';
   try{
     const d = await api('/api/update/dirs');
-    (d.dirs||[]).forEach(p=>{ dirOptions += `<option value="${esc(p)}">${esc(p)}</option>`; });
+    (d.dirs||[]).forEach((p,i)=>{ dirOptions += `<option value="${esc(p)}"${i===0?' selected':''}>${esc(p)}</option>`; });
   }catch(e){}
   confirmDialog('选择保存位置', `
-    <div style="font-size:13px;color:var(--text2);line-height:1.8">
-      <p><b>保存到 NAS</b>（在飞牛存储空间中选择目录，装好后到 应用中心 → 手动安装）：</p>
-      <div style="display:flex;gap:8px;margin:8px 0 14px;flex-wrap:wrap">
-        <select id="upd-dir" class="btn btn-outline" style="flex:1;min-width:200px">${dirOptions}</select>
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
-        <input type="text" id="upd-dir-custom" placeholder="或自定义 NAS 目录（须已存在，如 /vol1/下载）" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid var(--border);border-radius:6px">
-      </div>
-      <p><b>或下载到本机电脑</b>（不经 NAS 磁盘，由浏览器直接从 GitHub 下载并保存到浏览器默认下载目录）：</p>
-      <div style="margin:8px 0"><button class="btn btn-outline" id="upd-to-pc">⬇️ 浏览器直接下载到电脑</button></div>
+    <div style="font-size:13px;line-height:2">
+      <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer">
+        <input type="radio" name="upd-dest" value="default" checked style="margin-top:6px">
+        <span><b>默认目录</b><br><span style="color:var(--text3);font-size:12px">/vol*/@appdata/X-Box/updates（自动创建，飞牛文件管理可直接找到）</span></span>
+      </label>
+      <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-top:10px">
+        <input type="radio" name="upd-dest" value="nas" style="margin-top:6px">
+        <span style="flex:1"><b>NAS 自定义目录</b><br>
+          <select id="upd-dir" class="btn btn-outline" style="width:100%;margin-top:4px">${dirOptions||'<option value="">默认目录</option>'}</select>
+          <input type="text" id="upd-dir-custom" placeholder="或输入已存在的目录（留空则用上面下拉所选）" style="width:100%;margin-top:6px;padding:7px 10px;border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+        </span>
+      </label>
+      <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-top:10px">
+        <input type="radio" name="upd-dest" value="pc" style="margin-top:6px">
+        <span><b>下载到电脑</b><br><span style="color:var(--text3);font-size:12px">浏览器直接从 GitHub 下载，保存到浏览器默认下载目录，不经 NAS 磁盘</span></span>
+      </label>
     </div>`, async ()=>{
-      const custom = (document.getElementById('upd-dir-custom').value||'').trim();
-      const dir = custom || document.getElementById('upd-dir').value;
-      await doDownloadUpdate(url, name, dir);
-    }, '保存到 NAS');
-  // 「下载到电脑」按钮：浏览器直下（confirmDialog 的 OK 是 NAS 保存，这里单独绑事件）
-  setTimeout(()=>{
-    const pcBtn = document.getElementById('upd-to-pc');
-    if(pcBtn) pcBtn.onclick = ()=>{ closeModal(); window.open(url, '_blank'); toast('已唤起浏览器下载：'+name+'（保存到浏览器下载目录）','good'); };
-  }, 0);
+    const dest = (document.querySelector('input[name="upd-dest"]:checked')||{}).value || 'default';
+    if(dest === 'pc'){ window.open(url, '_blank'); toast('已唤起浏览器下载：'+name,'good'); return; }
+    let dir = '';
+    if(dest === 'nas'){
+      dir = (document.getElementById('upd-dir-custom').value||'').trim() || document.getElementById('upd-dir').value;
+    }
+    await doDownloadUpdate(url, name, dir);
+  }, '开始下载');
 }
 async function doDownloadUpdate(url, name, dir){
   const btn = document.getElementById('btn-upd-dl');
   if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 下载中…'; }
+  // 清除上次的失败块
+  const oldErr = document.getElementById('upd-err'); if(oldErr) oldErr.remove();
   try{
     const j = await api('/api/update/download',{method:'POST',body:JSON.stringify({url, name, dir})});
     toast(j.message||'已下载','good');
     document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" style="margin-top:10px">📦 文件位置：<span class="mono">${esc(j.path||'')}</span><br>安装：飞牛 应用中心 → 手动安装 → 选择上述 fpk（覆盖安装，配置保留）</div>`);
-  }catch(e){ toast(e.message,'err'); }
+  }catch(e){
+    // 失败原因持久显示（不再只靠一闪而过的 toast），带重试按钮
+    document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" id="upd-err" style="margin-top:10px;background:var(--danger-light);border-color:#FDCDC5;color:#7A1F0A">❌ 下载失败：${esc(e.message)}<br><span style="font-size:12px">常见原因：NAS 无法直达 github.com（检查 DNS/外网）、所选目录不存在或不可写、Release 资源尚未上传完成。可重试或改用「下载到电脑」。</span><br><button class="btn btn-outline btn-sm" style="margin-top:6px" onclick="downloadUpdate('${esc(url)}','${esc(name)}')">重试</button></div>`);
+  }
   if(btn){ btn.disabled = false; btn.innerHTML = '⬇️ 下载更新（'+name+'）'; }
 }
 

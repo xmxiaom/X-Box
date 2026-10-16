@@ -210,8 +210,14 @@ func fetchLatestRelease() (ghRelease, bool) {
 	return rel, true
 }
 
-// updateDownloadDir fpk 默认下载目录：优先 fnOS 应用数据目录（用户可通过文件管理访问）。
+// updateDownloadDir fpk 默认下载目录：优先应用自身数据目录（XBOX_DATA，fnOS pkgvar，
+// 文件管理可直接找到），回退 @appdata 常规位置，最后 /tmp。
 func updateDownloadDir() string {
+	if d := os.Getenv("XBOX_DATA"); d != "" {
+		dir := filepath.Join(d, "updates")
+		_ = os.MkdirAll(dir, 0755)
+		return dir
+	}
 	for _, base := range []string{"/vol1/@appdata/X-Box", "/vol2/@appdata/X-Box"} {
 		dir := filepath.Join(base, "updates")
 		if fi, err := os.Stat(base); err == nil && fi.IsDir() {
