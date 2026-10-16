@@ -889,10 +889,39 @@ function renderUpdate(u){
 }
 async function downloadUpdate(url, name){
   if(!url){ toast('该 Release 未提供 fpk 下载资源','err'); return; }
+  // 弹出保存位置选择：NAS 存储目录（可选/自定义）或 浏览器直下到电脑
+  let dirOptions = '<option value="">默认目录（/vol*/@appdata/X-Box/updates）</option>';
+  try{
+    const d = await api('/api/update/dirs');
+    (d.dirs||[]).forEach(p=>{ dirOptions += `<option value="${esc(p)}">${esc(p)}</option>`; });
+  }catch(e){}
+  confirmDialog('选择保存位置', `
+    <div style="font-size:13px;color:var(--text2);line-height:1.8">
+      <p><b>保存到 NAS</b>（在飞牛存储空间中选择目录，装好后到 应用中心 → 手动安装）：</p>
+      <div style="display:flex;gap:8px;margin:8px 0 14px;flex-wrap:wrap">
+        <select id="upd-dir" class="btn btn-outline" style="flex:1;min-width:200px">${dirOptions}</select>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+        <input type="text" id="upd-dir-custom" placeholder="或自定义 NAS 目录（须已存在，如 /vol1/下载）" style="flex:1;min-width:200px;padding:7px 10px;border:1px solid var(--border);border-radius:6px">
+      </div>
+      <p><b>或下载到本机电脑</b>（不经 NAS 磁盘，由浏览器直接从 GitHub 下载并保存到浏览器默认下载目录）：</p>
+      <div style="margin:8px 0"><button class="btn btn-outline" id="upd-to-pc">⬇️ 浏览器直接下载到电脑</button></div>
+    </div>`, async ()=>{
+      const custom = (document.getElementById('upd-dir-custom').value||'').trim();
+      const dir = custom || document.getElementById('upd-dir').value;
+      await doDownloadUpdate(url, name, dir);
+    }, '保存到 NAS');
+  // 「下载到电脑」按钮：浏览器直下（confirmDialog 的 OK 是 NAS 保存，这里单独绑事件）
+  setTimeout(()=>{
+    const pcBtn = document.getElementById('upd-to-pc');
+    if(pcBtn) pcBtn.onclick = ()=>{ closeModal(); window.open(url, '_blank'); toast('已唤起浏览器下载：'+name+'（保存到浏览器下载目录）','good'); };
+  }, 0);
+}
+async function doDownloadUpdate(url, name, dir){
   const btn = document.getElementById('btn-upd-dl');
   if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 下载中…'; }
   try{
-    const j = await api('/api/update/download',{method:'POST',body:JSON.stringify({url, name})});
+    const j = await api('/api/update/download',{method:'POST',body:JSON.stringify({url, name, dir})});
     toast(j.message||'已下载','good');
     document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" style="margin-top:10px">📦 文件位置：<span class="mono">${esc(j.path||'')}</span><br>安装：飞牛 应用中心 → 手动安装 → 选择上述 fpk（覆盖安装，配置保留）</div>`);
   }catch(e){ toast(e.message,'err'); }

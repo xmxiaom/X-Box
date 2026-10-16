@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,21 +19,24 @@ import (
 )
 
 const (
-	ghRepo      = "xmxiaom/X-Box"
+	ghRepo       = "xmxiaom/X-Box"
 	ghReleaseAPI = "https://api.github.com/repos/" + ghRepo + "/releases/latest"
+	// raw manifest：走 GitHub raw CDN，无 API 限流、无需认证，是版本检测的主路径
+	ghRawManifest = "https://raw.githubusercontent.com/" + ghRepo + "/main/pkg/manifest"
 )
 
 // UpdateInfo 检查更新结果。
 type UpdateInfo struct {
-	Current    string `json:"current"`    // 本地版本
-	Latest     string `json:"latest"`     // 远程最新版本（无 release 时为空）
-	HasUpdate  bool   `json:"hasUpdate"`  // 是否有新版本
-	Notes      string `json:"notes"`      // Release 说明
-	AssetName  string `json:"assetName"`  // fpk 资源名
-	DownloadURL string `json:"downloadUrl"` // fpk 下载地址（浏览器可下载 URL）
-	PublishedAt string `json:"publishedAt"`
-	Note       string `json:"note"`       // 无 release / 查询失败说明
-	CheckedAt  string `json:"checkedAt"`
+	Current     string `json:"current"`      // 本地版本
+	Latest      string `json:"latest"`       // 远程最新版本（无 release 时为空）
+	HasUpdate   bool   `json:"hasUpdate"`    // 是否有新版本
+	Notes       string `json:"notes"`        // Release 说明
+	AssetName   string `json:"assetName"`    // fpk 资源名
+	DownloadURL string `json:"downloadUrl"`  // fpk 下载地址（浏览器可下载 URL）
+	PublishedAt string `json:"publishedAt"`  // Release 发布时间
+	Note        string `json:"note"`         // 说明（无 release / 降级提示等）
+	CheckedAt   string `json:"checkedAt"`    // 检查时间
+	Source      string `json:"source"`       // 版本来源：raw-manifest / release-api
 }
 
 var (
@@ -84,8 +88,68 @@ type ghRelease struct {
 	} `json:"assets"`
 }
 
+// fetchRawVersion 从 raw manifest 读取远程版本号（无限流主路径）。
+func fetchRawVersion() string {
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(ghRawManifest)
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	m := regexp.MustCompile(`(?m)^version\s*=\s*([0-9][0-9.]*)`).FindSubmatch(b)
+	if len(m) < 2 {
+		return ""
+	}
+	return string(m[1])
+}
+
 func checkUpdate() UpdateInfo {
 	info := UpdateInfo{Current: version, CheckedAt: time.Now().Format("2006-01-02 15:04:05")}
+
+	// 1) 主路径：raw manifest 版本（无 API 限流）
+	latest := fetchRawVersion()
+	if latest != "" {
+		info.Latest = latest
+		info.Source = "raw-manifest"
+		info.HasUpdate = compareVer(latest, version) > 0
+		if !info.HasUpdate {
+			info.Note = "已是最新版本"
+		}
+	} else {
+		// 2) 回退：releases/latest API（可能触发匿名限流 60 次/小时）
+		info = checkUpdateViaAPI(info)
+	}
+
+	// 3) 有新版本时补充 Release 详情（说明/发布时间）；API 失败不影响判定，
+	//    下载 URL 按约定规则拼出（release 页面本身不限流）
+	if info.HasUpdate && info.Latest != "" {
+		if rel, ok := fetchLatestRelease(); ok {
+			info.Notes = strings.TrimSpace(rel.Body)
+			info.PublishedAt = rel.PublishedAt
+			for _, a := range rel.Assets {
+				if strings.HasSuffix(a.Name, ".fpk") {
+					info.AssetName = a.Name
+					info.DownloadURL = a.BrowserDownloadURL
+					break
+				}
+			}
+		} else {
+			info.Note = "未能获取 Release 详情（可能触发 GitHub 匿名 API 限流），下载地址按版本号推断"
+		}
+		if info.DownloadURL == "" {
+			info.AssetName = "X-Box.fpk"
+			info.DownloadURL = fmt.Sprintf("https://github.com/%s/releases/download/v%s/X-Box.fpk", ghRepo, info.Latest)
+		}
+	}
+	return info
+}
+
+// checkUpdateViaAPI releases/latest API 路径（raw 失败时的回退）。
+func checkUpdateViaAPI(info UpdateInfo) UpdateInfo {
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Get(ghReleaseAPI)
 	if err != nil {
@@ -98,7 +162,7 @@ func checkUpdate() UpdateInfo {
 		return info
 	}
 	if resp.StatusCode != 200 {
-		info.Note = fmt.Sprintf("GitHub 查询失败（HTTP %d）", resp.StatusCode)
+		info.Note = fmt.Sprintf("GitHub 查询失败（HTTP %d，匿名 API 每小时限 60 次，可稍后再试）", resp.StatusCode)
 		return info
 	}
 	var rel ghRelease
@@ -106,10 +170,10 @@ func checkUpdate() UpdateInfo {
 		info.Note = "GitHub 响应解析失败：" + err.Error()
 		return info
 	}
+	info.Source = "release-api"
 	info.Latest = strings.TrimPrefix(rel.TagName, "v")
 	info.Notes = strings.TrimSpace(rel.Body)
 	info.PublishedAt = rel.PublishedAt
-	// 找 fpk 资源（优先 platform=all 单包）
 	for _, a := range rel.Assets {
 		if strings.HasSuffix(a.Name, ".fpk") {
 			info.AssetName = a.Name
@@ -128,7 +192,25 @@ func checkUpdate() UpdateInfo {
 	return info
 }
 
-// updateDownloadDir fpk 下载目录：优先 fnOS 应用数据目录（用户可通过文件管理访问）。
+// fetchLatestRelease 取最新 Release 详情（限流/失败返回 ok=false，不影响主判定）。
+func fetchLatestRelease() (ghRelease, bool) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(ghReleaseAPI)
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ghRelease{}, false
+	}
+	defer resp.Body.Close()
+	var rel ghRelease
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+		return ghRelease{}, false
+	}
+	return rel, true
+}
+
+// updateDownloadDir fpk 默认下载目录：优先 fnOS 应用数据目录（用户可通过文件管理访问）。
 func updateDownloadDir() string {
 	for _, base := range []string{"/vol1/@appdata/X-Box", "/vol2/@appdata/X-Box"} {
 		dir := filepath.Join(base, "updates")
@@ -142,7 +224,47 @@ func updateDownloadDir() string {
 	return dir
 }
 
-// handleUpdateCheck GET /api/update/check（5 分钟缓存，避免频繁打 GitHub API）。
+// safeDownloadDir 用户自定义目录校验：必须已存在、是目录、且不得是系统敏感目录
+// （防通过下载接口向任意位置写文件）。
+func safeDownloadDir(dir string) (string, bool) {
+	if dir == "" {
+		return "", false
+	}
+	clean := filepath.Clean(dir)
+	if !filepath.IsAbs(clean) {
+		return "", false
+	}
+	// 系统敏感目录黑名单（这些位置一律不接受）
+	for _, bad := range []string{"/", "/etc", "/usr", "/bin", "/sbin", "/boot", "/sys", "/proc", "/dev", "/lib", "/lib64", "/var/lib"} {
+		if clean == bad || strings.HasPrefix(clean, bad+"/") {
+			return "", false
+		}
+	}
+	fi, err := os.Stat(clean)
+	if err != nil || !fi.IsDir() {
+		return "", false
+	}
+	return clean, true
+}
+
+// updateDirCandidates 可选保存目录（供前端下拉；仅列真实存在的）。
+func updateDirCandidates() []string {
+	var out []string
+	for _, d := range []string{
+		"/vol1/@appdata/X-Box/updates", "/vol2/@appdata/X-Box/updates",
+		"/vol1", "/vol2", "/tmp",
+	} {
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+			out = append(out, d)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, updateDownloadDir())
+	}
+	return out
+}
+
+// handleUpdateCheck GET /api/update/check（5 分钟缓存，避免频繁打 GitHub）。
 func handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	updateCacheMu.Lock()
 	if !updateCacheAt.IsZero() && time.Since(updateCacheAt) < 5*time.Minute {
@@ -161,11 +283,18 @@ func handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"update": info})
 }
 
-// handleUpdateDownload POST /api/update/download {url,name}：下载 fpk 到本地并校验。
+// handleUpdateDirs GET /api/update/dirs：可选保存目录列表（NAS 存储目录）。
+func handleUpdateDirs(w http.ResponseWriter, r *http.Request) {
+	ok(w, map[string]any{"dirs": updateDirCandidates()})
+}
+
+// handleUpdateDownload POST /api/update/download {url,name,dir}：下载 fpk 到指定目录并校验。
+// dir 为空时用默认目录；自定义目录必须已存在且非系统敏感目录。
 func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URL  string `json:"url"`
 		Name string `json:"name"`
+		Dir  string `json:"dir"` // 可选：自定义保存目录（NAS 存储目录）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
 		fail(w, 400, "参数错误")
@@ -181,7 +310,17 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "非法文件名")
 		return
 	}
-	dir := updateDownloadDir()
+	dir := req.Dir
+	if dir != "" {
+		d, ok := safeDownloadDir(dir)
+		if !ok {
+			fail(w, 400, "保存目录无效（必须已存在且不能是系统目录）")
+			return
+		}
+		dir = d
+	} else {
+		dir = updateDownloadDir()
+	}
 	dst := filepath.Join(dir, name)
 
 	client := &http.Client{Timeout: 10 * time.Minute}
