@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -128,25 +129,33 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	ok(w, ov)
 }
 
-// readFnOSVersion 读取 fnOS 系统版本：优先 /etc/fnos/version 等专用文件，
-// 回退从 os-release 的 PRETTY_NAME 提取（如 "fnOS 1.2.3" → 1.2.3）；读不到返回空。
+// readFnOSVersion 读取 fnOS 系统版本。
+// 真机实证：fnOS 主版本文件是 /usr/trim/etc/version（内容如 1.2.0800）；/etc/fnos/version 不一定存在。
+// 回退从 os-release 提取时必须要求含点号的版本（x.y/z），否则会把 Debian 12 的
+// PRETTY_NAME（"Debian GNU/Linux 12"）误提取为 "12"。
 func readFnOSVersion() string {
-	for _, p := range []string{"/etc/fnos/version", "/etc/fnos/release", "/etc/fnos/VERSION", "/etc/fnos_version"} {
-		if v := readSmall(p); v != "" {
-			// 有的文件是 key=value 形式（如 VERSION=1.2.3）
-			if k, val, ok := strings.Cut(v, "="); ok && strings.Contains(strings.ToLower(k), "ver") {
-				return strings.Trim(strings.TrimSpace(val), `"`)
-			}
-			return v
+	for _, p := range []string{
+		"/usr/trim/etc/version",
+		"/etc/fnos/version",
+		"/etc/fnos/release",
+		"/etc/fnos/VERSION",
+		"/etc/fnos_version",
+		"/var/trim/version",
+	} {
+		v := strings.TrimSpace(readSmall(p))
+		if v == "" {
+			continue
 		}
+		// key=value 形式（如 version=1.2.0800）取等号后的值
+		if _, val, ok := strings.Cut(v, "="); ok && strings.TrimSpace(val) != "" {
+			return strings.Trim(strings.TrimSpace(val), `"`)
+		}
+		return v
 	}
-	// 回退：PRETTY_NAME 里的版本号
+	// 回退：os-release 里含点号的版本号（拒绝纯数字，避开 Debian 12）
 	if pretty := readOsRelease(); pretty != "" {
-		f := strings.Fields(pretty)
-		for i := len(f) - 1; i >= 0; i-- {
-			if f[i][0] >= '0' && f[i][0] <= '9' {
-				return f[i]
-			}
+		if m := regexp.MustCompile(`\d+\.\d+(\.\d+)?`).FindString(pretty); m != "" {
+			return m
 		}
 	}
 	return ""
