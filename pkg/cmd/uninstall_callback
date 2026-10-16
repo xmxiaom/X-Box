@@ -1,0 +1,5 @@
+#!/bin/bash
+
+### This script is called during the application lifecycle.
+
+exit 0

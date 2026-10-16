@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>X-Box</title>
+<style>
+:root{
+  --primary:#165DFF; --primary-hover:#4080FF; --primary-light:#E8F3FF;
+  --success:#00B42A; --success-light:#E8FFEA;
+  --danger:#F53F3F; --danger-light:#FFECE8;
+  --warning:#FF7D00; --warning-light:#FFF7E8;
+  --purple:#722ED1; --purple-light:#F5E8FF;
+  --text1:#1D2129; --text2:#4E5969; --text3:#86909C;
+  --bg:#F2F3F5; --card:#FFFFFF; --border:#E5E6EB;
+  --radius:8px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text1);font-size:14px}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:#C9CDD4;border-radius:4px}
+
+/* ===== 布局骨架 ===== */
+.app{display:flex;flex-direction:column;height:100vh;height:100dvh}
+.topbar{height:52px;background:var(--card);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;flex-shrink:0}
+.topbar img.logo{width:28px;height:28px;border-radius:7px;display:block}
+.topbar .title{font-size:16px;font-weight:600}
+.topbar .ver{font-size:12px;color:var(--text3);background:var(--bg);padding:2px 8px;border-radius:10px}
+.topbar .spacer{flex:1}
+.host-badge{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);background:var(--bg);padding:5px 12px;border-radius:6px}
+.host-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--success)}
+.main{display:flex;flex:1;overflow:hidden}
+.sidebar{width:200px;background:var(--card);border-right:1px solid var(--border);padding:12px 8px;flex-shrink:0;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
+.menu-item{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:6px;cursor:pointer;color:var(--text2);transition:.15s;user-select:none;font-size:14px}
+.menu-item svg{width:17px;height:17px;flex-shrink:0}
+.menu-item:hover{background:var(--bg);color:var(--text1)}
+.menu-item.active{background:var(--primary-light);color:var(--primary);font-weight:500}
+.content{flex:1;overflow-y:auto;padding:20px 24px}
+.page{display:none}
+.page.active{display:block}
+.page-head{display:flex;align-items:center;margin-bottom:16px}
+.page-head h2{font-size:18px;font-weight:600}
+.page-head .sub{margin-left:12px;font-size:13px;color:var(--text3)}
+.page-head .spacer{flex:1}
+
+/* ===== 通用组件 ===== */
+.btn{border:none;border-radius:6px;padding:8px 16px;font-size:14px;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:hover:not(:disabled){background:var(--primary-hover)}
+.btn-danger-outline{background:var(--danger-light);color:var(--danger)}
+.btn-danger-outline:hover:not(:disabled){background:#FFD6D0}
+.btn-outline{background:var(--card);color:var(--text2);border:1px solid var(--border)}
+.btn-outline:hover:not(:disabled){border-color:var(--primary);color:var(--primary)}
+.btn-text{background:transparent;color:var(--primary);padding:6px 10px}
+.btn-text:hover{background:var(--primary-light)}
+.btn-sm{padding:5px 12px;font-size:13px}
+.card{background:var(--card);border-radius:var(--radius);border:1px solid var(--border);padding:16px;min-width:0;max-width:100%}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:10px;font-size:12px}
+.badge .dot{width:6px;height:6px;border-radius:50%}
+.badge-green{background:var(--success-light);color:var(--success)}.badge-green .dot{background:var(--success)}
+.badge-red{background:var(--danger-light);color:var(--danger)}.badge-red .dot{background:var(--danger)}
+.badge-orange{background:var(--warning-light);color:var(--warning)}.badge-orange .dot{background:var(--warning)}
+.badge-purple{background:var(--purple-light);color:var(--purple)}.badge-purple .dot{background:var(--purple)}
+.badge-blue{background:var(--primary-light);color:var(--primary)}.badge-blue .dot{background:var(--primary)}
+.badge-gray{background:var(--bg);color:var(--text3)}.badge-gray .dot{background:var(--text3)}
+.mono{font-family:"JetBrains Mono",Consolas,monospace}
+
+/* 列表行（仿 Docker 应用列表） */
+.rows{display:flex;flex-direction:column;gap:10px}
+.row{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 18px;display:flex;align-items:center;gap:14px;transition:.15s}
+/* flex 子项默认 min-width:auto 会按内容撑破卡片（窄屏按钮/文件列表被挤出屏幕），必须归零 */
+.row,.row>*{min-width:0}
+/* 垃圾清理分类卡片为纵向 flex 列，子项（标题行/工具条/文件列表）必须贴合卡片内容宽，否则在窄屏被内容撑破 */
+.cat-row>*{width:100%;max-width:100%}
+.row:hover{border-color:#B8CAFF;box-shadow:0 2px 8px rgba(22,93,255,.06)}
+.row .icon{width:42px;height:42px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.row .icon svg{width:22px;height:22px}
+.row .info{flex:1;min-width:0}
+.row .info .name{font-weight:600;font-size:14px;margin-bottom:3px;display:flex;align-items:center;gap:8px}
+.row .info .desc{font-size:12.5px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .meta{display:flex;align-items:center;gap:22px;flex-shrink:0}
+.row .meta .m{text-align:right}
+.row .meta .m .v{font-weight:600;font-size:15px}
+.row .meta .m .k{font-size:11px;color:var(--text3);margin-top:2px}
+.row .actions{flex-shrink:0;display:flex;gap:8px;margin-left:10px}
+
+/* 表格 */
+.tbl{width:100%;border-collapse:collapse;background:var(--card);border-radius:var(--radius);overflow:hidden;border:1px solid var(--border)}
+.tbl th{background:#F7F8FA;text-align:left;padding:11px 14px;font-size:13px;color:var(--text3);font-weight:500;border-bottom:1px solid var(--border);white-space:nowrap}
+.tbl td{padding:11px 14px;border-bottom:1px solid #F2F3F5;font-size:13.5px;vertical-align:middle}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tbody tr:hover{background:#FAFBFC}
+.empty{padding:48px 0;text-align:center;color:var(--text3)}
+.empty svg{width:44px;height:44px;color:#C9CDD4;margin-bottom:10px}
+
+/* 概览统计卡 */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;display:flex;gap:14px;align-items:center}
+.stat .s-icon{width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.stat .s-icon svg{width:22px;height:22px}
+.stat .s-v{font-size:19px;font-weight:700;line-height:1.2}
+.stat .s-k{font-size:12px;color:var(--text3);margin-top:3px}
+.bar{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;border-radius:4px;transition:width .4s}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+@media(max-width:1100px){.grid2{grid-template-columns:minmax(0,1fr)}}
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;max-width:100%;min-width:0;box-sizing:border-box}
+.card h3{font-size:14px;font-weight:600;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.card h3 .h-action{margin-left:auto}
+.kv{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F7F8FA;font-size:13.5px}
+.kv:last-child{border-bottom:none}
+.kv .k{color:var(--text3)}
+.kv .v{font-weight:500}
+/* 网络信息：网卡纵向列表（替代横滑表格），排列在网关信息之上 */
+.net-list{margin-bottom:10px}
+.net-block{padding:9px 0;border-bottom:1px solid #F7F8FA}
+.net-block:last-child{border-bottom:none}
+.net-detail{margin-top:5px;display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--text2);min-width:0}
+.net-detail span{display:inline-block;width:38px;color:var(--text3);flex-shrink:0}
+.net-detail div{display:flex;gap:8px;min-width:0;word-break:break-all}
+
+/* 过滤 chips */
+.chips{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.chip{padding:5px 14px;border-radius:6px;border:1px solid var(--border);background:var(--card);cursor:pointer;font-size:13px;color:var(--text2);transition:.15s}
+.chip:hover{border-color:var(--primary);color:var(--primary)}
+.chip.active{background:var(--primary-light);border-color:var(--primary);color:var(--primary);font-weight:500}
+
+/* 弹窗 */
+.modal-mask{position:fixed;inset:0;background:rgba(29,33,41,.45);display:none;align-items:center;justify-content:center;z-index:100}
+.modal-mask.show{display:flex}
+.modal{background:var(--card);border-radius:12px;width:520px;max-width:92vw;padding:22px 24px;box-shadow:0 8px 40px rgba(0,0,0,.16);max-height:88vh;overflow-y:auto}
+.modal h3{font-size:16px;margin-bottom:12px}
+.modal .body{font-size:13.5px;color:var(--text2);line-height:1.7;margin-bottom:18px}
+.modal .foot{display:flex;justify-content:flex-end;gap:10px}
+.modal .warn-box{background:var(--warning-light);border-radius:6px;padding:10px 12px;font-size:12.5px;color:var(--warning);margin:10px 0}
+
+/* 表单 */
+.form-row{margin-bottom:14px}
+.form-row label{display:block;font-size:13px;color:var(--text2);margin-bottom:6px;font-weight:500}
+.form-row .hint{font-size:12px;color:var(--text3);margin-top:4px}
+input[type=text],input[type=number],input[type=password],select,textarea{width:100%;padding:8px 11px;border:1px solid var(--border);border-radius:6px;font-size:13.5px;font-family:inherit;color:var(--text1);background:#fff;transition:.15s}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 2px var(--primary-light)}
+.field-check{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--text1);cursor:pointer;margin-bottom:10px}
+.field-check input{width:16px;height:16px}
+
+/* Toast */
+#toast{position:fixed;top:64px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:8px;align-items:center}
+.toast-item{background:var(--text1);color:#fff;padding:10px 18px;border-radius:8px;font-size:13.5px;box-shadow:0 4px 16px rgba(0,0,0,.2);animation:tin .25s;max-width:80vw}
+.toast-item.err{background:var(--danger)}
+.toast-item.good{background:var(--success)}
+@keyframes tin{from{opacity:0;transform:translateY(-8px)}to{opacity:1}}
+
+.spin{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite}
+.spin-dark{border:2px solid var(--border);border-top-color:var(--primary)}
+@keyframes sp{to{transform:rotate(360deg)}}
+.section-title{font-size:15px;font-weight:600;margin:22px 0 12px;display:flex;align-items:center;gap:8px}
+.section-title:first-of-type{margin-top:0}
+
+/* 垃圾清理文件清单 */
+.files-wrap{max-height:260px;overflow-y:auto;margin-top:10px;border:1px solid #F2F3F5;border-radius:6px;padding:4px}
+.file-line{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:4px;font-size:12.5px}
+.file-line:hover{background:var(--bg)}
+.file-line .fp{flex:1;min-width:0;font-family:Consolas,monospace;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-line .fs{color:var(--text3);flex-shrink:0}
+.file-line .fa{color:var(--text3);flex-shrink:0;width:54px;text-align:right}
+.cat-toolbar{display:flex;align-items:center;gap:12px;margin-top:10px;flex-wrap:wrap}
+.cat-toolbar>*{min-width:0}
+.cat-toolbar .sel-info{font-size:12.5px;color:var(--text3)}
+/* 进程管理（仿飞牛资源监控） */
+.proc-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.proc-toolbar input[type=text]{width:280px}
+.proc-toolbar .count{font-size:12.5px;color:var(--text3);margin-left:auto}
+.tbl th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+.tbl th.sortable:hover{color:var(--primary)}
+.tbl th .arr{font-size:10px;margin-left:3px;color:var(--primary)}
+.state-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.sd-run{background:var(--success)}.sd-sleep{background:#C9CDD4}.sd-wait{background:var(--warning)}.sd-stop{background:var(--warning)}.sd-zombie{background:var(--danger)}.sd-idle{background:#C9CDD4}.sd-dead{background:#C9CDD4}
+.cpu-hot{color:var(--danger);font-weight:600}.cpu-warm{color:var(--warning);font-weight:600}.cpu-mild{color:#FF7D00}
+/* 仪表盘网络紧凑行 */
+.net-line{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #F7F8FA;font-size:13px;flex-wrap:wrap}
+.net-line:last-child{border-bottom:none}
+.net-line .nm{font-family:Consolas,monospace;font-weight:600;min-width:72px}
+.net-line .ip{font-family:Consolas,monospace;color:var(--text2)}
+.net-line .rate{margin-left:auto;font-size:12px;color:var(--text3);white-space:nowrap}
+/* NAT 等级徽标 */
+.nat-lv{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:8px;font-size:13px;font-weight:600}
+.nat-lv1{background:var(--success-light);color:var(--success)}
+.nat-lv2{background:var(--primary-light);color:var(--primary)}
+.nat-lv3{background:var(--warning-light);color:var(--warning)}
+.nat-lv4{background:var(--danger-light);color:var(--danger)}
+/* NAT 优化建议 */
+.nat-tip{margin-top:10px;background:var(--primary-light);border:1px solid #94BFFF;border-radius:6px;padding:10px 12px;font-size:12.5px;line-height:1.65;color:#0E42D2}
+.nat-tip b{display:block;margin-bottom:3px}
+.nat-tip-warn{background:var(--warning-light);border-color:#FFD591;color:#7A3E00}
+/* ===== 手机端适配（飞牛 APP 内嵌 / 窄屏） ===== */
+@media(max-width:860px){
+  /* 顶栏精简：隐藏版本与主机名，省出宽度 */
+  .topbar{padding:0 12px;gap:8px;height:48px}
+  .topbar .title{font-size:15px}
+  .topbar .ver{display:none}
+  .host-badge{display:none}
+  /* 侧边栏 → 底部标签栏：固定 5 项宽度，多余项左右滑出（后期加菜单不用挤） */
+  .main{flex-direction:column}
+  .sidebar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:58px;flex-direction:row;padding:0 4px;border-right:none;border-top:1px solid var(--border);gap:0;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;z-index:60;background:var(--card);padding-bottom:env(safe-area-inset-bottom)}
+  .menu-item{flex:0 0 auto;width:calc(20% - 2px);min-width:74px;flex-direction:column;justify-content:center;gap:3px;padding:5px 4px;font-size:10px;border-radius:8px;text-align:center;letter-spacing:-.2px}
+  .menu-item svg{width:19px;height:19px}
+  .menu-item span,.menu-item{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .menu-item.active{background:var(--primary-light)}
+  /* 内容区为底栏让位 */
+  .content{padding:14px 12px 78px}
+  .page-head{flex-wrap:wrap;gap:4px 10px;margin-bottom:12px}
+  .page-head h2{font-size:17px}
+  .page-head .sub{margin-left:0;width:100%}
+  /* 卡片与网格 */
+  .card{padding:13px}
+  .card h3{flex-wrap:wrap;gap:8px 12px}
+  .card h3 .h-action{margin-left:0}
+  .grid2{gap:10px;grid-template-columns:minmax(0,1fr)}
+  .stats{grid-template-columns:1fr 1fr;gap:10px}
+  .stat{padding:12px;gap:9px}
+  .stat .s-icon{width:38px;height:38px;border-radius:9px}
+  .stat .s-v{font-size:15px}
+  .stat .s-k{font-size:11px}
+  /* 分类/列表行：元信息与按钮换行 */
+  .row{flex-wrap:wrap;padding:12px 14px;gap:10px;width:100%}
+  .row .meta{gap:12px;margin-left:0;width:auto;flex:0 1 auto;min-width:0;justify-content:space-between;flex-wrap:wrap}
+  .row .actions{margin-left:0}
+  .row .icon{width:38px;height:38px}
+  /* 进程工具条全宽 */
+  .proc-toolbar input[type=text]{width:100%}
+  .proc-toolbar .count{margin-left:0;width:100%}
+  /* 表格紧凑 */
+  .tbl th,.tbl td{padding:9px 10px;font-size:12.5px}
+  /* 弹窗全宽 */
+  .modal{width:92vw;padding:18px 16px}
+  /* 键值对保持同行（label 左 value 右），不再竖直堆叠 */
+  .kv{font-size:12.5px;padding:7px 0;flex-wrap:nowrap;gap:12px}
+  .kv .k{width:auto;flex-shrink:0}
+  .kv .v{flex:1 1 0%;min-width:0;text-align:right;word-break:break-all}
+  /* 网络信息纵向列表在小屏同样适用 */
+  .net-detail{font-size:11.5px}
+  .section-title{font-size:14px;margin:18px 0 10px}
+}
+</style>
+</head>
+<body>
+
+<div class="app" id="app">
+  <div class="topbar">
+    <img class="logo" src="data:image/png;base64,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">
+    <span class="title">X-Box</span>
+    <span class="ver" id="ver"></span>
+    <div class="spacer"></div>
+    <div class="host-badge"><span class="dot"></span><span id="hostname">—</span></div>
+  </div>
+  <div class="main">
+    <div class="sidebar" id="menu">
+      <div class="menu-item active" data-page="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+        仪表盘
+      </div>
+      <div class="menu-item" data-page="clean">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20l6-6M14 4l6 6-7 7-6-6 7-7z"/><path d="M8.5 15.5l3-3"/></svg>
+        垃圾清理
+      </div>
+      <div class="menu-item" data-page="ports">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 9h20M7 19v-5M12 19v-3M17 19v-7"/></svg>
+        端口管理
+      </div>
+      <div class="menu-item" data-page="procs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>
+        进程与服务
+      </div>
+      <div class="menu-item" data-page="autostart">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="6"/><path d="M12 8v4l3 2"/></svg>
+        开机自启
+      </div>
+      <div class="menu-item" data-page="ddns">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        DDNS服务
+      </div>
+      <div class="menu-item" data-page="proxy">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v4M16 3v4M4 7h16M4 7v13a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7"/><path d="M12 11v6M9 14h6"/></svg>
+        反向代理
+      </div>
+      <div class="menu-item" data-page="diskfix">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 12l7-4"/><circle cx="12" cy="12" r="2.5"/><path d="M4.5 19l2-2M19.5 19l-2-2"/></svg>
+        掉盘修复
+      </div>
+    </div>
+    <div class="content">
+
+      <!-- 仪表盘 -->
+      <div class="page active" id="page-overview">
+        <div class="page-head"><h2>仪表盘</h2><span class="sub" id="ov-updated"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadOverview()">刷新</button></div>
+        <div class="stats" id="ov-stats"></div>
+        <div class="grid2">
+          <div class="card">
+            <h3>🌐 网络信息</h3>
+            <div id="ov-net"><div class="empty" style="padding:24px 0">加载中…</div></div>
+          </div>
+          <div class="card">
+            <h3>🛰️ NAT 类型检测 <span class="h-action"><button class="btn btn-primary btn-sm" id="btn-nat" onclick="runNAT(true)">开始检测</button></span></h3>
+            <div id="nat-result"><div class="empty" style="padding:24px 0">进入仪表盘后自动探测（需 UDP 出站可达，约 5–10 秒）</div></div>
+          </div>
+        </div>
+        <div class="grid2" style="margin-top:14px">
+          <div class="card"><h3>💾 存储空间</h3><div id="ov-disks"></div><div id="ov-disktemps" style="border-top:1px solid #F7F8FA;padding-top:9px"></div></div>
+          <div class="card"><h3>ℹ️ 系统信息</h3><div id="ov-info"></div></div>
+        </div>
+      </div>
+
+      <!-- 垃圾清理 -->
+      <div class="page" id="page-clean">
+        <div class="page-head">
+          <h2>垃圾清理</h2><span class="sub" id="clean-sub">点击「开始扫描」获取可清理空间</span>
+          <div class="spacer"></div>
+          <button class="btn btn-primary" id="btn-scan" onclick="startScan()">开始扫描</button>
+        </div>
+        <div id="clean-total" class="card" style="display:none;margin-bottom:14px"></div>
+        <div class="rows" id="clean-rows">
+          <div class="empty" id="clean-empty">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+            <div>尚未扫描 · 白名单机制保证只清理可安全再生成的文件</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 端口 -->
+      <div class="page" id="page-ports">
+        <div class="page-head"><h2>端口管理</h2><span class="sub" id="ports-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadPorts()">刷新</button></div>
+        <div class="chips" id="port-chips">
+          <div class="chip active" data-f="all">全部</div>
+          <div class="chip" data-f="listen">监听中</div>
+          <div class="chip" data-f="public">对外暴露</div>
+        </div>
+        <div class="tblwrap"><table class="tbl"><thead><tr>
+          <th>协议</th><th>本地地址</th><th>远程地址</th><th>状态</th><th>进程</th><th>属主</th><th>暴露面</th>
+        </tr></thead><tbody id="ports-body"></tbody></table></div>
+      </div>
+
+      <!-- 进程服务 -->
+      <div class="page" id="page-procs">
+        <div class="page-head"><h2>进程与服务</h2><span class="sub" id="procs-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadProcs()">刷新</button></div>
+        <div class="card" style="margin-bottom:14px">
+          <h3>🧮 进程管理 <span class="h-action" style="font-size:12px;font-weight:400;color:var(--text3)">点击表头排序 · 风格对齐飞牛资源监控</span></h3>
+          <div class="proc-toolbar">
+            <input type="text" id="proc-search" placeholder="搜索进程名 / 用户 / PID / 命令行">
+            <span class="count" id="proc-count"></span>
+          </div>
+          <div class="tblwrap"><table class="tbl"><thead><tr>
+            <th class="sortable" data-k="pid">PID<span class="arr"></span></th>
+            <th class="sortable" data-k="name">进程名<span class="arr"></span></th>
+            <th class="sortable" data-k="user">用户<span class="arr"></span></th>
+            <th class="sortable" data-k="cpuPercent">CPU %<span class="arr"></span></th>
+            <th class="sortable" data-k="memKB">内存<span class="arr"></span></th>
+            <th class="sortable" data-k="state">状态<span class="arr"></span></th>
+            <th>运行时长</th>
+            <th style="text-align:right">操作</th>
+          </tr></thead><tbody id="proc-body"></tbody></table></div>
+        </div>
+        <div class="section-title">🧩 飞牛应用</div>
+        <div class="rows" id="apps-rows"></div>
+        <div class="section-title">🐳 Docker 容器</div>
+        <div id="docker-box"></div>
+        <div class="section-title">⚙️ 系统服务（systemd）</div>
+        <div class="chips" id="svc-chips">
+          <div class="chip active" data-s="all">全部</div>
+          <div class="chip" data-s="active">运行中</div>
+        </div>
+        <div class="tblwrap"><table class="tbl"><thead><tr><th>服务单元</th><th>状态</th><th>描述</th></tr></thead><tbody id="svc-body"></tbody></table></div>
+      </div>
+
+      <!-- 开机自启 -->
+      <div class="page" id="page-autostart">
+        <div class="page-head"><h2>开机自启</h2><span class="sub" id="autostart-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadAutostart()">刷新</button></div>
+        <div class="tblwrap"><table class="tbl"><thead><tr><th>名称</th><th>类型</th><th>状态</th><th>说明</th><th>来源</th></tr></thead><tbody id="autostart-body"></tbody></table></div>
+      </div>
+
+      <!-- DDNS -->
+      <div class="page" id="page-ddns">
+        <div class="page-head"><h2>DDNS 动态域名</h2><span class="sub" id="ddns-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadDDNS()">刷新</button></div>
+        <div class="card" style="margin-bottom:14px">
+          <h3>服务商 <span class="h-action"><button class="btn btn-primary btn-sm" onclick="openProviderForm(null)">+ 添加服务商</button></span></h3>
+          <table class="tbl"><thead><tr><th>名称</th><th>类型</th><th>凭据</th><th>操作</th></tr></thead><tbody id="ddns-providers"></tbody></table>
+        </div>
+        <div class="card">
+          <h3>解析记录 <span class="h-action"><button class="btn btn-primary btn-sm" onclick="openRecordForm(null)">+ 添加记录</button><button class="btn btn-outline btn-sm" style="margin-left:8px" onclick="syncAllDDNS()">立即全量同步</button></span></h3>
+          <table class="tbl"><thead><tr><th>域名</th><th>类型</th><th>IP 来源</th><th>当前值</th><th>状态</th><th>操作</th></tr></thead><tbody id="ddns-records"></tbody></table>
+        </div>
+      </div>
+
+      <!-- 反向代理 -->
+      <div class="page" id="page-proxy">
+        <div class="page-head"><h2>反向代理</h2><span class="sub" id="proxy-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadProxy()">刷新</button></div>
+        <div class="rows" id="proxy-rows">
+          <div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button></div>
+        </div>
+      </div>
+
+      <!-- 掉盘修复 -->
+      <div class="page" id="page-diskfix">
+        <div class="page-head"><h2>掉盘修复</h2><span class="sub" id="diskfix-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadDiskFix()">刷新</button></div>
+        <div class="card" style="margin-bottom:14px">
+          <h3>🔧 修复原理</h3>
+          <div style="font-size:13px;color:var(--text2);line-height:1.9">
+            <p><b>为什么会掉盘：</b>部分 NVMe（国产公方案高发）在空闲时自行进入 <b>D3cold 深度休眠</b>后唤不醒，PCIe 链路失去响应（内核日志报 <span class="mono">CSTS=0xffffffff / Unable to change power state from D3cold to D0</span>），盘从系统里消失，挂载它的存储空间显示「已损坏 / 缺失硬盘」。</p>
+            <p><b>本工具做什么：</b>对<b>你在下面列表中自选的盘</b>禁止进入 D3cold 深睡（写 <span class="mono">d3cold_allowed=0</span>）——掉盘的直接通道被关闭；<b>浅层省电（PS3/D3hot）保留</b>，盘仍可低功耗待机，只是不会再"睡死"。</p>
+            <p><b>生效方式：</b>设置<b>立即生效</b>，同时写入 udev 规则，<b>重启后依旧生效</b>；点「恢复深睡」即还原默认。已掉线的盘（红色标注）重启后即可恢复，建议恢复后先备份数据。</p>
+          </div>
+        </div>
+        <div class="rows" id="diskfix-rows"><div class="empty">加载中…</div></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="modal">
+  <div class="modal">
+    <h3 id="modal-title">确认</h3>
+    <div class="body" id="modal-body"></div>
+    <div class="foot">
+      <button class="btn btn-text" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary" id="modal-ok">确认</button>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+let portsData = [], procsData = [], servicesData = [], appsData = [], dockerData = [];
+let portFilter = 'all', svcFilter = 'all';
+let cleanData = null;
+let ddnsData = null;
+
+/* ---------- 工具 ---------- */
+async function api(path, opts = {}) {
+  // cache:'no-store'：APP 内嵌 WebView 可能缓存 GET 响应，导致 /api/temps 等实时接口拿到旧值（手机端与网页端"不同步"）
+  const r = await fetch(path, {cache:'no-store', ...opts, headers: {'Content-Type': 'application/json', ...(opts.headers||{})}});
+  // 非 2xx（如路由方法不匹配的 404 纯文本）直接给出可读错误，避免把 HTML/文本喂给 JSON.parse 产生晦涩报错
+  if (!r.ok) throw new Error('请求失败（HTTP '+r.status+'）');
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || '请求失败');
+  return j;
+}
+function fmtB(n){if(n==null||isNaN(n))return'—';if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<3);return n.toFixed(2)+' '+u[i]}
+function fmtKB(n){return fmtB(n*1024)}
+function baseDevName(dev){let b=String(dev||'').split('/').pop();if(/^(nvme|mmcblk)/.test(b))return b.replace(/p\d+$/,'');return b.replace(/\d+$/,'')}
+function fmtRate(bps){if(!bps||bps<=0)return '0 B/s';return fmtB(bps)+'/s'}
+function fmtUp(s){if(s==null)return'—';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+' 天 ':'')+h+' 小时 '+m+' 分'}
+function esc(s){return (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function toast(msg, cls=''){const t=document.createElement('div');t.className='toast-item '+cls;t.textContent=msg;document.getElementById('toast').appendChild(t);setTimeout(()=>t.remove(),3600)}
+
+/* ---------- 通用弹窗 ---------- */
+function closeModal(){document.getElementById('modal').classList.remove('show');document.getElementById('modal-ok').onclick=null}
+function confirmDialog(title, bodyHTML, onOK, okText){
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = bodyHTML;
+  const okBtn = document.getElementById('modal-ok');
+  okBtn.textContent = okText||'确认';
+  okBtn.onclick = () => { closeModal(); onOK(); };
+  document.getElementById('modal').classList.add('show');
+}
+document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
+
+/* ---------- 导航 ---------- */
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, proxy:loadProxy, diskfix:loadDiskFix}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫
+document.getElementById('menu').addEventListener('click', e => {
+  const item = e.target.closest('.menu-item'); if(!item) return;
+  document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  item.classList.add('active');
+  const page = item.dataset.page;
+  document.getElementById('page-'+page).classList.add('active');
+  (loaders[page]||(()=>{}))();
+});
+
+/* ---------- 仪表盘 ---------- */
+async function loadOverview(){
+  try{
+    const j = await api('/api/overview');
+    document.getElementById('hostname').textContent = j.hostname||'—';
+    document.getElementById('ver').textContent = 'v'+j.version;
+    const memUsed = j.memTotalKB - j.memAvailKB, memPct = j.memTotalKB>0 ? (memUsed/j.memTotalKB*100).toFixed(1) : '0';
+    document.getElementById('ov-updated').textContent = '更新于 '+new Date().toLocaleTimeString();
+    const _tmp = j.temps||{};
+    const cpuTempHtml = _tmp.cpuMax>0
+      ? ` · <span id="stat-cpu-temp" style="font-size:14px;color:${_tmp.cpuMax>=80?'var(--danger)':_tmp.cpuMax>=65?'var(--warning)':'var(--success)'}">🌡️ ${_tmp.cpuMax.toFixed(1)}°C</span>`
+      : ' · <span id="stat-cpu-temp">🌡️ —</span>';
+    document.getElementById('ov-stats').innerHTML = `
+      <div class="stat"><div class="s-icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></div><div><div class="s-v">${j.cpuCores||'?'} 核${cpuTempHtml}</div><div class="s-k">${esc(j.cpuModel||'CPU').slice(0,26)} · 负载 ${(j.load1??0).toFixed(2)}</div></div></div>
+      <div class="stat"><div class="s-icon" style="background:var(--success-light);color:var(--success)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16M9 13h6"/></svg></div><div style="flex:1"><div class="s-v">${fmtKB(memUsed)} <span style="font-size:12px;color:var(--text3);font-weight:400">/ ${fmtKB(j.memTotalKB)}</span></div><div class="s-k">内存 ${memPct}%</div><div class="bar"><i style="width:${memPct}%;background:var(--success)"></i></div></div></div>
+      <div class="stat"><div class="s-icon" style="background:var(--warning-light);color:var(--warning)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 2v10l7 5"/></svg></div><div><div class="s-v">${fmtUp(j.uptimeSeconds)}</div><div class="s-k">已运行 · 内核 ${esc(j.kernel||'')}</div></div></div>
+      <div class="stat"><div class="s-icon" style="background:var(--purple-light);color:var(--purple)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg></div><div><div class="s-v">${j.listeningPorts??'—'} <span style="font-size:12px;color:var(--text3);font-weight:400">/ ${j.publicPorts??'—'} 对外</span></div><div class="s-k">监听端口 / 公网暴露</div></div></div>`;
+    document.getElementById('ov-disks').innerHTML = (j.disks||[]).map(d=>{
+      const used = d.totalKB - d.availKB, pct = d.totalKB>0 ? (used/d.totalKB*100).toFixed(1) : '0';
+      const color = pct>90?'var(--danger)':pct>75?'var(--warning)':'var(--primary)';
+      // 磁盘行内不再显示温度（部分盘读不到会导致各行不对齐），统一看存储卡底部温度汇总行
+      return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ${esc(d.fsType)}</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
+    }).join('') || '<div class="empty">未检测到磁盘</div>';
+    document.getElementById('ov-disktemps').innerHTML = renderDiskTemps(_tmp);
+    document.getElementById('ov-info').innerHTML = [
+      ['主机名', j.hostname],['操作系统', j.os],['CPU', `${j.cpuModel} × ${j.cpuCores} 核`],
+      ['内核', j.kernel],['监听端口', `${j.listeningPorts} 个（公网暴露 ${j.publicPorts} 个）`],
+      ['X-Box 版本', 'v'+j.version],
+    ].map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v" style="max-width:60%;text-align:right;word-break:break-all">${esc(v??'—')}</span></div>`).join('');
+    document.getElementById('ov-net').innerHTML = renderNet(j.net);
+    if(!natLoaded) runNAT(false); // 首次进入仪表盘自动探测 NAT，之后沿用结果不重复探测
+    startTempLoop(); // 温度 5s 动态刷新（幂等）
+  }catch(e){ toast(e.message,'err'); }
+}
+
+/* ---------- 温度动态刷新（/api/temps 5s 轮询，仅局部更新温度节点，不重建整页） ---------- */
+function tempColor(t){ return t>=80?'var(--danger)':t>=65?'var(--warning)':t>=55?'#F53F3F':t>=45?'var(--warning)':'var(--success)'; }
+// CPU 统计卡用 80/65 阈值，硬盘用 55/45，统一走 tempColor（重叠段取更严的）
+function renderDiskTemps(temps){
+  const disks = (temps||{}).disks||[];
+  if(!disks.length) return '<div style="font-size:12.5px;color:var(--text3)">硬盘温度：暂无可用传感器（部分硬盘需 smartctl 支持）</div>';
+  return '<div style="display:flex;flex-wrap:wrap;gap:8px 16px;font-size:12.5px;color:var(--text2)">' +
+    disks.map(d=>`<span title="${esc(d.note||d.source||'')}">盘 ${esc(d.device)}：<b id="disk-temp-all-${esc(d.device)}" style="color:${d.tempC>0?tempColor(d.tempC):'var(--text3)'}">${d.tempC>0?d.tempC.toFixed(1)+'°C':'—'}</b>${d.mount?`<span style="color:var(--text3)">（${esc(d.mount)}）</span>`:''}</span>`).join('') +
+    '</div>';
+}
+function applyTemps(t){
+  const cpuEl = document.getElementById('stat-cpu-temp');
+  const cpuMax = (t||{}).cpuMax||0;
+  if(cpuEl){
+    if(cpuMax>0){ cpuEl.style.color = tempColor(cpuMax); cpuEl.style.fontSize='14px'; cpuEl.textContent = '🌡️ '+cpuMax.toFixed(1)+'°C'; }
+    else cpuEl.textContent = '🌡️ —';
+  }
+  const disks = (t||{}).disks||[];
+  // 存储卡底部汇总行
+  const dtEl = document.getElementById('ov-disktemps');
+  if(dtEl) dtEl.innerHTML = renderDiskTemps(t);
+  // 挂载行内的温度 span（id 与 device 对应）
+  disks.forEach(d=>{
+    const el = document.getElementById('disk-temp-'+d.device);
+    if(el && d.tempC>0){ el.style.color = tempColor(d.tempC); el.textContent = '🌡️ '+d.tempC.toFixed(1)+'°C'; }
+    const el2 = document.getElementById('disk-temp-all-'+d.device);
+    if(el2){ if(d.tempC>0){ el2.style.color=tempColor(d.tempC); el2.textContent=d.tempC.toFixed(0)+'°C'; } else el2.textContent='—'; }
+  });
+}
+let tempsTimerStarted = false, tempsTimer = null;
+function startTempLoop(){
+  if(tempsTimerStarted) return;
+  tempsTimerStarted = true;
+  const tick = async ()=>{
+    clearTimeout(tempsTimer);
+    try{ const t = await api('/api/temps'); applyTemps(t); }catch(e){}
+    tempsTimer = setTimeout(tick, 3000); // 3s 与后端缓存同频，手机端网页端刷新一致
+  };
+  tempsTimer = setTimeout(tick, 3000); // boot 后 3s 首刷，不依赖 loadOverview 是否成功
+  // 从后台/其他页面切回时立刻刷新（APP WebView 后台会挂起定时器，回来时补偿一次）
+  if(typeof document!=='undefined' && document.addEventListener){
+    document.addEventListener('visibilitychange', ()=>{
+      if(!document.hidden){ clearTimeout(tempsTimer); tick(); }
+    });
+  }
+}
+function renderNet(net){
+  if(!net || !net.ifaces) return '<div class="empty">无网络信息</div>';
+  // 仅展示使用中的网口：已启用、持有 IPv4、非虚拟网卡（docker/veth/br- 等）
+  const virtual = /^(lo|docker\d*|veth.*|br-.*|virbr.*|dummy.*|tun.*|tap.*|sit.*|gre.*|teql.*|ifb.*|bonding_masters)$/;
+  const used = net.ifaces.filter(f=>f.up && (f.ipv4||[]).length>0 && !virtual.test(f.name));
+  // 网卡信息用纵向列表逐项展示（不横滑），排列在网关信息之上
+  const lines = used.map(f=>{
+    const ip4 = (f.ipv4||[]).join('、') || '—';
+    const ip6 = (f.ipv6||[]).join('、') || '—';
+    const tag = f.isDefault ? '<span class="badge badge-blue" style="margin-left:6px"><span class="dot"></span>默认路由</span>' : '';
+    return `<div class="net-block">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span style="font-weight:600" class="mono">${esc(f.name)}${tag}</span>
+        <span style="font-size:12px;color:var(--text2);white-space:nowrap">↓${fmtRate(f.rxRate)} ↑${fmtRate(f.txRate)}</span>
+      </div>
+      <div class="net-detail">
+        <div><span>IPv4</span>${ip4}</div>
+        <div><span>IPv6</span>${ip6}</div>
+        <div><span>MAC</span>${esc(f.mac||'—')}</div>
+      </div>
+    </div>`;
+  }).join('');
+  const gw = `<div class="kv"><span class="k">IPv4 网关</span><span class="v mono">${esc(net.gateway||'—')}</span></div>
+    <div class="kv"><span class="k">IPv6 网关</span><span class="v mono">${esc(net.gateway6||'—')}</span></div>
+    <div class="kv"><span class="k">DNS</span><span class="v mono" style="word-break:break-all">${esc((net.dns||[]).join(', ')||'—')}</span></div>`;
+  return (used.length ? `<div class="net-list">${lines}</div>` : '<div class="empty" style="padding:18px 0">未检测到使用中的网口</div>') + gw;
+}
+let natLoaded = false, natRunning = false, natTipTimer = null;
+async function runNAT(force){
+  if(natLoaded && !force) return;   // 已有结果沿用，不重复探测
+  if(natRunning) return;            // 探测中（探测要连发多个 STUN 请求，可能 10 秒+），忽略重复触发，避免并发返回互相覆盖
+  natRunning = true;
+  const box = document.getElementById('nat-result');
+  const natBtn = document.getElementById('btn-nat');
+  if(natBtn){ natBtn.disabled = true; natBtn.innerHTML = '<span class="spin spin-dark" style="width:12px;height:12px"></span> 探测中'; } // 探测可达 10s+，必须给状态否则像"无反应"
+  const keep = force && natLoaded;  // 手动重测时保留旧结果避免闪烁，探测完成后再整体替换
+  if(!keep) box.innerHTML = '<div class="empty"><span class="spin spin-dark"></span> 正在探测 STUN / 公网 IP…</div>';
+  try{
+    const j = await api('/api/nat'+(force?'?force=1':''));
+    natLoaded = true;
+    const n = j.nat || {};
+    const lv = n.natLevel||0;
+    const lvCls = (lv>=1&&lv<=4) ? 'nat-lv nat-lv'+lv : 'badge badge-gray';
+    const lvTxt = n.natLevelText || n.typeText || '—';
+    const cgTxt = n.cgnat
+      ? '<span class="badge badge-orange"><span class="dot"></span>CGNAT</span>'
+      : '<span class="badge badge-green"><span class="dot"></span>非 CGNAT</span>';
+    box.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+        <span class="${lvCls}">${esc(lvTxt)}</span>
+        ${n.publicIP?`<span class="mono" style="font-weight:600">${esc(n.publicIP)}:${n.publicPort}</span>`:''}
+        ${cgTxt}
+      </div>
+      <div class="kv"><span class="k">NAT 等级</span><span class="v" style="font-weight:700">${lv?('NAT'+lv):'—'}</span></div>
+      <div class="kv"><span class="k">P2P 建议</span><span class="v" style="text-align:right;max-width:65%">${esc(n.p2pNote||'—')}</span></div>
+      <div class="kv"><span class="k">探测说明</span><span class="v" style="text-align:right;max-width:65%;font-weight:400;color:var(--text2)">${esc(n.detail||'—')}</span></div>
+      <div class="kv"><span class="k">检测时间</span><span class="v">${esc(n.testedAt||'')}</span></div>
+      ${(lv&&lv!==1&&n.optimize)?`<div class="nat-tip${lv>=3?' nat-tip-warn':''}" id="nat-tip-box"><b>优化建议</b>${esc(n.optimize)}</div>`:''}`;
+    // 优化建议显示 5 秒后淡出消失（用户要求：不常驻占屏）
+    const tip = document.getElementById('nat-tip-box');
+    if(tip){
+      clearTimeout(natTipTimer);
+      natTipTimer = setTimeout(()=>{
+        tip.style.transition = 'opacity .6s'; tip.style.opacity = '0';
+        setTimeout(()=>tip.remove(), 650);
+      }, 5000);
+    }
+  }catch(e){ natLoaded = true; box.innerHTML = '<div class="empty">检测失败：'+esc(e.message)+'<div style="margin-top:8px"><button class="btn btn-outline btn-sm" onclick="runNAT(true)">重试</button></div></div>'; }
+  finally{
+    natRunning = false;
+    if(natBtn){ natBtn.disabled = false; natBtn.textContent = '重新检测'; }
+  }
+}
+
+/* ---------- 垃圾清理（可选文件） ---------- */
+const CAT_ICON = {aptCache:'📦','apt-cache':'📦','log-rotated':'📋',journal:'🧾','tmp':'🗑️',crash:'💥','appdata-logs':'📄','appdata-tmp':'📁',thumbnails:'🖼️'};
+const CAT_COLOR = {aptCache:'#165DFF','apt-cache':'#165DFF','log-rotated':'#722ED1',journal:'#722ED1','tmp':'#FF7D00',crash:'#F53F3F','appdata-logs':'#165DFF','appdata-tmp':'#14C9C9',thumbnails:'#722ED1'};
+async function startScan(){
+  const btn = document.getElementById('btn-scan');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 扫描中…';
+  try{
+    cleanData = await api('/api/scan');
+    renderClean();
+    toast(`扫描完成：可清理 ${fmtB(cleanData.totalBytes)}（${cleanData.durationMs} ms）`,'good');
+  }catch(e){ toast(e.message,'err'); }
+  btn.disabled = false; btn.textContent = '开始扫描';
+}
+function catCardHTML(c){
+  const hasPaths = (c.paths||[]).length>0;
+  const disabled = !hasPaths || !c.files;
+  const safeBadge = c.safe ? '<span class="badge badge-green"><span class="dot"></span>安全</span>' : '<span class="badge badge-orange"><span class="dot"></span>需注意</span>';
+  const sizeV = !hasPaths ? '—' : (c.files>0? fmtB(c.bytes) : '0 B');
+  const filesV = !hasPaths ? '—' : String(c.files||0);
+  const paths = (c.paths||[]).slice(0,3).join('  ');
+  const files = (c.fileList||[]);
+  const fileRows = files.map(f=>`<label class="file-line"><input type="checkbox" class="file-cb" data-cat="${esc(c.id)}" data-path="${esc(f.path)}"><span class="fp" title="${esc(f.path)}">${esc(f.path)}</span><span class="fs">${fmtB(f.size)}</span><span class="fa">${f.ageDays}天</span></label>`).join('');
+  return `<div class="row cat-row" style="align-items:stretch;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div class="icon" style="background:${CAT_COLOR[c.id]||'#165DFF'}18;font-size:20px">${CAT_ICON[c.id]||'🧹'}</div>
+      <div class="info">
+        <div class="name">${esc(c.name)} ${safeBadge}${hasPaths?'':'<span class="badge badge-gray"><span class="dot"></span>本机无相关目录</span>'}</div>
+        <div class="desc" title="${esc(paths)}">${esc(c.desc)}${c.skipNote?' · '+esc(c.skipNote):''}${paths?`<br><span class="mono" style="font-size:11px">${esc(paths)}</span>`:''}</div>
+      </div>
+      <div class="meta">
+        <div class="m"><div class="v">${sizeV}</div><div class="k">可释放</div></div>
+        <div class="m"><div class="v">${filesV}</div><div class="k">文件数</div></div>
+        <div class="m"><div class="v">${c.minAgeDays>0?'≥'+c.minAgeDays+' 天':'不限'}</div><div class="k">年龄阈值</div></div>
+      </div>
+    </div>
+    <div class="cat-toolbar">
+      <label class="field-check" style="margin:0"><input type="checkbox" class="all-cb" data-cat="${esc(c.id)}"> 全选</label>
+      <span class="sel-info" id="sel-info-${esc(c.id)}">未选择文件</span>
+      <div style="flex:1"></div>
+      <button class="btn btn-outline btn-sm" id="btn-sel-${esc(c.id)}" ${disabled?'disabled':''} onclick="cleanSelected('${esc(c.id)}')">清理所选</button>
+      <button class="btn btn-danger-outline btn-sm" ${disabled?'disabled':''} onclick="askCleanAll('${esc(c.id)}','${esc(c.name)}',${c.files},'${fmtB(c.bytes)}',${c.safe})">全清</button>
+    </div>
+    ${files.length?`<div class="files-wrap" id="clean-files-${esc(c.id)}">${fileRows}</div>`:(disabled?'':'<div class="empty" style="padding:16px 0">该分类暂无超过年龄阈值的文件</div>')}
+    ${c.listNote?`<div style="font-size:11.5px;color:var(--text3);padding-top:4px">${esc(c.listNote)}</div>`:''}
+  </div>`;
+}
+function renderClean(){
+  if(!cleanData) return;
+  const el = document.getElementById('clean-rows');
+  // clean-empty 是 clean-rows 的子元素，首次 renderClean 的 innerHTML 覆盖会把它移除，
+  // 第二次起必须判空（否则 null.style 崩溃、列表渲染中断）
+  const emptyEl = document.getElementById('clean-empty');
+  if(emptyEl) emptyEl.style.display='none';
+  document.getElementById('clean-sub').textContent = `扫描于 ${cleanData.scannedAt} · 共 ${cleanData.totalFiles} 个文件 · ${fmtB(cleanData.totalBytes)}`;
+  const total = document.getElementById('clean-total');
+  total.style.display='block';
+  total.innerHTML = `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><div style="font-size:15px;font-weight:600">可清理合计：<span style="color:var(--primary)">${fmtB(cleanData.totalBytes)}</span>（${cleanData.totalFiles} 个文件）</div><div style="font-size:12.5px;color:var(--text3)">勾选文件后可选择性清理；所有删除仅限白名单目录中的普通文件，且清理时逐条复核年龄</div></div>`;
+  // 逐卡独立解析：每张卡单独 innerHTML 再挂载，单卡解析异常不会吞掉其他分类；
+  // 渲染计数写入副标题自证（若与后端分类数不符，一眼可见）
+  el.innerHTML = '';
+  const cats = cleanData.categories||[];
+  cats.forEach(c=>{
+    const holder = document.createElement('div');
+    try{ holder.innerHTML = catCardHTML(c); }catch(e){ holder.textContent = '⚠️ 分类「'+(c.name||c.id)+'」渲染失败: '+e.message; }
+    el.appendChild(holder.firstElementChild || holder);
+  });
+  const rendered = (el.querySelectorAll ? el.querySelectorAll('.cat-row').length : cats.length);
+  const sub = document.getElementById('clean-sub');
+  sub.textContent += ` · 已加载 ${rendered}/${cats.length} 类`;
+  // 绑定文件勾选联动
+  document.querySelectorAll('.file-cb').forEach(cb=>{
+    cb.addEventListener('change', ()=>updateSelInfo(cb.dataset.cat));
+  });
+  document.querySelectorAll('.all-cb').forEach(cb=>{
+    cb.addEventListener('change', ()=>{
+      const cat = cb.dataset.cat;
+      document.querySelectorAll(`#clean-files-${cat} .file-cb`).forEach(f=>f.checked=cb.checked);
+      updateSelInfo(cat);
+    });
+  });
+  cats.forEach(c=>updateSelInfo(c.id)); // 初始化各分类「清理所选」按钮可用状态
+}
+function updateSelInfo(cat){
+  const n = document.querySelectorAll(`#clean-files-${cat} .file-cb:checked`).length;
+  const el = document.getElementById('sel-info-'+cat);
+  if(el) el.textContent = n>0 ? `已选择 ${n} 个文件` : '未选择文件';
+  const btn = document.getElementById('btn-sel-'+cat);
+  if(btn) btn.disabled = n===0; // 未勾选文件时禁用，勾选后可用
+}
+function collectSelected(cat){
+  return [...document.querySelectorAll(`#clean-files-${cat} .file-cb:checked`)].map(cb=>cb.dataset.path);
+}
+function cleanSelected(cat){
+  const paths = collectSelected(cat);
+  if(!paths.length){ toast('请先勾选要清理的文件','err'); return; }
+  confirmDialog('确认清理所选文件', `即将删除 <b>${paths.length}</b> 个文件。此操作不可恢复，且清理时仍会逐条复核白名单与年龄阈值。`, async ()=>{
+    try{
+      const j = await api('/api/clean',{method:'POST',body:JSON.stringify({category:cat, paths})});
+      toast(`已清理 ${j.files} 个文件，释放 ${j.freedText}`, j.failures&&j.failures.length?'':'good');
+      if(j.failures && j.failures.length) console.warn('清理失败项:', j.failures);
+      startScanSilent();
+    }catch(e){ toast(e.message,'err'); }
+  });
+}
+function askCleanAll(id,name,files,size,safe){
+  confirmDialog('确认全清「'+name+'」',
+    `即将删除该分类 <b>${files}</b> 个文件，预计释放 <b style="color:var(--primary)">${size}</b>。` +
+    (safe ? '<div class="warn-box">该分类内容均可自动再生成，删除不影响系统与应用运行。</div>'
+          : '<div class="warn-box">该分类标记为「需注意」：删除后短期内（如缩略图重建期间）相关功能体验会略慢，确认无碍后继续。</div>'),
+    async ()=>{
+      try{
+        const j = await api('/api/clean',{method:'POST',body:JSON.stringify({category:id})});
+        toast(`已清理 ${j.files} 个文件，释放 ${j.freedText}`, j.failures&&j.failures.length?'':'good');
+        if(j.failures && j.failures.length) console.warn('清理失败项:', j.failures);
+        startScanSilent();
+      }catch(e){ toast(e.message,'err'); }
+    });
+}
+async function startScanSilent(){
+  try{ cleanData = await api('/api/scan'); renderClean(); }
+  catch(e){
+    // 自动扫描失败不能静默：页面给出可见错误，避免"按钮点了没反应"的观感
+    toast('扫描失败：'+e.message,'err');
+    const em = document.getElementById('clean-empty');
+    if(em){ em.style.display='block'; em.innerHTML = `<div style="color:var(--danger);font-size:13px">扫描失败：${esc(e.message)}</div><div style="margin-top:8px"><button class="btn btn-outline btn-sm" onclick="startScanSilent()">重试</button></div>`; }
+  }
+}
+
+/* ---------- 端口 ---------- */
+async function loadPorts(){
+  try{
+    const j = await api('/api/ports');
+    portsData = j.ports||[];
+    document.getElementById('ports-sub').textContent = `监听 ${j.listeners} 个 · 对外暴露 ${j.public} 个`;
+    renderPorts();
+  }catch(e){ toast(e.message,'err'); }
+}
+document.getElementById('port-chips').addEventListener('click',e=>{
+  const c = e.target.closest('.chip'); if(!c) return;
+  document.querySelectorAll('#port-chips .chip').forEach(x=>x.classList.remove('active'));
+  c.classList.add('active'); portFilter = c.dataset.f; renderPorts();
+});
+function renderPorts(){
+  const rows = portsData.filter(p =>
+    portFilter==='all' || (portFilter==='listen' && p.state==='LISTEN') || (portFilter==='public' && p.state==='LISTEN' && p.exposure==='public'));
+  document.getElementById('ports-body').innerHTML = rows.map(p=>{
+    const ex = {public:['badge-red','对外暴露'],lan:['badge-blue','局域网'],local:['badge-gray','仅本机']}[p.exposure]||['badge-gray',p.exposure];
+    const st = p.state==='LISTEN'?'badge-green':(p.state==='ESTABLISHED'?'badge-blue':'badge-gray');
+    return `<tr>
+      <td><span class="badge badge-purple">${p.proto.toUpperCase()}</span></td>
+      <td class="mono" style="font-weight:600">${esc(p.local)}</td>
+      <td class="mono" style="color:var(--text3)">${esc(p.remote||'—')}</td>
+      <td><span class="badge ${st}"><span class="dot"></span>${esc(p.state)}</span></td>
+      <td>${esc(p.process)}${p.pid?` <span style="color:var(--text3);font-size:12px">(${p.pid})</span>`:''}</td>
+      <td>${esc(p.user)}</td>
+      <td><span class="badge ${ex[0]}"><span class="dot"></span>${ex[1]}</span></td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="7"><div class="empty">无匹配端口</div></td></tr>`;
+}
+
+/* ---------- 掉盘修复（NVMe D3cold 深睡开关） ---------- */
+async function loadDiskFix(){
+  try{
+    const j = await api('/api/nvme-sleep');
+    renderDiskFix(j.disks||[]);
+  }catch(e){ toast(e.message,'err'); document.getElementById('diskfix-rows').innerHTML = '<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+}
+function renderDiskFix(disks){
+  const el = document.getElementById('diskfix-rows');
+  document.getElementById('diskfix-sub').textContent = disks.length ? `${disks.length} 块 NVMe · 掉线 ${disks.filter(d=>d.down).length} 块` : '';
+  if(!disks.length){ el.innerHTML = '<div class="empty">未检测到 NVMe 硬盘</div>'; return; }
+  el.innerHTML = disks.map(d=>{
+    const banned = d.deepBanned || d.d3coldOk==='0';
+    const stateBadge = d.down
+      ? '<span class="badge badge-red"><span class="dot"></span>已掉线</span>'
+      : '<span class="badge badge-green"><span class="dot"></span>正常</span>';
+    const d3Txt = d.d3coldOk==='0' ? '已禁深睡' : d.d3coldOk==='1' ? '允许深睡' : '—';
+    const btn = banned
+      ? `<button class="btn btn-outline btn-sm" onclick="setDiskSleep('${esc(d.pciAddr)}',false,'${esc(d.name)}')">恢复深睡</button>`
+      : `<button class="btn btn-danger-outline btn-sm" onclick="setDiskSleep('${esc(d.pciAddr)}',true,'${esc(d.name)}')">禁止深睡</button>`;
+    return `<div class="row" style="${d.down?'border-color:var(--danger);background:var(--danger-light)':''}">
+      <div class="icon" style="background:${d.down?'var(--danger)':'var(--primary)'}18;font-size:20px">${d.down?'⚠️':'💽'}</div>
+      <div class="info">
+        <div class="name">${esc(d.name)} ${stateBadge}</div>
+        <div class="desc mono" style="font-size:11.5px">${esc(d.model||'未知型号')} · ${esc(d.sizeText||'—')}${d.mount?' · '+esc(d.mount):''}<br>PCI ${esc(d.pciAddr||'—')} · 深睡状态：${d3Txt}${d.down?' · 控制器 '+esc(d.state)+'，重启后恢复':''}</div>
+      </div>
+      <div class="actions">${btn}</div>
+    </div>`;
+  }).join('');
+}
+async function setDiskSleep(pci, enable, name){
+  const act = enable ? '禁止该盘 D3cold 深睡' : '恢复该盘 D3cold 深睡';
+  confirmDialog('确认操作', `${act}（<b>${esc(name)}</b>）？<div class="warn-box">${enable?'禁止后该盘不再进入 D3cold 深睡（掉盘元凶），浅层省电保留；设置立即生效并写入 udev 规则，重启后依旧生效。':'恢复后该盘可自由进入 D3cold 深睡，若该盘存在 D3cold 唤不醒缺陷，可能再次掉盘。'}</div>`, async ()=>{
+    try{
+      const j = await api('/api/nvme-sleep',{method:'POST',body:JSON.stringify({pci, enable})});
+      toast(j.message||'已设置','good');
+      loadDiskFix();
+    }catch(e){ toast(e.message,'err'); }
+  }, '确认');
+}
+
+/* ---------- 进程服务（风格对齐飞牛资源监控） ---------- */
+async function loadProcs(){
+  try{
+    const [p, s] = await Promise.all([api('/api/processes'), api('/api/services')]);
+    procsData = p.processes||[];
+    servicesData = s.services||[];
+    appsData = s.apps||[];
+    dockerData = s.docker||[];
+    document.getElementById('procs-sub').textContent = `${p.processCount||procsData.length} 个进程 · ${servicesData.length} 个服务单元 · ${appsData.length} 个应用`;
+    renderApps(); renderDocker(); renderServices(); renderProcs();
+  }catch(e){ toast(e.message,'err'); }
+  startProcsRefresh(); // CPU 占用率实时刷新
+}
+// 进程页可见期间每 3s 重取进程数据（后端每次请求内做 250ms 双采样，CPU% 为实时值）；
+// 服务/应用/容器变化慢，15s 一次。搜索词与排序列均为全局状态，重渲染自动保留。
+let procsRefreshTimer = null, svcRefreshTick = 0;
+function startProcsRefresh(){
+  if(procsRefreshTimer) return;
+  procsRefreshTimer = setInterval(async ()=>{
+    const page = document.getElementById('page-procs');
+    if(!page || !page.classList.contains('active')) return; // 不在进程页不请求
+    try{
+      const p = await api('/api/processes');
+      procsData = p.processes||[];
+      renderProcs();
+      if(++svcRefreshTick % 5 === 0){
+        const s = await api('/api/services');
+        servicesData = s.services||[]; appsData = s.apps||[]; dockerData = s.docker||[];
+        renderApps(); renderDocker(); renderServices();
+      }
+    }catch(e){}
+  }, 3000);
+}
+function renderApps(){
+  const el = document.getElementById('apps-rows');
+  el.innerHTML = appsData.map(a=>`<div class="row" style="padding:11px 18px">
+    <div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+    <div class="info"><div class="name">${esc(a.name)}</div><div class="desc mono" style="font-size:11.5px">${esc(a.path)}</div></div>
+    ${a.running?`<span class="badge badge-green"><span class="dot"></span>运行中</span><span style="font-size:12px;color:var(--text3)">PID ${(a.pids||[]).join(', ')}</span>`:'<span class="badge badge-gray"><span class="dot"></span>未运行</span>'}
+  </div>`).join('') || '<div class="empty">未检测到应用数据目录</div>';
+}
+function renderDocker(){
+  const el = document.getElementById('docker-box');
+  if(dockerData===null || dockerData.length===0){
+    el.innerHTML = `<table class="tbl"><tbody><tr><td><div class="empty" style="padding:26px 0">${dockerData===null?'未安装 Docker 或无法连接':'没有运行中的容器'}</div></td></tr></tbody></table>`;
+    return;
+  }
+  el.innerHTML = `<table class="tbl"><thead><tr><th>容器名</th><th>镜像</th><th>状态</th><th>端口</th></tr></thead><tbody>` +
+    dockerData.map(c=>`<tr><td class="mono" style="font-weight:600">${esc(c.names)}</td><td class="mono" style="color:var(--text3)">${esc(c.image)}</td><td><span class="badge ${c.status&&c.status.startsWith('Up')?'badge-green':'badge-gray'}"><span class="dot"></span>${esc(c.status)}</span></td><td class="mono" style="font-size:12px">${esc(c.ports||'—')}</td></tr>`).join('') + '</tbody></table>';
+}
+const SVC_STATE = {active:['badge-green','运行中'],inactive:['badge-gray','已停止'],failed:['badge-red','失败'],enabled:['badge-green','已启用'],disabled:['badge-gray','已禁用'],managed:['badge-blue','由飞牛管理'],'n/a':['badge-gray','不适用']};
+document.getElementById('svc-chips').addEventListener('click',e=>{
+  const c = e.target.closest('.chip'); if(!c) return;
+  document.querySelectorAll('#svc-chips .chip').forEach(x=>x.classList.remove('active'));
+  c.classList.add('active'); svcFilter = c.dataset.s; renderServices();
+});
+function renderServices(){
+  const rows = servicesData.filter(x => svcFilter==='all' || x.active===svcFilter);
+  document.getElementById('svc-body').innerHTML = rows.map(x=>{
+    const m = SVC_STATE[x.active]||['badge-gray',esc(x.active)];
+    return `<tr><td class="mono" style="font-weight:500">${esc(x.unit)}</td>
+     <td><span class="badge ${m[0]}"><span class="dot"></span>${m[1]}${x.sub&&x.sub!=='running'?' · '+esc(x.sub):''}</span></td>
+     <td style="color:var(--text2)">${esc(x.desc)}</td></tr>`;
+  }).join('') || '<tr><td colspan="3"><div class="empty">无匹配服务</div></td></tr>';
+}
+// 进程排序 / 搜索 / 状态映射（仿飞牛资源监控进程管理）
+const PROC_STATE = {R:['运行中','sd-run'],S:['睡眠','sd-sleep'],D:['磁盘等待','sd-wait'],Z:['僵尸','sd-zombie'],T:['已停止','sd-stop'],t:['跟踪','sd-stop'],I:['空闲','sd-idle'],X:['已退出','sd-dead'],x:['已退出','sd-dead'],K:['可唤醒','sd-run'],P:['驻页','sd-idle'],W:['换页','sd-wait']};
+let procQuery='', procSortKey='cpuPercent', procSortAsc=false;
+document.getElementById('proc-search').addEventListener('input', function(){ procQuery=this.value.trim().toLowerCase(); renderProcs(); });
+document.querySelectorAll('#page-procs th.sortable').forEach(th=>{
+  th.addEventListener('click', ()=>{
+    const k=th.dataset.k;
+    if(procSortKey===k){ procSortAsc=!procSortAsc; }
+    else { procSortKey=k; procSortAsc=(k==='pid'||k==='name'||k==='user'||k==='state'); }
+    document.querySelectorAll('#page-procs th.sortable .arr').forEach(a=>a.textContent='');
+    th.querySelector('.arr').textContent = procSortAsc?'▲':'▼';
+    renderProcs();
+  });
+});
+(function initProcSortArrow(){
+  const th = document.querySelector('#page-procs th.sortable[data-k="cpuPercent"]');
+  if(th) th.querySelector('.arr').textContent='▼';
+})();
+function renderProcs(){
+  let rows = procsData.filter(p=>{
+    if(!procQuery) return true;
+    return (p.name||'').toLowerCase().includes(procQuery)
+      || (p.user||'').toLowerCase().includes(procQuery)
+      || (p.cmdline||'').toLowerCase().includes(procQuery)
+      || String(p.pid).includes(procQuery);
+  });
+  const dir = procSortAsc?1:-1;
+  rows = [...rows].sort((a,b)=>{
+    const k=procSortKey, va=a[k], vb=b[k];
+    if(k==='name'||k==='user'||k==='state') return String(va||'').localeCompare(String(vb||''))*dir;
+    return ((va||0)-(vb||0))*dir;
+  });
+  const total = rows.length;
+  document.getElementById('proc-count').textContent = total>200 ? `显示前 200 / 共 ${total} 个` : `共 ${total} 个进程`;
+  rows = rows.slice(0,200);
+  document.getElementById('proc-body').innerHTML = rows.map(p=>{
+    const cpu=p.cpuPercent||0, mem=p.memKB||0, mp=p.memPercent||0;
+    const cpuCls = cpu>50?'cpu-hot':cpu>20?'cpu-warm':cpu>5?'cpu-mild':'';
+    const st = PROC_STATE[p.state]||[p.state||'—','sd-idle'];
+    return `<tr>
+      <td class="mono" style="color:var(--text3)">${p.pid}</td>
+      <td style="font-weight:500">${esc(p.name)}</td>
+      <td>${esc(p.user||'—')}</td>
+      <td class="${cpuCls}">${cpu.toFixed(1)}</td>
+      <td>${fmtKB(mem)} <span style="color:var(--text3);font-size:12px">${mp.toFixed(1)}%</span></td>
+      <td><span class="state-dot ${st[1]}"></span>${esc(st[0])}</td>
+      <td style="color:var(--text2)">${fmtUp(p.startedSeconds)}</td>
+      <td style="text-align:right;white-space:nowrap"><button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="askKillProc(${p.pid},'${esc(p.name)}')">结束进程</button></td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="8"><div class="empty">无匹配进程</div></td></tr>`;
+}
+function askKillProc(pid,name){
+  confirmDialog('结束进程', `确认向进程 <b>${esc(name)}</b>（PID ${pid}）发送结束信号（SIGTERM）？<div class="warn-box">结束系统关键进程可能导致服务异常，请确认该进程不是系统核心组件。</div>`, async ()=>{
+    try{ const j=await api('/api/proc/kill',{method:'POST',body:JSON.stringify({pid})}); toast(j.message||'已发送结束信号','good'); loadProcs(); }catch(e){ toast(e.message,'err'); }
+  }, '结束进程');
+}
+
+/* ---------- 开机自启 ---------- */
+const AUTO_TYPE = {'systemd-service':'systemd 服务','systemd-timer':'systemd 定时器','rc-local':'rc.local','cron':'cron @reboot','initd':'SysV 脚本','fnos-app':'fnOS 应用'};
+async function loadAutostart(){
+  try{
+    const j = await api('/api/autostart');
+    const items = j.items||[];
+    document.getElementById('autostart-sub').textContent = `共 ${items.length} 项`;
+    document.getElementById('autostart-body').innerHTML = items.map(x=>{
+      const m = SVC_STATE[x.state]||['badge-gray',esc(x.state)];
+      return `<tr><td style="font-weight:500">${esc(x.name)}</td>
+        <td><span class="badge badge-purple">${AUTO_TYPE[x.type]||esc(x.type)}</span></td>
+        <td><span class="badge ${m[0]}"><span class="dot"></span>${m[1]}</span></td>
+        <td style="color:var(--text2)">${esc(x.desc)}</td>
+        <td class="mono" style="font-size:12px;color:var(--text3)">${esc(x.source)}</td></tr>`;
+    }).join('') || '<tr><td colspan="5"><div class="empty">未检测到开机启动项</div></td></tr>';
+  }catch(e){ toast(e.message,'err'); }
+}
+
+/* ---------- DDNS ---------- */
+const PROVIDER_FIELDS = {
+  alidns:[['accessKeyId','AccessKeyId'],['accessKeySecret','AccessKeySecret']],
+  tencentcloud:[['secretId','SecretId'],['secretKey','SecretKey']],
+  huaweicloud:[['accessKeyId','AccessKeyId'],['accessKeySecret','AccessKeySecret'],['region','Region（可选，默认 cn-north-4）'],['projectId','ProjectId']],
+  baiducloud:[['accessKeyId','AccessKeyId'],['accessKeySecret','AccessKeySecret']],
+  cloudflare:[['apiToken','API Token']],
+  duckdns:[['token','Token']],
+  oray:[['username','用户名'],['password','密码']],
+  namecheap:[['apiKey','API Key'],['userName','用户名']],
+  namesilo:[['apiKey','API Key']],
+};
+const IPSOURCE_LABEL = {auto:'自动（公网查询）',web:'自定义查询 URL',interface:'网卡地址',custom:'固定 IP',dns:'DNS 解析'};
+async function loadDDNS(){
+  try{
+    ddnsData = await api('/api/ddns');
+    const _ddnsProvs = ddnsData.providers||[], _ddnsRecs = ddnsData.records||[];
+    document.getElementById('ddns-sub').textContent = `同步间隔 ${ddnsData.intervalSec||300}s · ${_ddnsProvs.length} 个服务商 · ${_ddnsRecs.length} 条记录`;
+    renderDDNSProviders();
+    renderDDNSRecords();
+  }catch(e){ toast(e.message,'err'); }
+}
+function renderDDNSProviders(){
+  const t = document.getElementById('ddns-providers');
+  const avail = (ddnsData.providersAvail||[]).reduce((m,p)=>(m[p.type]=p.name,m),{});
+  t.innerHTML = (ddnsData.providers||[]).map(p=>{
+    const credKeys = Object.keys(p.cred||{}).filter(k=>p.cred[k]);
+    const credTxt = credKeys.length? credKeys.map(k=>`${k}: ••••••`).join('  ') : '未配置';
+    return `<tr><td style="font-weight:500">${esc(p.name||avail[p.type]||p.type)}</td>
+      <td><span class="badge badge-purple">${esc(avail[p.type]||p.type)}</span></td>
+      <td class="mono" style="font-size:12px;color:var(--text3)">${esc(credTxt)}</td>
+      <td><button class="btn btn-text btn-sm" onclick="openProviderForm(${p.id})">编辑</button>
+          <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="delProvider(${p.id})">删除</button></td></tr>`;
+  }).join('') || '<tr><td colspan="4"><div class="empty">尚未配置服务商，点击右上角「添加服务商」</div></td></tr>';
+}
+function renderDDNSRecords(){
+  const t = document.getElementById('ddns-records');
+  const provName = id => { const p=(ddnsData.providers||[]).find(x=>x.id===id); return p?(p.name||p.type):'—'; };
+  t.innerHTML = (ddnsData.records||[]).map(r=>{
+    const st = r.lastStatus==='success'?['badge-green','成功']:r.lastStatus==='failed'?['badge-red','失败']:['badge-gray','待同步'];
+    return `<tr><td class="mono" style="font-weight:600">${esc(r.domain)}</td>
+      <td><span class="badge badge-blue">${esc(r.recordType||'A')}</span></td>
+      <td>${esc(IPSOURCE_LABEL[r.ipSource]||r.ipSource)}${r.ipSourceArg?` <span class="mono" style="font-size:11px;color:var(--text3)">(${esc(r.ipSourceArg)})</span>`:''}</td>
+      <td class="mono">${esc(r.lastIP||'—')}</td>
+      <td><span class="badge ${st[0]}"><span class="dot"></span>${st[1]}</span>${r.lastMessage?`<div style="font-size:11px;color:var(--text3);margin-top:2px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.lastMessage)}">${esc(r.lastMessage)}</div>`:''}</td>
+      <td><button class="btn btn-text btn-sm" onclick="syncOneDDNS(${r.id})">同步</button>
+          <button class="btn btn-text btn-sm" onclick="openRecordForm(${r.id})">编辑</button>
+          <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="delRecord(${r.id})">删除</button></td></tr>`;
+  }).join('') || '<tr><td colspan="6"><div class="empty">尚未添加解析记录</div></td></tr>';
+}
+function renderProviderCredFields(type, cred){
+  const fields = PROVIDER_FIELDS[type]||[];
+  if(!fields.length) return '<div class="hint">该服务商无需额外凭据</div>';
+  return fields.map(([k,label])=>`<div class="form-row"><label>${label}</label><input type="${k.toLowerCase().includes('secret')||k.toLowerCase().includes('password')||k.toLowerCase().includes('token')||k.toLowerCase().includes('key')?'password':'text'}" data-cred="${k}" value="${esc((cred&&cred[k])||'')}" placeholder="${label}"></div>`).join('');
+}
+function openProviderForm(id){
+  const p = id? ((ddnsData.providers||[]).find(x=>x.id===id)) : null;
+  const avail = ddnsData.providersAvail||[];
+  const selOpts = avail.map(a=>`<option value="${a.type}" ${p&&p.type===a.type?'selected':''}>${esc(a.name)}</option>`).join('');
+  const body = `
+    <div class="form-row"><label>名称（自定义，便于识别）</label><input type="text" id="pf-name" value="${esc(p?p.name:'')}" placeholder="如：我的阿里云"></div>
+    <div class="form-row"><label>服务商类型</label><select id="pf-type" ${p?'disabled':''}>${selOpts}</select></div>
+    <div id="pf-cred">${renderProviderCredFields(p?p.type:avail[0].type, p?p.cred:{})}</div>`;
+  confirmDialog(id?'编辑服务商':'添加服务商', body, async ()=>{
+    const type = document.getElementById('pf-type').value;
+    const name = document.getElementById('pf-name').value.trim() || (avail.find(a=>a.type===type)||{}).name || type;
+    const cred = {};
+    document.querySelectorAll('#pf-cred [data-cred]').forEach(i=>{ if(i.value.trim()) cred[i.dataset.cred]=i.value.trim(); });
+    try{
+      await api('/api/ddns/provider/save',{method:'POST',body:JSON.stringify({id:id||0,name,type,cred})});
+      toast('已保存服务商','good'); loadDDNS();
+    }catch(e){ toast(e.message,'err'); }
+  }, id?'保存':'添加');
+  // 类型切换时重建凭据字段
+  document.getElementById('pf-type').addEventListener('change', function(){
+    document.getElementById('pf-cred').innerHTML = renderProviderCredFields(this.value, {});
+  });
+}
+async function delProvider(id){
+  confirmDialog('删除服务商','删除后其下所有解析记录也会被移除，确认？', async ()=>{
+    try{ await api('/api/ddns/provider/del?id='+id,{method:'POST'}); toast('已删除','good'); loadDDNS(); }catch(e){ toast(e.message,'err'); }
+  });
+}
+function openRecordForm(id){
+  const r = id? ((ddnsData.records||[]).find(x=>x.id===id)) : null;
+  if((ddnsData.providers||[]).length===0){
+    toast('请先添加至少一个 DDNS 服务商','err'); return;
+  }
+  const provOpts = (ddnsData.providers||[]).map(p=>`<option value="${p.id}" ${(r&&r.providerId===p.id)?'selected':''}>${esc(p.name||p.type)}</option>`).join('');
+  const srcOpts = Object.keys(IPSOURCE_LABEL).map(k=>`<option value="${k}" ${(r&&r.ipSource===k)?'selected':''}>${IPSOURCE_LABEL[k]}</option>`).join('');
+  const body = `
+    <div class="form-row"><label>启用</label><label class="field-check"><input type="checkbox" id="rf-enabled" ${r?r.enabled:'checked'}> 启用后参与定时同步</label></div>
+    <div class="form-row"><label>服务商</label><select id="rf-provider">${provOpts}</select></div>
+    <div class="form-row"><label>域名（完整记录名，如 nas.example.com）</label><input type="text" id="rf-domain" value="${esc(r?r.domain:'')}" placeholder="nas.example.com"></div>
+    <div class="form-row"><label>记录类型</label><select id="rf-rt"><option value="A" ${r&&r.recordType==='A'?'selected':''}>A（IPv4）</option><option value="AAAA" ${r&&r.recordType==='AAAA'?'selected':''}>AAAA（IPv6）</option></select></div>
+    <div class="form-row"><label>IP 来源</label><select id="rf-src">${srcOpts}</select></div>
+    <div class="form-row" id="rf-arg-wrap" style="display:none"><label id="rf-arg-label">附加参数</label><input type="text" id="rf-arg" value="${esc(r?r.ipSourceArg:'')}"></div>
+    <div class="form-row"><label>TTL（秒，0 用默认值）</label><input type="number" id="rf-ttl" value="${r?r.ttl:600}"></div>`;
+  confirmDialog(id?'编辑记录':'添加记录', body, async ()=>{
+    const payload = {
+      id:id||0, enabled:document.getElementById('rf-enabled').checked,
+      providerId:parseInt(document.getElementById('rf-provider').value),
+      domain:document.getElementById('rf-domain').value.trim(),
+      recordType:document.getElementById('rf-rt').value,
+      ipSource:document.getElementById('rf-src').value,
+      ipSourceArg:document.getElementById('rf-arg').value.trim(),
+      ttl:parseInt(document.getElementById('rf-ttl').value)||0,
+    };
+    if(!payload.domain){ toast('域名不能为空','err'); return; }
+    try{ await api('/api/ddns/record/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存记录','good'); loadDDNS(); }catch(e){ toast(e.message,'err'); }
+  }, id?'保存':'添加');
+  const argLabel = {auto:'',web:'查询 URL（返回纯文本 IP）',interface:'网卡名（可留空自动挑选）',custom:'固定 IP 地址',dns:'要解析的域名'};
+  document.getElementById('rf-src').addEventListener('change', function(){
+    const v=this.value, wrap=document.getElementById('rf-arg-wrap');
+    if(argLabel[v]){ wrap.style.display='block'; document.getElementById('rf-arg-label').textContent=argLabel[v]; }
+    else wrap.style.display='none';
+  });
+  document.getElementById('rf-src').dispatchEvent(new Event('change'));
+}
+async function delRecord(id){
+  confirmDialog('删除记录','确认删除该解析记录？', async ()=>{
+    try{ await api('/api/ddns/record/del?id='+id,{method:'POST'}); toast('已删除','good'); loadDDNS(); }catch(e){ toast(e.message,'err'); }
+  });
+}
+async function syncOneDDNS(id){
+  try{ const j=await api('/api/ddns/sync?id='+id,{method:'POST'}); toast(j.message||'已触发同步','good'); }catch(e){ toast(e.message,'err'); }
+}
+async function syncAllDDNS(){
+  try{ const j=await api('/api/ddns/sync?id=0',{method:'POST'}); toast(j.message||'已触发全量同步','good'); }catch(e){ toast(e.message,'err'); }
+}
+
+/* ---------- 反向代理 ---------- */
+let proxyCache = [];
+async function loadProxy(){
+  try{
+    const j = await api('/api/proxy');
+    proxyCache = j.sites||[];
+    document.getElementById('proxy-sub').textContent = `共 ${proxyCache.length} 个站点`;
+    const c = document.getElementById('proxy-rows');
+    c.innerHTML = '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button></div>' +
+      proxyCache.map(s=>{
+        const hosts=(s.hosts||[]).join(', ');
+        return `<div class="row">
+          <div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v4M16 3v4M4 7h16M4 7v13a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7"/></svg></div>
+          <div class="info">
+            <div class="name">${esc(hosts)} ${s.enabled?'<span class="badge badge-green"><span class="dot"></span>启用</span>':'<span class="badge badge-gray"><span class="dot"></span>停用</span>'}
+              ${s.autoDDNS?'<span class="badge badge-blue"><span class="dot"></span>联动 DDNS</span>':''}</div>
+            <div class="desc mono" style="font-size:11.5px">→ ${esc(s.backend)}${s.pathPrefix?' · 前缀 '+esc(s.pathPrefix):''}${s.stripPrefix?' · 去前缀':''}</div>
+          </div>
+          <div class="actions">
+            <button class="btn btn-text btn-sm" onclick="openProxyForm(${s.id})">编辑</button>
+            <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="delProxy(${s.id})">删除</button>
+          </div>
+        </div>`;
+      }).join('');
+  }catch(e){ toast(e.message,'err'); }
+}
+function openProxyForm(id){
+  const s = id? (proxyCache.find(x=>x.id===id)) : null;
+  const body = `
+    <div class="form-row"><label>域名（多个用逗号分隔，支持 *.example.com 通配）</label><input type="text" id="px-hosts" value="${esc(s?(s.hosts||[]).join(', '):'')}" placeholder="nas.example.com, app.example.com"></div>
+    <div class="form-row"><label>后端地址</label><input type="text" id="px-backend" value="${esc(s?s.backend:'')}" placeholder="http://192.168.1.20:8080"></div>
+    <div class="form-row"><label>路径前缀（留空=整站）</label><input type="text" id="px-prefix" value="${esc(s?s.pathPrefix:'')}" placeholder="/sub"></div>
+    <label class="field-check"><input type="checkbox" id="px-strip" ${s&&s.stripPrefix?'checked':''}> 转发时去除路径前缀</label>
+    <label class="field-check"><input type="checkbox" id="px-enabled" ${s?s.enabled:'checked'}> 启用此站点</label>
+    <label class="field-check"><input type="checkbox" id="px-autoddns" ${s&&s.autoDDNS?'checked':''}> 联动 DDNS：自动为域名创建解析记录</label>
+    <div class="form-row"><label>备注</label><input type="text" id="px-desc" value="${esc(s?s.description:'')}"></div>`;
+  confirmDialog(id?'编辑站点':'添加站点', body, async ()=>{
+    const hosts = document.getElementById('px-hosts').value.split(/[,\s]+/).map(x=>x.trim()).filter(Boolean);
+    const backend = document.getElementById('px-backend').value.trim();
+    if(!hosts.length || !backend){ toast('域名与后端地址不能为空','err'); return; }
+    const payload = {id:id||0, hosts, backend,
+      pathPrefix:document.getElementById('px-prefix').value.trim(),
+      stripPrefix:document.getElementById('px-strip').checked,
+      enabled:document.getElementById('px-enabled').checked,
+      autoDDNS:document.getElementById('px-autoddns').checked,
+      description:document.getElementById('px-desc').value.trim()};
+    try{ const j=await api('/api/proxy/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存站点 '+(j.message||''),'good'); loadProxy(); }catch(e){ toast(e.message,'err'); }
+  }, id?'保存':'添加');
+}
+async function delProxy(id){
+  confirmDialog('删除站点','确认删除该反向代理站点？若开启了联动 DDNS，其自动创建的记录也会一并清理。', async ()=>{
+    try{ const j=await api('/api/proxy/del?id='+id,{method:'POST'}); toast('已删除'+(j.removedDDNS?`（清理 ${j.removedDDNS} 条联动记录）`:''),'good'); loadProxy(); }catch(e){ toast(e.message,'err'); }
+  });
+}
+
+/* ---------- 启动 ---------- */
+async function boot(){
+  startTempLoop(); // 温度轮询无条件启动（不依赖 loadOverview 成功，失败时温度也不会永久静止）
+  try{ const j = await api('/api/overview'); document.getElementById('ver').textContent = 'v'+j.version; }catch(e){}
+  loadOverview(); loadPorts(); loadProcs();
+  setInterval(loadOverview, 30000);
+}
+boot();
+</script>
+</body>
+</html>

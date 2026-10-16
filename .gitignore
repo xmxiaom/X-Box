@@ -1,0 +1,12 @@
+# 构建产物
+X-Box.fpk
+*.fpk
+pkg/app/server/xbox-amd64
+pkg/app/server/xbox-arm64
+
+# 二进制图标资源（可由 gen_icons.py 重新生成）
+*.png
+!src/**/*.png
+
+# 本地测试缓存
+dump_tmp.js

@@ -1,0 +1,18 @@
+{
+  ".url": {
+    "X-Box.Application": {
+      "noDisplay": false,
+      "allUsers": false,
+      "fileTypes": [],
+      "control": {
+        "accessPerm": "readonly"
+      },
+      "protocol": "http",
+      "title": "X-Box",
+      "icon": "images/icon_256.png",
+      "type": "iframe",
+      "port": "8899",
+      "url": ""
+    }
+  }
+}
