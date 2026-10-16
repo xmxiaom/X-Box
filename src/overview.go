@@ -122,7 +122,34 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	// 网络信息（网卡 / 网关 / DNS / 实时速率）
 	ov["net"] = collectNetInfo()
 
+	// 飞牛系统版本（系统信息卡展示）
+	ov["fnosVersion"] = readFnOSVersion()
+
 	ok(w, ov)
+}
+
+// readFnOSVersion 读取 fnOS 系统版本：优先 /etc/fnos/version 等专用文件，
+// 回退从 os-release 的 PRETTY_NAME 提取（如 "fnOS 1.2.3" → 1.2.3）；读不到返回空。
+func readFnOSVersion() string {
+	for _, p := range []string{"/etc/fnos/version", "/etc/fnos/release", "/etc/fnos/VERSION", "/etc/fnos_version"} {
+		if v := readSmall(p); v != "" {
+			// 有的文件是 key=value 形式（如 VERSION=1.2.3）
+			if k, val, ok := strings.Cut(v, "="); ok && strings.Contains(strings.ToLower(k), "ver") {
+				return strings.Trim(strings.TrimSpace(val), `"`)
+			}
+			return v
+		}
+	}
+	// 回退：PRETTY_NAME 里的版本号
+	if pretty := readOsRelease(); pretty != "" {
+		f := strings.Fields(pretty)
+		for i := len(f) - 1; i >= 0; i-- {
+			if f[i][0] >= '0' && f[i][0] <= '9' {
+				return f[i]
+			}
+		}
+	}
+	return ""
 }
 
 // listDisks 从 /proc/mounts 取真实块设备挂载点（排除虚拟 fs），statfs 求用量。

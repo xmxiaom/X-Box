@@ -524,9 +524,9 @@ async function loadOverview(){
     document.getElementById('ov-disktemps').innerHTML = renderDiskTemps(_tmp);
     document.getElementById('ov-info').innerHTML = [
       ['主机名', j.hostname],['操作系统', j.os],['CPU', `${j.cpuModel} × ${j.cpuCores} 核`],
-      ['内核', j.kernel],['监听端口', `${j.listeningPorts} 个（公网暴露 ${j.publicPorts} 个）`],
+      ['飞牛版本', j.fnosVersion],['内核', j.kernel],
       ['X-Box 版本', 'v'+j.version],
-    ].map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v" style="max-width:60%;text-align:right;word-break:break-all">${esc(v??'—')}</span></div>`).join('');
+    ].map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v" style="max-width:60%;text-align:right;word-break:break-all">${esc(v||'—')}</span></div>`).join('');
     document.getElementById('ov-net').innerHTML = renderNet(j.net);
     if(!natLoaded) runNAT(false); // 首次进入仪表盘自动探测 NAT，之后沿用结果不重复探测
     startTempLoop(); // 温度 5s 动态刷新（幂等）
