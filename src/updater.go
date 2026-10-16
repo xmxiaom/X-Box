@@ -397,10 +397,10 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "下载不完整")
 		return
 	}
-	// 校验：fpk 本质是 zip（文件头 PK\x03\x04）
-	if !isZipFile(dst) {
+	// 校验：fpk 是 zip 或 gzip 容器（fnpack 产物为 gzip）
+	if !isFpkFile(dst) {
 		_ = os.Remove(dst)
-		fail(w, 500, "下载的文件不是有效的 fpk（非 zip 格式）")
+		fail(w, 500, "下载的文件不是有效的 fpk（非 zip/gzip 格式）")
 		return
 	}
 	ok(w, map[string]any{
@@ -411,7 +411,9 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func isZipFile(p string) bool {
+// isFpkFile 校验 fpk 文件：fnpack 打出的 fpk 是 **gzip** 容器（1F 8B），
+// 少数版本为 zip（PK\x03\x04）——两者都接受（曾只认 zip 头，把正常 fpk 误判为无效文件删除）。
+func isFpkFile(p string) bool {
 	f, err := os.Open(p)
 	if err != nil {
 		return false
@@ -421,5 +423,13 @@ func isZipFile(p string) bool {
 	if _, err := io.ReadFull(f, magic); err != nil {
 		return false
 	}
-	return magic[0] == 'P' && magic[1] == 'K'
+	// ZIP: PK\x03\x04
+	if magic[0] == 'P' && magic[1] == 'K' && magic[2] == 0x03 && magic[3] == 0x04 {
+		return true
+	}
+	// GZIP: 1F 8B
+	if magic[0] == 0x1F && magic[1] == 0x8B {
+		return true
+	}
+	return false
 }
