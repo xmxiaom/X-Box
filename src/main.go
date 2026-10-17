@@ -1,4 +1,4 @@
-// X-Box — 飞牛 fnOS 非 Docker 系统清理与安全体检工具
+// X-Box — 飞牛 fnOS 系统清理与安全体检工具
 //
 // 单二进制 + 内嵌 Web UI，纯标准库实现。
 // 功能：垃圾扫描/安全清理、开放端口审计、进程/服务/应用一览。
@@ -30,7 +30,7 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.28"
+	version    = "1.2.29"
 	// 监听所有接口（含 IPv6）：允许通过 DDNS 域名（如 your-domain.example.com:8899）从外部访问面板。
 	// 已配合 auth.go 的登录保护（多账户 + 10 分钟空闲超时）；请仅在路由器/光猫放行可信来源。
 	listenAddr = ":8899"
@@ -92,6 +92,8 @@ func main() {
 	mux.HandleFunc("POST /api/auth/changepass", srv.handleAuthChangePass)
 	mux.HandleFunc("POST /api/auth/adduser", srv.handleAuthAddUser)
 	mux.HandleFunc("POST /api/auth/deluser", srv.handleAuthDelUser)
+	mux.HandleFunc("GET /api/auth/listusers", srv.handleAuthListUsers)
+	mux.HandleFunc("POST /api/auth/rename", srv.handleAuthRename)
 	mux.HandleFunc("GET /", srv.handleRoot)
 
 	log.Printf("X-Box v%s 启动，监听 %s（已启用登录保护，面板对外需登录）", version, listenAddr)

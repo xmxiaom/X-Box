@@ -367,12 +367,21 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAuthChangePass(w http.ResponseWriter, r *http.Request) {
 	user, _ := authRT.checkSession(r) // 中间件已放行；再次取用户并续期
 	var req struct {
-		Old string `json:"old"`
-		New string `json:"new"`
+		Old    string `json:"old"`
+		New    string `json:"new"`
+		Target string `json:"target"` // 非空且非当前账户时，由已登录者修改其他账户密码（家庭单管理员本地应用）
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	authRT.mu.Lock()
 	defer authRT.mu.Unlock()
+	if req.Target != "" && !strings.EqualFold(req.Target, user) {
+		if err := authRT.changePassAdmin(req.Target, req.New); err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+		ok(w, map[string]any{"ok": true})
+		return
+	}
 	if err := authRT.changePass(user, req.Old, req.New); err != nil {
 		fail(w, 400, err.Error())
 		return
@@ -407,4 +416,89 @@ func (s *Server) handleAuthDelUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ok(w, map[string]any{"ok": true})
+}
+
+// 列出账户（仅用户名，不暴露密码/哈希）。current 标出当前登录账户。
+func (r *authStore) listUsers(current string) []map[string]any {
+	out := make([]map[string]any, 0, len(r.accounts))
+	for _, a := range r.accounts {
+		out = append(out, map[string]any{"user": a.User, "current": strings.EqualFold(a.User, current)})
+	}
+	return out
+}
+
+func (s *Server) handleAuthListUsers(w http.ResponseWriter, r *http.Request) {
+	current, _ := authRT.checkSession(r)
+	authRT.mu.RLock()
+	users := authRT.listUsers(current)
+	authRT.mu.RUnlock()
+	ok(w, map[string]any{"users": users})
+}
+
+// 修改账户名：同步更新该账户的会话用户名，避免改名后原会话失效。
+func (r *authStore) renameAccount(oldU, newU string) error {
+	oldU = strings.TrimSpace(oldU)
+	newU = strings.TrimSpace(newU)
+	if oldU == "" || newU == "" {
+		return fmt.Errorf("账户名不能为空")
+	}
+	if strings.EqualFold(oldU, newU) {
+		return fmt.Errorf("新名称与当前相同")
+	}
+	idx := -1
+	for i, a := range r.accounts {
+		if strings.EqualFold(a.User, oldU) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("账户不存在")
+	}
+	for i, a := range r.accounts {
+		if i != idx && strings.EqualFold(a.User, newU) {
+			return fmt.Errorf("账户名已存在")
+		}
+	}
+	r.accounts[idx].User = newU
+	for _, si := range r.sessions {
+		if strings.EqualFold(si.User, oldU) {
+			si.User = newU
+		}
+	}
+	return r.save()
+}
+
+func (s *Server) handleAuthRename(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Old string `json:"old"`
+		New string `json:"new"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	authRT.mu.Lock()
+	defer authRT.mu.Unlock()
+	if err := authRT.renameAccount(req.Old, req.New); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	ok(w, map[string]any{"ok": true})
+}
+
+// 由已登录者直接修改其他账户密码（不校验原密码）。
+func (r *authStore) changePassAdmin(user, newp string) error {
+	if strings.TrimSpace(newp) == "" {
+		return fmt.Errorf("新密码不能为空")
+	}
+	found := false
+	for i := range r.accounts {
+		if strings.EqualFold(r.accounts[i].User, user) {
+			r.accounts[i].Salt = randHex(8)
+			r.accounts[i].PassHash = pbkdf2Hex(newp, r.accounts[i].Salt, pbkdf2Iter)
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("账户不存在")
+	}
+	return r.save()
 }

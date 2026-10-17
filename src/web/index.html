@@ -388,11 +388,11 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="page-head"><h2>DDNS 动态域名</h2><span class="sub" id="ddns-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadDDNS()">刷新</button></div>
         <div class="card" style="margin-bottom:14px">
           <h3>服务商 <span class="h-action"><button class="btn btn-primary btn-sm" onclick="openProviderForm(null)">+ 添加服务商</button></span></h3>
-          <table class="tbl"><thead><tr><th>名称</th><th>类型</th><th>凭据</th><th>操作</th></tr></thead><tbody id="ddns-providers"></tbody></table>
+          <div class="tblwrap"><table class="tbl"><thead><tr><th>名称</th><th>类型</th><th>凭据</th><th>操作</th></tr></thead><tbody id="ddns-providers"></tbody></table></div>
         </div>
         <div class="card">
           <h3>解析记录 <span class="h-action"><button class="btn btn-primary btn-sm" onclick="openRecordForm(null)">+ 添加记录</button><button class="btn btn-outline btn-sm" style="margin-left:8px" onclick="syncAllDDNS()">立即全量同步</button></span></h3>
-          <table class="tbl"><thead><tr><th>域名</th><th>类型</th><th>IP 来源</th><th>当前值</th><th>状态</th><th>操作</th></tr></thead><tbody id="ddns-records"></tbody></table>
+          <div class="tblwrap"><table class="tbl"><thead><tr><th>域名</th><th>类型</th><th>IP 来源</th><th>当前值</th><th>状态</th><th>操作</th></tr></thead><tbody id="ddns-records"></tbody></table></div>
         </div>
       </div>
 
@@ -430,29 +430,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           <div id="upd-body"></div>
         </div>
         <div class="card" style="margin-top:14px">
-          <h3>🔐 账户管理</h3>
+          <h3>🔐 账户管理 <span class="h-action"><button class="btn btn-primary btn-sm" onclick="openAddUser()">+ 新增账户</button></span></h3>
           <div class="acct-list" id="acct-list"></div>
-          <div class="acct-section">
-            <div class="sub-title">当前登录：<span id="cur-user"></span></div>
-          </div>
-          <div class="acct-section">
-            <div class="sub-title">修改密码</div>
-            <div class="form-inline">
-              <input type="password" id="cp-old" class="input" placeholder="原密码">
-              <input type="password" id="cp-new" class="input" placeholder="新密码">
-              <button class="btn btn-primary btn-sm" onclick="changePass()">保存</button>
-            </div>
-          </div>
-          <div class="acct-section">
-            <div class="sub-title">新增账户</div>
-            <div class="form-inline">
-              <input type="text" id="au-user" class="input" placeholder="用户名">
-              <input type="password" id="au-pass" class="input" placeholder="密码">
-              <button class="btn btn-primary btn-sm" onclick="addUser()">新增</button>
-            </div>
-          </div>
-          <div class="acct-section">
-            <button class="btn btn-danger-outline btn-sm" onclick="doLogout()">退出登录</button>
+          <div class="acct-footer">
+            <button class="btn btn-outline btn-sm" onclick="doLogout()">退出登录</button>
           </div>
         </div>
       </div>
@@ -1398,6 +1379,7 @@ async function boot(){
   enterApp();
 }
 boot();
+let loginFirstShown = false;
 function showLogin(configured){
   const mask = document.getElementById('login-mask');
   const wasHidden = mask.style.display !== 'flex';
@@ -1410,7 +1392,12 @@ function showLogin(configured){
     document.getElementById('login-pass').value = '';
   }
   mask.style.display = 'flex';
-  setTimeout(()=>{ const el=document.getElementById('login-user'); if(el) el.focus(); }, 50);
+  // 仅在【页面首次】弹出登录层时自动聚焦账户栏；之后（如会话过期重新弹层）绝不抢焦点，
+  // 避免用户在密码栏输入时焦点被反复弹回账户栏。
+  if(!loginFirstShown){
+    loginFirstShown = true;
+    setTimeout(()=>{ const el=document.getElementById('login-user'); if(el && document.activeElement !== el) el.focus(); }, 50);
+  }
 }
 function hideLogin(){ document.getElementById('login-mask').style.display = 'none'; }
 async function doLogin(){
@@ -1446,38 +1433,115 @@ async function doLogout(){
   currentUser = '';
   showLogin(true);
 }
-async function changePass(){
-  const o = document.getElementById('cp-old').value, n = document.getElementById('cp-new').value;
-  if(!o||!n){ toast('请填写原密码和新密码'); return; }
-  try{
-    await api('/api/auth/changepass', {method:'POST', body: JSON.stringify({old:o, new:n})});
-    toast('密码已修改');
-    document.getElementById('cp-old').value=''; document.getElementById('cp-new').value='';
-  }catch(e){ toast(e.message); }
-}
-async function addUser(){
-  const u = document.getElementById('au-user').value.trim(), p = document.getElementById('au-pass').value;
-  if(!u||!p){ toast('请填写用户名和密码'); return; }
-  try{
-    await api('/api/auth/adduser', {method:'POST', body: JSON.stringify({user:u, pass:p})});
-    toast('账户已新增');
-    document.getElementById('au-user').value=''; document.getElementById('au-pass').value='';
-    loadAccounts();
-  }catch(e){ toast(e.message); }
-}
-async function delUser(u){
-  if(!confirm('确定删除账户 '+u+'？')) return;
-  try{
-    await api('/api/auth/deluser', {method:'POST', body: JSON.stringify({user:u})});
-    toast('已删除');
-    loadAccounts();
-  }catch(e){ toast(e.message); }
-}
+/* ---------- 账户管理（列表 + 模态表单，风格对齐 DDNS 服务商/记录编辑） ---------- */
+// 列出全部账户并渲染：每行提供「改密 / 改名 / 删除」（删除仅限非当前登录账户）。
+// 用 createElement + 闭包绑定用户名，避免用户名特殊字符破坏内联 onclick 注入。
 async function loadAccounts(){
   const box = document.getElementById('acct-list');
-  if(box) box.innerHTML = '<div class="acct-row"><span class="u">'+esc(currentUser)+'</span><span class="badge badge-green">已登录</span></div>';
-  const cu = document.getElementById('cur-user');
-  if(cu) cu.textContent = currentUser;
+  if(!box) return;
+  box.innerHTML = '';
+  let users = [];
+  try{
+    const j = await api('/api/auth/listusers', {method:'GET'});
+    users = j.users || [];
+  }catch(e){
+    box.innerHTML = '<div class="acct-row"><span class="acct-avatar">!</span><span class="u">加载失败：'+esc(e.message)+'</span></div>';
+    return;
+  }
+  if(users.length === 0){
+    box.innerHTML = '<div class="acct-row"><span class="acct-avatar">·</span><span class="u" style="color:var(--text3)">暂无账户</span></div>';
+    return;
+  }
+  for(const u of users){
+    const row = document.createElement('div');
+    row.className = 'acct-row';
+    const avatar = document.createElement('span');
+    avatar.className = 'acct-avatar';
+    avatar.textContent = (u.user||'?').charAt(0).toUpperCase();
+    row.appendChild(avatar);
+    const name = document.createElement('span');
+    name.className = 'u';
+    name.textContent = u.user;
+    row.appendChild(name);
+    if(u.current){
+      const badge = document.createElement('span');
+      badge.className = 'badge badge-green';
+      badge.textContent = '当前登录';
+      row.appendChild(badge);
+    }
+    const acts = document.createElement('span');
+    acts.className = 'acct-actions';
+    const bPass = document.createElement('button');
+    bPass.className = 'btn btn-text btn-sm';
+    bPass.textContent = '改密';
+    bPass.onclick = () => openChangePass(u.user);
+    acts.appendChild(bPass);
+    const bRename = document.createElement('button');
+    bRename.className = 'btn btn-text btn-sm';
+    bRename.textContent = '改名';
+    bRename.onclick = () => openRename(u.user);
+    acts.appendChild(bRename);
+    if(!u.current){
+      const bDel = document.createElement('button');
+      bDel.className = 'btn btn-text btn-sm acct-del';
+      bDel.textContent = '删除';
+      bDel.onclick = () => delUser(u.user);
+      acts.appendChild(bDel);
+    }
+    row.appendChild(acts);
+    box.appendChild(row);
+  }
+}
+// 新增账户：模态表单（用户名 + 密码）。
+function openAddUser(){
+  const body = `
+    <div class="form-row"><label>用户名</label><input type="text" id="au-user" placeholder="登录用户名" autocomplete="off"></div>
+    <div class="form-row"><label>密码</label><input type="password" id="au-pass" placeholder="登录密码" autocomplete="new-password"></div>`;
+  confirmDialog('新增账户', body, async ()=>{
+    const u = document.getElementById('au-user').value.trim(), p = document.getElementById('au-pass').value;
+    if(!u||!p){ toast('请填写用户名和密码','err'); return; }
+    try{
+      await api('/api/auth/adduser',{method:'POST',body:JSON.stringify({user:u,pass:p})});
+      toast('账户已新增','good'); loadAccounts();
+    }catch(e){ toast(e.message,'err'); }
+  }, '新增');
+}
+// 修改指定账户密码：模态表单，由已登录者操作（免原密码）。
+function openChangePass(user){
+  const body = `
+    <div class="form-row"><label>账户</label><input type="text" value="${esc(user)}" disabled></div>
+    <div class="form-row"><label>新密码</label><input type="password" id="ap-new" placeholder="输入新密码" autocomplete="new-password"></div>`;
+  confirmDialog('修改密码', body, async ()=>{
+    const np = document.getElementById('ap-new').value;
+    if(!np.trim()){ toast('密码不能为空','err'); return; }
+    try{
+      await api('/api/auth/changepass',{method:'POST',body:JSON.stringify({target:user,new:np})});
+      toast('账户「'+user+'」密码已修改','good');
+    }catch(e){ toast(e.message,'err'); }
+  }, '保存');
+}
+// 重命名账户：模态表单；后端同步更新该账户会话，改名后无需重新登录。
+function openRename(user){
+  const body = `
+    <div class="form-row"><label>新账户名</label><input type="text" id="ar-new" value="${esc(user)}" placeholder="输入新名称" autocomplete="off"></div>
+    <div class="form-row"><label style="font-weight:400;color:var(--text3)">改名后该账户的登录会话自动延续，无需重新登录。</label></div>`;
+  confirmDialog('重命名账户', body, async ()=>{
+    const nn = document.getElementById('ar-new').value.trim();
+    if(!nn){ toast('账户名不能为空','err'); return; }
+    try{
+      await api('/api/auth/rename',{method:'POST',body:JSON.stringify({old:user,new:nn})});
+      toast('已改名为「'+nn+'」','good'); loadAccounts();
+    }catch(e){ toast(e.message,'err'); }
+  }, '保存');
+}
+// 删除账户：模态确认（删除仅限非当前登录账户）。
+function delUser(u){
+  confirmDialog('删除账户','删除后该账户将无法登录，确认删除「'+esc(u)+'」？', async ()=>{
+    try{
+      await api('/api/auth/deluser',{method:'POST',body:JSON.stringify({user:u})});
+      toast('已删除','good'); loadAccounts();
+    }catch(e){ toast(e.message,'err'); }
+  }, '删除');
 }
 </script>
 <style>
@@ -1485,15 +1549,22 @@ async function loadAccounts(){
 .login-card{background:#fff;border-radius:12px;padding:30px 28px;width:320px;box-shadow:0 10px 40px rgba(0,0,0,.2)}
 .login-title{font-size:18px;font-weight:600;margin-bottom:4px}
 .login-sub{font-size:13px;color:var(--text3);margin-bottom:18px}
-.login-input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-bottom:10px;box-sizing:border-box}
+.login-input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:16px;margin-bottom:10px;box-sizing:border-box} /* 16px 防止 iOS 聚焦放大导致键盘弹起时整页位移卡顿 */
+@media (max-height:560px),(max-width:480px){
+  .login-mask{align-items:flex-start;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 0;transition:transform .15s ease,opacity .15s ease}
+  .login-card{margin:auto 0;transition:transform .15s ease;max-width:calc(100vw - 28px)}
+}
 .login-btn{width:100%;justify-content:center;margin-top:4px}
 .login-msg{font-size:13px;color:var(--danger);min-height:18px;margin-top:8px;text-align:center}
-.acct-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
-.acct-row{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg);border-radius:6px}
-.acct-row .u{flex:1;font-weight:500}
-.form-inline{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-.form-inline .input{flex:1;min-width:120px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;box-sizing:border-box}
-.sub-title{font-size:13px;color:var(--text2);margin:12px 0 8px;font-weight:500}
+.acct-list{display:flex;flex-direction:column;gap:8px}
+.acct-row{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg);border-radius:8px;transition:background .15s ease}
+.acct-row:hover{background:#EAECF0}
+.acct-avatar{width:32px;height:32px;border-radius:50%;background:var(--primary-light);color:var(--primary);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;flex-shrink:0}
+.acct-row .u{flex:1;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct-actions{display:flex;gap:2px;flex-shrink:0}
+.acct-del{color:var(--danger)}
+.acct-del:hover{background:var(--danger-light)}
+.acct-footer{display:flex;justify-content:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
 </style>
 <div id="login-mask" class="login-mask">
   <div class="login-card">

@@ -31,6 +31,8 @@ global.setTimeout = (f) => { try { f && f(); } catch (e) {} return 0; }; // toas
 global.fetch = async (url) => ({
   ok: true, status: 200,
   json: async () => {
+    if (String(url).includes('/api/auth/status')) return { ok: true, configured: true, authed: true, user: 'admin' }; // 已登录，boot 直通 enterApp
+    if (String(url).includes('/api/auth/listusers')) return { ok: true, users: [{user:'admin', current:true}] };
     if (String(url).includes('/api/overview')) return {
       ok: true, version: '1.1.0', hostname: 'nas', cpuCores: 4, cpuModel: 'Test CPU',
       load1: 0.5, memTotalKB: 8000000, memAvailKB: 4000000, uptimeSeconds: 90000,
