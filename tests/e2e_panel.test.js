@@ -1,5 +1,5 @@
 // X-Box 无登录态端到端测试（jsdom 加载真实页面 JS + fetch/XHR 桩）：
-//  场景A：页面加载即显示面板（.app 默认 flex，无登录层），enterApp 加载概览，诊断栏隧道=正常
+//  场景A：页面加载即显示面板（.app 默认 flex，无登录层），enterApp 加载概览
 //  场景B：XHR 与 fetch 都失败 → 回退导航通道（iframe）
 //  回归：无任何登录/账户元素、隧道编解码（UTF-8 安全）、ES2017/ES5 语法地板
 const fs = require('fs');
@@ -89,12 +89,6 @@ function makeDom(opts) {
     await sleep(250); // 等 detectChannel + enterApp 完成
     check(doc.getElementById('ver').textContent === 'v1.2.38', 'A: 版本未加载(enterApp 未跑): ' + doc.getElementById('ver').textContent);
     check(calls.some(x => x.url.includes('/api/overview')), 'A: 未拉取概览');
-    // 诊断栏常驻
-    const diagTxt = doc.getElementById('login-diag').textContent;
-    check(diagTxt.includes('面板组件: 已加载'), 'A: 诊断栏组件状态异常: ' + diagTxt);
-    const netTxt = doc.getElementById('login-diag-net').textContent;
-    check(netTxt.includes('隧道=正常'), 'A: 隧道探测异常: ' + netTxt);
-    check(netTxt.includes('根路径=正常'), 'A: 根路径探测异常: ' + netTxt);
     // 系统设置页只剩 关于/检查更新
     const settingsHtml = doc.getElementById('page-settings').innerHTML;
     check(!settingsHtml.includes('账户管理') && !settingsHtml.includes('退出登录'), 'A: 设置页仍有账户管理');
@@ -126,11 +120,10 @@ function makeDom(opts) {
 
   /* ---------- 语法地板 ---------- */
   const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
-  check(blocks.length === 2, 'R: script 块数量=' + blocks.length);
+  check(blocks.length === 1, 'R: script 块数量=' + blocks.length + '，应为 1');
   const acorn = require('acorn');
   try { acorn.parse(blocks[0], { ecmaVersion: 2017 }); } catch (e) { failures.push('R: 主脚本非 ES2017: ' + e.message.slice(0, 60)); }
-  try { acorn.parse(blocks[1], { ecmaVersion: 5 }); } catch (e) { failures.push('R: 诊断层非 ES5: ' + e.message.slice(0, 60)); }
-  check(!/login-mask|login-card|acct-list|账户管理/.test(html), 'R: HTML 仍含登录/账户残留');
+  check(!/login-mask|login-card|acct-list|账户管理|diag-bar|login-diag/.test(html), 'R: HTML 仍含登录/账户/诊断残留');
 
   if (failures.length) {
     console.error(failures.join('\n'));

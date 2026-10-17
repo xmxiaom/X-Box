@@ -35,7 +35,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .menu-item svg{width:17px;height:17px;flex-shrink:0}
 .menu-item:hover{background:var(--bg);color:var(--text1)}
 .menu-item.active{background:var(--primary-light);color:var(--primary);font-weight:500}
-.content{flex:1;overflow-y:auto;padding:20px 24px 44px} /* 底部 44px 留给常驻诊断栏 */
+.content{flex:1;overflow-y:auto;padding:20px 24px}
 .page{display:none}
 .page.active{display:block}
 .page-head{display:flex;align-items:center;margin-bottom:16px}
@@ -1456,97 +1456,10 @@ async function enterApp(){
   if(!appRefreshTimer) appRefreshTimer = setInterval(loadOverview, 30000);
 }
 detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe），随后直接进入面板
-window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：诊断栏据此显示「面板组件」状态
 </script>
 <style>
-.diag-bar{position:fixed;left:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;font-size:11px;line-height:1.6;color:var(--text3);background:var(--card);border-top:1px solid var(--border);z-index:50;pointer-events:none}
 </style>
-<script>
-/* ===== 登录通道（ES5 + XMLHttpRequest 独立层）=====
- * 不依赖 fetch / async / let / const / 箭头函数 / 模板字符串等任何 ES6+ 特性，
- * 也不依赖上面的主脚本——只要浏览器支持 ES5（2012 年起的所有内核），登录就能用。
- * 这是「无法登录」问题的根治层：主脚本若因任何原因未执行/执行失败，登录依然可用。
- * 登录成功后：主脚本活着 → 回调 window.enterApp() 进入面板；否则 reload 靠服务端已登录态进面板。 */
-(function(){
-  function $(id){ return document.getElementById(id); }
-  // 隧道编解码兜底：主脚本（ES2017）已定义 window.apiTunnel；若主脚本死亡（旧内核解析失败），
-  // 本 ES5 层自行补齐，保证诊断探测在任何内核下都走 / 隧道（fnOS 中转拦截 /api/ 直连）。
-  if(!window.apiTunnel){
-    window.tunnelB64 = function(str){ return btoa(unescape(encodeURIComponent(str))).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_'); };
-    window.apiTunnel = function(path, opts){
-      opts = opts || {};
-      var payload = {m: opts.method || 'GET', p: path, b: opts.body || ''};
-      return '/?__x=' + encodeURIComponent(window.tunnelB64(JSON.stringify(payload)));
-    };
-  }
-  function diag(){
-    var el = $('login-diag'), netEl = $('login-diag-net');
-    if(el){
-      var parts = [];
-      parts.push('面板组件: ' + (window.__xboxMain ? '已加载' : '未加载'));
-      parts.push('窗口: ' + (window.innerWidth||'?') + 'x' + (window.innerHeight||'?'));
-      try{ parts.push('地址: ' + window.location.protocol + '//' + window.location.host); }catch(e){}
-      el.textContent = parts.join(' · ');
-    }
-    if(!netEl) return;
-    var results = {};
-    function render(){
-      var s = [];
-      for(var k in results) s.push(k + '=' + results[k]);
-      netEl.textContent = '网络: ' + s.join(' · ');
-    }
-    function finish(tag, ok, detail){ results[tag] = ok ? '正常' : detail; render(); }
-    function probeXHR(tag, url){
-      results[tag] = '检测中'; render();
-      var settled = false;
-      var xhr;
-      try{ xhr = new XMLHttpRequest(); }catch(e){ settled = true; finish(tag, false, '不可用'); return; }
-      xhr.timeout = 5000;
-      xhr.open('GET', url, true);
-      xhr.onreadystatechange = function(){
-        if(xhr.readyState !== 4 || settled) return;
-        settled = true;
-        finish(tag, xhr.status === 200, xhr.status === 0 ? '被阻止/跨域' : ('HTTP ' + xhr.status));
-      };
-      xhr.ontimeout = function(){ if(settled) return; settled = true; finish(tag, false, '挂起(5s超时)'); };
-      xhr.onerror = function(){ if(settled) return; settled = true; finish(tag, false, '无法连接'); };
-      try{ xhr.send(); }catch(e){ settled = true; finish(tag, false, '异常'); }
-    }
-    var statusUrl = window.apiTunnel('/api/auth/status');
-    probeXHR('隧道', statusUrl);              // 关键探测：/ 隧道（登录/全部 API 都走它）
-    probeXHR('根路径', '/');                    // 对照：文档自身路径
-    probeXHR('API直连', '/api/auth/status');   // 对照：/api/ 直连（预期被中转拦截）
-    probeXHR('局域网', 'http://192.168.1.200:8899/api/auth/status'); // 局域网 IP 直连（https 页面下混合内容会被阻止=快速报错）
-    // 导航通道（iframe 打隧道 URL）
-    results['导航'] = '检测中'; render();
-    var nf = document.createElement('iframe');
-    nf.style.cssText = 'display:none;width:0;height:0;border:0';
-    var navSettled = false;
-    var navTimer = setTimeout(function(){ if(!navSettled){ navSettled = true; finish('导航', false, '挂起(5s超时)'); } }, 5000);
-    nf.onload = function(){
-      if(navSettled) return; navSettled = true; clearTimeout(navTimer);
-      var t = '', okFlag = false;
-      try{ t = nf.contentDocument && nf.contentDocument.body ? nf.contentDocument.body.textContent : ''; }catch(e){}
-      try{ okFlag = t ? !!JSON.parse(t).ok : false; }catch(e){}
-      finish('导航', okFlag, '加载但非JSON');
-      setTimeout(function(){ try{ nf.remove(); }catch(e){} }, 0);
-    };
-    nf.onerror = function(){ if(navSettled) return; navSettled = true; clearTimeout(navTimer); finish('导航', false, '无法连接'); };
-    nf.src = statusUrl;
-    // fetch 通道（打隧道 URL）
-    if(window.fetch){
-      results['fetch'] = '检测中'; render();
-      var fetchDone = false;
-      var fetchTimer = setTimeout(function(){ if(!fetchDone){ fetchDone = true; finish('fetch', false, '挂起(5s超时)'); } }, 5000);
-      fetch(statusUrl, {cache:'no-store'}).then(function(r){ if(fetchDone) return; fetchDone = true; clearTimeout(fetchTimer); finish('fetch', r.ok, 'HTTP ' + r.status); })
-        .catch(function(){ if(fetchDone) return; fetchDone = true; clearTimeout(fetchTimer); finish('fetch', false, '无法连接'); });
-    }
-  }
-  // 诊断栏常驻：通道状态一目了然（排障用）
-  if(document.readyState === 'loading'){ if(document.addEventListener) document.addEventListener('DOMContentLoaded', diag); else window.attachEvent('onload', diag); }
-  else diag();
-})();
-</script>
-<div class="diag-bar"><span id="login-diag"></span><span id="login-diag-net"></span></div>
+
+
 </body>
 </html>

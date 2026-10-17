@@ -36,7 +36,7 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.38"
+	version    = "1.2.39"
 	// 仅监听本机回环：面板不对局域网/公网暴露；外部访问只能经 fnOS 远程访问体系
 	// （需飞牛账号登录）由 fnOS 从本机回环转发进来。请勿改为 0.0.0.0/:port 对外暴露。
 	listenAddr = "127.0.0.1:8899"
