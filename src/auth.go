@@ -196,8 +196,9 @@ func (r *authStore) delSession(token string) {
 }
 
 // checkSession 校验会话：存在、未超空闲/绝对时限；通过则刷新活跃时间并返回用户名。
-// 支持两种凭据：Authorization: Bearer <token> 头部（优先，穿透 PC 客户端 iframe 的
-// 第三方 Cookie 拦截）或 xbox_sid Cookie（传统方式，手机/电脑浏览器同源访问时有效）。
+// 支持三种凭据（按优先级）：Authorization: Bearer <token> 头部、xbox_sid Cookie、
+// ?sid=<token> 查询参数。后两者覆盖 fnOS 客户端 iframe 场景：远程访问域名下第三方
+// Cookie 被拦截、隐藏 iframe 无法自定义请求头，只能靠 URL 带 token。
 func (r *authStore) checkSession(req *http.Request) (string, bool) {
 	token := ""
 	if ah := req.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
@@ -207,6 +208,9 @@ func (r *authStore) checkSession(req *http.Request) (string, bool) {
 		if c, err := req.Cookie("xbox_sid"); err == nil {
 			token = c.Value
 		}
+	}
+	if token == "" {
+		token = strings.TrimSpace(req.URL.Query().Get("sid"))
 	}
 	if token == "" {
 		return "", false

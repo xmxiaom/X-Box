@@ -20,9 +20,11 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -31,7 +33,7 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.34"
+	version    = "1.2.35"
 	// 监听所有接口（含 IPv6）：允许通过 DDNS 域名（如 your-domain.example.com:8899）从外部访问面板。
 	// 已配合 auth.go 的登录保护（多账户 + 10 分钟空闲超时）；请仅在路由器/光猫放行可信来源。
 	listenAddr = ":8899"
@@ -98,9 +100,27 @@ func main() {
 	mux.HandleFunc("GET /", srv.handleRoot)
 
 	log.Printf("X-Box v%s 启动，监听 %s（已启用登录保护，面板对外需登录）", version, listenAddr)
-	if err := http.ListenAndServe(listenAddr, authMiddleware(mux)); err != nil {
+	if err := http.ListenAndServe(listenAddr, formBridge(authMiddleware(mux))); err != nil {
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
+}
+
+// formBridge 表单桥接：fnOS 客户端 iframe 内 fetch/XHR 子资源请求不可用，
+// 前端改走「隐藏 iframe 导航通道」——POST 经表单提交，载荷放在 _body 字段。
+// 此处把 application/x-www-form-urlencoded 的 _body 还原成 JSON 请求体，
+// 下游 handler 零改动；GET 通道则由 checkSession 的 ?sid= 查询参数鉴权。
+func formBridge(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+			_ = r.ParseForm()
+			if b := r.PostFormValue("_body"); b != "" {
+				r.Body = io.NopCloser(strings.NewReader(b))
+				r.Header.Set("Content-Type", "application/json")
+				r.ContentLength = int64(len(b))
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

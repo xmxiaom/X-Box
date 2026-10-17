@@ -50,7 +50,7 @@ function makeDom(authed, opts) {
     runScripts: 'dangerously',
     pretendToBeVisual: true,
     beforeParse(window) {
-      window.fetch = stubFetch;
+      window.fetch = opts.failFetch ? (() => Promise.reject(new Error('network'))) : stubFetch;
       // XMLHttpRequest 桩（jsdom 自带 XHR 会走真实网络打 127.0.0.1:8899 失败）：
       // 登录通道现在由 ES5 独立脚本经 XHR 发送，必须桩掉才能测
       window.XMLHttpRequest = function () {
@@ -229,6 +229,21 @@ function makeDom(authed, opts) {
   try { acorn.parse(blocks[1], { ecmaVersion: 5 }); } catch (e) { failures.push('R: ES5 登录层非 ES5 兼容: ' + e.message.slice(0, 60)); }
   const stripped = blocks[1].replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1'); // 去注释，避免注释文字误报
   check(/\bconst\b|\blet\b|=>|async |await |\.\.\.|\?\?/.test(stripped) === false, 'R: ES5 登录层含现代语法');
+
+  /* ---------- 场景D：fetch 通道失败 → 自动切换导航通道（iframe） ---------- */
+  {
+    const { doc, win } = makeDom(true, { failFetch: true });
+    await sleep(250);
+    // 不 await：jsdom 下 iframe onload 不触发，navApi promise 永不 settle（真实浏览器会触发）
+    win.api('/api/overview').catch(() => {});
+    await sleep(50); // 等 fetch 拒绝的微任务链跑完（catch → switchToNav → navApi 建 iframe）
+    check(win.__navMode === true, 'D: fetch 失败后未切换到导航通道');
+    check(!!doc.querySelector('iframe[id^="navf"]'), 'D: 未创建导航通道 iframe');
+    check(typeof win.navApi === 'function' && typeof win.navUrl === 'function', 'D: 导航通道函数缺失');
+    win.saveAuthToken('tok123');
+    check(win.navUrl('/api/overview') === '/api/overview?sid=tok123', 'D: navUrl 未带 sid: ' + win.navUrl('/api/overview'));
+    check(win.navUrl('/api/ddns/sync?x=1') === '/api/ddns/sync?x=1&sid=tok123', 'D: navUrl 带查询参数时 sid 拼接错误');
+  }
 
   if (failures.length) {
     console.error(failures.join('\n'));

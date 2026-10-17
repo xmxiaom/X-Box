@@ -470,7 +470,18 @@ async function api(path, opts) {
   if(window.__xboxToken) init.headers['Authorization'] = 'Bearer ' + window.__xboxToken;
   if (opts.body) init.body = opts.body;
   if (opts.headers) { for (const k in opts.headers) init.headers[k] = opts.headers[k]; }
-  const r = await fetch(path, init);
+  // 通道选择：fetch 通道 8 秒无响应即永久切换到导航通道（隐藏 iframe）
+  if(apiChannel === 'nav') return navApi(path, opts);
+  let r;
+  try{
+    r = await Promise.race([
+      fetch(path, init),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT')), 8000))
+    ]);
+  }catch(e){
+    switchToNav();
+    return navApi(path, opts);
+  }
   // 非 2xx：先尝试解析后端 fail() 的具体错误信息（避免只显示"HTTP 500"这种无信息量的提示）
   if (!r.ok) {
     if (r.status === 401) {
@@ -483,6 +494,73 @@ async function api(path, opts) {
   const j = await r.json();
   if (!j.ok) throw new Error(j.error || '请求失败');
   return j;
+}
+// ---- 导航通道（隐藏 iframe）：fnOS 客户端远程域名下 fetch/XHR 子资源请求挂起，
+// 但页面导航可达——GET 用 iframe.src、POST 用隐藏表单（_body 字段承载 JSON，
+// 由服务端 formBridge 还原），token 走 ?sid= 查询参数（iframe 无法自定义头）。 ----
+let apiChannel = 'fetch'; // 'fetch' | 'nav'
+window.__navMode = false; // 观测标志：当前是否处于导航通道（iframe 兼容模式）
+let navSeq = 0;
+function switchToNav(){
+  if(apiChannel !== 'nav'){
+    apiChannel = 'nav';
+    window.__navMode = true;
+    toast('网络通道已切换为兼容模式', 'good');
+  }
+}
+function navUrl(path){
+  const sep = path.indexOf('?') >= 0 ? '&' : '?';
+  return window.__xboxToken ? path + sep + 'sid=' + encodeURIComponent(window.__xboxToken) : path;
+}
+function navApi(path, opts){
+  opts = opts || {};
+  const method = opts.method || 'GET';
+  return new Promise((resolve, reject) => {
+    const id = 'navf' + (navSeq++);
+    const frame = document.createElement('iframe');
+    frame.id = id; frame.name = id;
+    frame.style.cssText = 'display:none;width:0;height:0;border:0';
+    let form = null, done = false;
+    const cleanup = () => { setTimeout(() => { try{ frame.remove(); }catch(e){} if(form){ try{ form.remove(); }catch(e){} } }, 0); };
+    frame.onload = () => {
+      if(done) return; done = true;
+      try{
+        const text = (frame.contentDocument && frame.contentDocument.body) ? frame.contentDocument.body.textContent : '';
+        const j = JSON.parse(text);
+        if(j && j.ok){ resolve(j); }
+        else if(j && j.needLogin){ clearAuthToken(); showLogin(true); reject(new Error(j.error || '登录已过期')); }
+        else { reject(new Error((j && j.error) || '请求失败')); }
+      }catch(e){ reject(new Error('响应解析失败')); }
+      cleanup();
+    };
+    frame.onerror = () => { if(done) return; done = true; reject(new Error('网络错误')); cleanup(); };
+    document.body.appendChild(frame);
+    if(method === 'POST'){
+      form = document.createElement('form');
+      form.method = 'POST';
+      form.action = navUrl(path);
+      form.target = id;
+      form.style.cssText = 'display:none';
+      const inp = document.createElement('input');
+      inp.type = 'hidden'; inp.name = '_body'; inp.value = opts.body || '{}';
+      form.appendChild(inp);
+      document.body.appendChild(form);
+      form.submit();
+    }else{
+      frame.src = navUrl(path);
+    }
+  });
+}
+// 启动时探测通道：fetch 3 秒不通且导航通道可用 → 直接用导航通道（避免首次请求干等 8 秒）
+async function detectChannel(){
+  try{
+    const r = await Promise.race([
+      fetch('/api/auth/status', {cache:'no-store'}),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT')), 3000))
+    ]);
+    if(r) return; // fetch 通道可用（401 也算通）
+  }catch(e){}
+  try{ await navApi('/api/auth/status'); switchToNav(); }catch(e){}
 }
 function fmtB(n){if(n==null||isNaN(n))return'—';if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<3);return n.toFixed(2)+' '+u[i]}
 function fmtKB(n){return fmtB(n*1024)}
@@ -1399,7 +1477,7 @@ async function boot(){
   }
   showLogin(!!(st && st.configured));
 }
-boot();
+detectChannel().then(boot); // 先探测网络通道（客户端域名下 fetch/XHR 可能挂起），再启动
 let loginFocused = false;
 function showLogin(configured){
   const mask = document.getElementById('login-mask');
@@ -1449,17 +1527,14 @@ async function doLogin(){
   const btn = document.getElementById('login-btn');
   if(btn) btn.disabled = true; // 防重复提交
   try{
-    // fetch 主通道，8 秒无响应则回退 XHR（客户端可能只卡其中一条通道）
-    const j = await Promise.race([
-      api('/api/login', {method:'POST', body: JSON.stringify({user: user, pass: pass})}),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT')), 8000))
-    ]);
+    // api() 内部已含通道回退：fetch 8 秒不通自动切导航通道（隐藏 iframe 表单 POST）
+    const j = await api('/api/login', {method:'POST', body: JSON.stringify({user: user, pass: pass})});
     saveAuthToken(j.sid || '');
     currentUser = user || 'admin';
     enterApp();
     if(btn) btn.disabled = false;
   }catch(e){
-    doLoginXHR(user, pass, msg, btn); // 按钮状态由 XHR 回调管理
+    doLoginXHR(user, pass, msg, btn); // fetch 通道彻底不可用时的最终回退
   }
 }
 function bindLogin(){
@@ -1661,8 +1736,8 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
       el.textContent = parts.join(' · ');
     }
     if(!netEl) return;
-    var results = {fetch: '检测中', xhr: '检测中'};
-    function render(){ netEl.textContent = '网络: fetch=' + results.fetch + ' · xhr=' + results.xhr; }
+    var results = {fetch: '检测中', xhr: '检测中', nav: '检测中'};
+    function render(){ netEl.textContent = '网络: fetch=' + results.fetch + ' · xhr=' + results.xhr + ' · 导航=' + results.nav; }
     function finish(tag, ok, detail){ results[tag] = ok ? '正常' : detail; render(); }
     render();
     // 通道一：XHR
@@ -1678,6 +1753,18 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
     }else{
       finish('fetch', false, '不可用');
     }
+    // 通道三：导航（隐藏 iframe.src）——页面文档能加载说明此通道可达
+    var nf = document.createElement('iframe');
+    nf.style.cssText = 'display:none;width:0;height:0;border:0';
+    nf.onload = function(){
+      var t = '', okFlag = false;
+      try{ t = nf.contentDocument && nf.contentDocument.body ? nf.contentDocument.body.textContent : ''; }catch(e){}
+      try{ okFlag = t ? !!JSON.parse(t).ok : false; }catch(e){}
+      finish('nav', okFlag, '失败');
+      setTimeout(function(){ try{ nf.remove(); }catch(e){} }, 0);
+    };
+    nf.onerror = function(){ finish('nav', false, '无法连接'); };
+    nf.src = '/api/auth/status';
   }
   function bind(){
     var btn = $('login-btn'), pass = $('login-pass'), user = $('login-user'), msg = $('login-msg');
