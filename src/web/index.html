@@ -1363,6 +1363,7 @@ let appEntered = false, appRefreshTimer = null;
 // 登录成功后进入主面板：直接在当前页面显示后台并加载数据，不依赖 location.reload()。
 // 飞牛原生应用 webview 中 location.reload() 可能不生效，会导致登录层被 hideLogin 隐藏后后台未显示 → 一片空白。
 async function enterApp(){
+  if(!currentUser && window.__loginUser) currentUser = window.__loginUser; // 承接 ES5 登录层传入的账户名
   document.getElementById('login-mask').style.display = 'none';
   document.querySelector('.app').classList.add('show');
   if(appEntered) return;            // 防止重复初始化（boot 已登录 与 doLogin 成功 都会走到这里）
@@ -1407,31 +1408,8 @@ function showLogin(configured){
   }
 }
 function hideLogin(){ document.getElementById('login-mask').style.display = 'none'; }
-async function doLogin(){
-  const user = document.getElementById('login-user').value.trim();
-  const pass = document.getElementById('login-pass').value;
-  const msg = document.getElementById('login-msg');
-  if(!pass){ msg.textContent='请输入密码'; return; }
-  const btn = document.getElementById('login-btn');
-  if(btn) btn.disabled = true; // 防重复提交
-  try{
-    await api('/api/login', {method:'POST', body: JSON.stringify({user: user, pass: pass})});
-    currentUser = user || 'admin';
-    enterApp();
-  }catch(e){ msg.textContent = e.message || '登录失败，请重试'; }
-  if(btn) btn.disabled = false;
-}
-// 登录表单元素在脚本块之后才解析，必须等 DOM 就绪再绑定，否则 getElementById 返回 null、监听器失效（点击登录无反应）。
-function bindLogin(){
-  const btn = document.getElementById('login-btn');
-  const pass = document.getElementById('login-pass');
-  const user = document.getElementById('login-user');
-  if(btn) btn.addEventListener('click', doLogin);
-  if(pass) pass.addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
-  if(user) user.addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
-}
-if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindLogin);
-else bindLogin();
+// 注意：登录的点击/回车绑定与请求发送全部由页面尾部的 ES5 独立脚本负责（XMLHttpRequest，零现代语法），
+// 这里不再绑定，避免某些旧内核下 fetch/async 不可用时登录无反应；登录成功后由该脚本回调 enterApp()。
 async function doLogout(){
   try{ await fetch('/api/logout', {method:'POST', cache:'no-store'}); }catch(e){}
   // 重置前端会话态并直接回到登录层，不依赖 location.reload()（避免 webview reload 不生效导致空白）
@@ -1586,5 +1564,58 @@ function delUser(u){
     <div class="login-msg" id="login-msg"></div>
   </div>
 </div>
+<script>
+/* ===== 登录通道（ES5 + XMLHttpRequest 独立层）=====
+ * 不依赖 fetch / async / let / const / 箭头函数 / 模板字符串等任何 ES6+ 特性，
+ * 也不依赖上面的主脚本——只要浏览器支持 ES5（2012 年起的所有内核），登录就能用。
+ * 这是「无法登录」问题的根治层：主脚本若因任何原因未执行/执行失败，登录依然可用。
+ * 登录成功后：主脚本活着 → 回调 window.enterApp() 进入面板；否则 reload 靠服务端已登录态进面板。 */
+(function(){
+  function $(id){ return document.getElementById(id); }
+  function bind(){
+    var btn = $('login-btn'), pass = $('login-pass'), user = $('login-user'), msg = $('login-msg');
+    if(!btn) return;
+    var busy = false;
+    function doLogin(){
+      if(busy) return;
+      var u = user ? String(user.value).replace(/^\s+|\s+$/g, '') : '';
+      var p = pass ? String(pass.value) : '';
+      if(!p){ if(msg) msg.textContent = '请输入密码'; return; }
+      busy = true; btn.disabled = true;
+      if(msg) msg.textContent = '';
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/login', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.onreadystatechange = function(){
+        if(xhr.readyState !== 4) return;
+        busy = false; btn.disabled = false;
+        var j = null;
+        try{ j = JSON.parse(xhr.responseText); }catch(e){}
+        if(xhr.status === 200 && j && j.ok){
+          if(typeof window.enterApp === 'function'){
+            window.__loginUser = (u || 'admin'); // 主脚本 currentUser 为 let 声明不挂 window，经此桥传
+            window.enterApp();
+          }else{
+            window.location.reload(); // 主脚本不可用：靠服务端已登录会话重新进入
+          }
+        }else{
+          if(msg) msg.textContent = (j && j.error) || ('登录失败（HTTP ' + xhr.status + '）');
+        }
+      };
+      xhr.onerror = function(){
+        busy = false; btn.disabled = false;
+        if(msg) msg.textContent = '网络错误，请检查连接后重试';
+      };
+      xhr.send(JSON.stringify({user: u, pass: p}));
+    }
+    function onKey(e){ var k = e.key || ''; if(k === 'Enter' || e.keyCode === 13) doLogin(); }
+    if(btn.addEventListener) btn.addEventListener('click', doLogin); else btn.onclick = doLogin;
+    if(pass && pass.addEventListener) pass.addEventListener('keydown', onKey);
+    if(user && user.addEventListener) user.addEventListener('keydown', onKey);
+  }
+  if(document.readyState === 'loading'){ if(document.addEventListener) document.addEventListener('DOMContentLoaded', bind); else window.attachEvent('onload', bind); }
+  else bind();
+})();
+</script>
 </body>
 </html>

@@ -51,6 +51,23 @@ function makeDom(authed, opts) {
     pretendToBeVisual: true,
     beforeParse(window) {
       window.fetch = stubFetch;
+      // XMLHttpRequest 桩（jsdom 自带 XHR 会走真实网络打 127.0.0.1:8899 失败）：
+      // 登录通道现在由 ES5 独立脚本经 XHR 发送，必须桩掉才能测
+      window.XMLHttpRequest = function () {
+        this.readyState = 0; this.status = 0; this.responseText = '';
+        this.open = function (m, u) { this._m = m; this._u = u; };
+        this.setRequestHeader = function () {};
+        this.send = function (body) {
+          const self = this;
+          stubFetch(this._u, { method: this._m, body: body }).then(function (res) {
+            return res.json().then(function (j) { self.status = res.status; self._j = j; });
+          }).then(function () {
+            self.readyState = 4; self.responseText = JSON.stringify(self._j);
+            if (self.onreadystatechange) self.onreadystatechange();
+          });
+        };
+      };
+      if (opts.noFetch) delete window.fetch; // 场景C：模拟 fetch 不可用的降级内核
       window.setInterval = () => 0; // 阻断轮询定时器
       window.setTimeout = () => 0;  // 阻断 startTempLoop 递归；测试自身用 Node 定时器
       window.confirm = () => true;
@@ -155,6 +172,29 @@ function makeDom(authed, opts) {
     check(!doc.querySelector('.app').classList.contains('show'), 'B: 退出登录后 .app 仍显示');
   }
 
+  /* ---------- 场景C：降级内核（fetch 不可用）→ 登录必须仍可用 ---------- */
+  {
+    // 模拟旧 webview：fetch 不存在（主脚本 api() 会抛错但被 boot/enterApp 的 try/catch 兜住），
+    // 登录走 ES5 + XHR 独立层，必须能正常登录并进入面板
+    const { doc, win } = makeDom(false, { noFetch: true });
+    check(win.getComputedStyle(doc.getElementById('login-mask')).display === 'flex', 'C: 登录层初始不可见（fail-safe 失效）');
+    await sleep(200);
+    check(!doc.querySelector('.app').classList.contains('show'), 'C: 未登录时 .app 不应显示');
+    doc.getElementById('login-user').value = 'admin';
+    doc.getElementById('login-pass').value = 'pw-correct';
+    doc.getElementById('login-btn').click();
+    await sleep(80);
+    check(doc.querySelector('.app').classList.contains('show'), 'C: fetch 缺失时登录后 .app 未显示');
+    check(doc.getElementById('login-mask').style.display === 'none', 'C: fetch 缺失时登录后登录层未隐藏');
+    // 错误密码同样要有提示
+    win.doLogout();
+    await sleep(30);
+    doc.getElementById('login-pass').value = 'wrong';
+    doc.getElementById('login-btn').click();
+    await sleep(50);
+    check(doc.getElementById('login-msg').textContent === '账户或密码错误', 'C: 降级内核错误密码无提示');
+  }
+
   /* ---------- 回归项（静态检查同一文档） ---------- */
   {
     const { doc } = makeDom(true);
@@ -169,10 +209,14 @@ function makeDom(authed, opts) {
   check(/transition:transform \.15s ease,opacity \.15s ease/.test(html), 'R: 小屏过渡动画非 0.15s');
   check(!/transition:none/.test(html), 'R: 存在 transition:none（动画被关闭）');
   check(/login-mask\{[^}]*display:flex/.test(html), 'R: 登录层 CSS 默认非 flex（fail-safe 缺失）');
-  // 语法地板：页面脚本必须 ES2017 可解析（旧 webview 兼容硬约束）
-  const js = html.match(/<script>([\s\S]*)<\/script>/)[1];
+  // 语法地板：主脚本必须 ES2017 可解析；ES5 登录层必须 ES5 可解析（零现代语法）
+  const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+  check(blocks.length === 2, 'R: script 块数量=' + blocks.length + '，应为 2（主脚本 + ES5 登录层）');
   const acorn = require('acorn');
-  try { acorn.parse(js, { ecmaVersion: 2017 }); } catch (e) { failures.push('R: 脚本非 ES2017 兼容: ' + e.message.slice(0, 60)); }
+  try { acorn.parse(blocks[0], { ecmaVersion: 2017 }); } catch (e) { failures.push('R: 主脚本非 ES2017 兼容: ' + e.message.slice(0, 60)); }
+  try { acorn.parse(blocks[1], { ecmaVersion: 5 }); } catch (e) { failures.push('R: ES5 登录层非 ES5 兼容: ' + e.message.slice(0, 60)); }
+  const stripped = blocks[1].replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1'); // 去注释，避免注释文字误报
+  check(/\bconst\b|\blet\b|=>|async |await |\.\.\.|\?\?/.test(stripped) === false, 'R: ES5 登录层含现代语法');
 
   if (failures.length) {
     console.error(failures.join('\n'));

@@ -30,7 +30,7 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.30"
+	version    = "1.2.31"
 	// 监听所有接口（含 IPv6）：允许通过 DDNS 域名（如 your-domain.example.com:8899）从外部访问面板。
 	// 已配合 auth.go 的登录保护（多账户 + 10 分钟空闲超时）；请仅在路由器/光猫放行可信来源。
 	listenAddr = ":8899"

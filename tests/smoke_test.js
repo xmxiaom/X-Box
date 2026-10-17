@@ -69,7 +69,7 @@ global.fetch = async (url) => ({
 
 // HTML 指向 ../src/web/index.html
 const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'web', 'index.html'), 'utf-8');
-const m = html.match(/<script>([\s\S]*)<\/script>/);
+const m = html.match(/<script>([\s\S]*?)<\/script>/); // 非贪婪：只取第一个 script 块（主脚本），避免把 ES5 登录层和中间 HTML 也吃进来
 if (!m) { console.error('FAIL: no script block'); process.exit(1); }
 // startTempLoop 是递归定时器，本文件的 setTimeout 桩是立即执行，会让 tick 无限循环卡死进程：
 // 删掉所有"调用"（带分号；函数定义 startTempLoop(){ 不含分号，不会被误伤）
