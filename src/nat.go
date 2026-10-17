@@ -513,6 +513,30 @@ func publicIPv4Cached() (string, error) {
 	return ip, nil
 }
 
+var (
+	publicIPv6Cache   string
+	publicIPv6CacheAt time.Time
+	publicIPv6Mu      sync.Mutex
+)
+
+// publicIPv6Cached 带 60s 缓存的公网 IPv6 查询（DDNS 变化检测每轮调用，避免重复外联）。
+func publicIPv6Cached() (string, error) {
+	publicIPv6Mu.Lock()
+	defer publicIPv6Mu.Unlock()
+	if publicIPv6Cache != "" && time.Since(publicIPv6CacheAt) < 60*time.Second {
+		return publicIPv6Cache, nil
+	}
+	ip, _, err := queryPublicIP(6)
+	if err != nil {
+		if publicIPv6Cache != "" {
+			return publicIPv6Cache, nil // 陈旧缓存好过没有
+		}
+		return "", err
+	}
+	publicIPv6Cache, publicIPv6CacheAt = ip, time.Now()
+	return ip, nil
+}
+
 // nat 探测结果缓存：完整探测要连发多个 STUN 请求（最多可阻塞 10 秒+），
 // 高频调用（页面定时刷新、用户连点重测）一律沿用 5 分钟内的缓存结果，仅 force 才重测。
 var (

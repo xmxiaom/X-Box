@@ -111,13 +111,31 @@ func (r *ddnsRuntime) scan() {
 	r.mu.RLock()
 	cfg := r.cfg
 	r.mu.RUnlock()
+	iv := time.Duration(cfg.IntervalSec) * time.Second
+	if iv < 30*time.Second {
+		iv = 30 * time.Second
+	}
+	now := time.Now()
 	for i := range cfg.Records {
 		rec := &cfg.Records[i]
 		if !rec.Enabled {
 			continue
 		}
-		due := rec.LastCheckAt.IsZero() || time.Since(rec.LastCheckAt) >= time.Duration(cfg.IntervalSec)*time.Second
-		if !due {
+		// 每轮先解析当前 IP，用于变化检测（公网查询已带 60s 缓存，开销极低）
+		curIP, err := r.resolveIP(rec)
+		if err != nil {
+			// 仅超过间隔时才落地 failed，避免网络抖动每轮刷失败
+			if rec.LastCheckAt.IsZero() || now.Sub(rec.LastCheckAt) >= iv {
+				rec.LastCheckAt = now
+				rec.LastStatus = "failed"
+				rec.LastMessage = "IP 解析失败: " + err.Error()
+			}
+			continue
+		}
+		changed := rec.LastIP != "" && rec.LastIP != curIP
+		due := rec.LastCheckAt.IsZero() || now.Sub(rec.LastCheckAt) >= iv
+		// 触发条件：到间隔（首次/漂移/失败重试） 或 IP 变化且上一次同步成功（变化即更）
+		if !due && !(changed && rec.LastStatus == "success") {
 			continue
 		}
 		r.syncRecord(rec)
@@ -217,15 +235,10 @@ func (r *ddnsRuntime) resolveIP(rec *DDNSRecord) (string, error) {
 		}
 		fallthrough
 	default: // auto
-		family := 4
 		if rec.RecordType == "AAAA" {
-			family = 6
+			return publicIPv6Cached()
 		}
-		ip, _, err := queryPublicIP(family)
-		if err != nil {
-			return "", err
-		}
-		return ip, nil
+		return publicIPv4Cached()
 	}
 }
 
