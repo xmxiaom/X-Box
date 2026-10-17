@@ -448,6 +448,47 @@ func nicIPv4(name string) (string, error) {
 	return "", errors.New("未找到可用网卡地址")
 }
 
+// nicIPv6 取指定网卡（或自动挑选）的全局/可用 IPv6；优先公网全球单播（2000::/3），
+// 其次唯一本地地址（ULA）等其它非链路本地地址，链路本地地址被排除。
+func nicIPv6(name string) (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	var candidates []string
+	for _, ifc := range ifaces {
+		if name != "" && name != "auto" && ifc.Name != name {
+			continue
+		}
+		if ifc.Flags&net.FlagLoopback != 0 || ifc.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipnet.IP
+			if ip.To4() != nil || ip.IsLinkLocalUnicast() || ip.IsLoopback() {
+				continue
+			}
+			// 全球单播（2000::/3）优先立即返回
+			if len(ip) == net.IPv6len && (ip[0]&0xe0) == 0x20 {
+				return ip.String(), nil
+			}
+			candidates = append(candidates, ip.String())
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0], nil
+	}
+	return "", errors.New("未找到可用 IPv6 网卡地址")
+}
+
 var (
 	publicIPv4Cache   string
 	publicIPv4CacheAt time.Time

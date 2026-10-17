@@ -180,8 +180,7 @@ func (r *ddnsRuntime) resolveIP(rec *DDNSRecord) (string, error) {
 		return rec.IPSourceArg, nil
 	case "interface":
 		if rec.RecordType == "AAAA" {
-			// 简化：interface 来源只取 IPv4；AAAA 建议用 auto
-			return "", fmt.Errorf("网卡来源暂只支持 IPv4，AAAA 请改用 自动/公网查询")
+			return nicIPv6(rec.IPSourceArg)
 		}
 		return nicIPv4(rec.IPSourceArg)
 	case "dns":
