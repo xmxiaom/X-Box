@@ -131,6 +131,9 @@ class BH(BaseHTTPRequestHandler):
             self.end_headers(); self.wfile.write(PAGE)
         elif self.path == '/s.js':
             self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers(); self.wfile.write(JS)
+        elif self.path == '/t.js':
+            self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
+            self.wfile.write(b'if(top.location.href!=self.location.href){top.location="http://x/y";}document.domain="192.168.1.1";')
         elif self.path == '/style.css':
             self.send_response(200); self.send_header('Content-Type', 'text/css'); self.end_headers()
             self.wfile.write(b'.x{background:url("http://' + H.encode() + b'/pic.png")}')
@@ -168,6 +171,11 @@ check("浏览器代理meta refresh重写", 'url="/b/http/' + H + '/next"' in bod
 check("浏览器代理内联JS location替换", '<script>var h="127.0.0.1";</script>' in body, body[:400])
 st, body = get(B + "/s.js")
 check("浏览器代理JS文件location替换", st == 200 and body == 'var a="127.0.0.1";var b="http://127.0.0.1:8899";var c="8899";', body[:120])
+# 老光猫页面两类必崩写法的中和（v1.2.50）：
+# document.domain 赋值在现代 Chrome 抛错中断整个 script；top.location 跨源读抛 SecurityError
+st, body = get(B + "/t.js")
+check("浏览器代理top.location中和", st == 200 and 'top.location' not in body and body.count('self.location') == 3, body[:160])
+check("浏览器代理document.domain中和", st == 200 and 'document.domain=' not in body and '192.168.1.1' not in body.split('xb*/')[0], body[:160])
 st, body = get(B + "/style.css")
 check("浏览器代理CSS文件重写", st == 200 and '/b/http/' + H + '/pic.png' in body, body[:120])
 st, body = get(B + "/pic.png")

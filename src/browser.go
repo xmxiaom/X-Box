@@ -446,6 +446,8 @@ var (
 	browserReRefresh   = regexp.MustCompile(`(?i)<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>`)
 	browserReRefreshU  = regexp.MustCompile(`(?i)(url\s*=\s*)(['"]?)([^'">;]+)`)
 	browserReJSHost    = regexp.MustCompile(`(?i)\b(location|document\.location|window\.location|top\.location|self\.location|parent\.location)\s*\.\s*(hostname|host|origin|protocol|port)\b`)
+	browserReDocDomain = regexp.MustCompile(`(?i)\bdocument\s*\.\s*domain\s*=\s*["'][^"']*["']`)
+	browserReTopLoc    = regexp.MustCompile(`(?i)\btop\s*\.\s*location\b`)
 )
 
 // browserUnProxy 把面板形态的 URL（含 /b/{scheme}/{host}/...）还原为目标 URL，
@@ -581,7 +583,7 @@ func browserRewriteRefreshValue(v string, tu *url.URL) string {
 	})
 }
 
-// browserRewriteJS 替换页面 JS（含内联）里的 location.hostname/host/origin/
+// browserRewriteJS 替换页面 JS（含内联）里的 location.* 为面板值 + 中和必崩写法。
 // protocol/port 为**面板**的对应值。这些值在代理页面下本来就是面板域名；页面
 // JS 拿它们拼 URL 时得到"面板根下的路径"（如 https://面板/cgi-bin/x），由
 // handleOrphan 兜底重定向回最近站点的代理路径。此前替换为真实目标值反而引导
@@ -594,7 +596,7 @@ func browserRewriteJS(js string, panelScheme, panelHost string) string {
 		"protocol": `"` + panelScheme + `:"`,
 		"port":     `"` + panelPort(panelHost) + `"`,
 	}
-	return browserReJSHost.ReplaceAllStringFunc(js, func(m string) string {
+	js = browserReJSHost.ReplaceAllStringFunc(js, func(m string) string {
 		i := strings.LastIndex(m, ".")
 		if i < 0 {
 			return m
@@ -605,6 +607,21 @@ func browserRewriteJS(js string, panelScheme, panelHost string) string {
 		}
 		return m
 	})
+	return browserDefusePageJS(js)
+}
+
+// browserDefusePageJS 中和老页面两类"必崩"写法（光猫/路由器页面极常见）：
+//  1. document.domain = "192.168.1.1" —— 老跨 frame 技巧，现代 Chrome 直接抛
+//     "Failed to set document.domain"，整个 <script> 块中断，登录表单等后续
+//     渲染全部消失；中和为无害注释。
+//  2. top.location（读 href 比较或赋值跳转）—— top 是 fnOS 客户端顶层窗口
+//     （跨源），读属性抛 SecurityError，赋值被 sandbox 静默阻止；统一改写为
+//     self.location，同源可读不抛，且"想让顶层跳转"在代理场景下恰好应该
+//     落回当前框架。
+func browserDefusePageJS(js string) string {
+	js = browserReDocDomain.ReplaceAllString(js, "/*xb*/")
+	js = browserReTopLoc.ReplaceAllString(js, "self.location")
+	return js
 }
 
 func panelHostname(host string) string {
