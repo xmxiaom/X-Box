@@ -1316,7 +1316,7 @@ function openProxyForm(id){
   const body = `
     <div class="form-row"><label>域名（多个用逗号分隔，支持 *.example.com 通配）</label><input type="text" id="px-hosts" value="${esc(s?(s.hosts||[]).join(', '):'')}" placeholder="nas.example.com, app.example.com"></div>
     <div class="form-row"><label>后端地址</label><input type="text" id="px-backend" value="${esc(s?s.backend:'')}" placeholder="http://192.168.1.20:8080"></div>
-    <div class="form-row"><label>路径前缀（留空=整站）</label><input type="text" id="px-prefix" value="${esc(s?s.pathPrefix:'')}" placeholder="/sub"></div>
+    <div class="form-row"><label>路径前缀<span id="px-prefix-hint" style="color:var(--muted);font-weight:normal">（留空=整站）</span></label><input type="text" id="px-prefix" value="${esc(s?s.pathPrefix:'')}" placeholder="选填，如 /app" oninput="document.getElementById('px-prefix-hint').textContent=this.value.trim()?('（前缀 '+this.value.trim()+'）'):'（留空=整站）'"></div>
     <label class="field-check"><input type="checkbox" id="px-strip" ${s&&s.stripPrefix?'checked':''}> 转发时去除路径前缀</label>
     <label class="field-check"><input type="checkbox" id="px-enabled" ${s?s.enabled:'checked'}> 启用此站点</label>
     <label class="field-check"><input type="checkbox" id="px-autoddns" ${s&&s.autoDDNS?'checked':''}> 联动 DDNS：自动为域名创建解析记录</label>
