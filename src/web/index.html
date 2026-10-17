@@ -1455,7 +1455,7 @@ function browserNewTab(url){
   f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals');
   f.setAttribute('referrerpolicy', 'no-referrer');
   document.getElementById('browser-frames').appendChild(f);
-  const t = {id: ++browserSeq, frame: f, url: url||'', raw: url||'', title: '新标签页'};
+  const t = {id: ++browserSeq, frame: f, url: url||'', raw: browserFromProxy(url)||'', title: '新标签页'};
   browserTabs.push(t);
   f.addEventListener('load', function(){ browserOnFrameLoad(t); });
   browserSetActive(browserTabs.length-1);
@@ -1488,11 +1488,58 @@ function browserRenderTabs(){
   });
   box.innerHTML = h;
 }
-function browserSetSub(s){ document.getElementById('browser-sub').textContent = s || '经本机代理加载（Ctrl+滚轮缩放；链接/弹窗均在框架内打开）'; }
+function browserSetSub(s){ document.getElementById('browser-sub').textContent = s || '经本机代理加载（Ctrl+滚轮缩放；链接在新标签打开，不跳外部浏览器）'; }
+// 原始 URL → 代理路径 /b/{scheme}/{host}{path}（fragment 不发给服务端）
+function browserToProxy(u){
+  u = (u||'').trim();
+  if(!u) return '';
+  if(!/^https?:\/\//i.test(u)) u = 'http://'+u;
+  const m = u.match(/^(https?):\/\/([^\/?#]+)([^#]*)/);
+  if(!m) return '';
+  return '/b/'+m[1]+'/'+m[2]+(m[3]||'/');
+}
+// 代理路径 → 原始 URL（地址栏/标签标题显示真实地址，便于核对）
+function browserFromProxy(src){
+  const m = String(src||'').match(/\/b\/(https?)\/([^\/?#]+)([^#]*)/);
+  if(!m) return '';
+  return m[1]+'://'+m[2]+(m[3]||'/');
+}
+// 打开地址：newTab=true 时新建标签页，否则在当前标签导航
+function browserOpenURL(u, newTab){
+  const src = browserToProxy(u);
+  if(!src){ toast('网址格式错误','err'); return; }
+  const raw = browserFromProxy(src);
+  let t = newTab ? browserNewTab(src) : browserTabs[browserActive];
+  if(!t) t = browserNewTab(src);
+  if(!t) return;
+  t.url = src; t.raw = raw; t.title = (raw.match(/^https?:\/\/([^\/:]+)/)||['',''])[1].slice(0,20) || t.title;
+  t.frame.src = src;
+  document.getElementById('browser-url').value = raw;
+  browserSetSub('经本机代理：'+raw);
+  browserRenderTabs();
+}
+// 接收代理页面（同源）上报：新标签打开 / 新窗口请求
+if(window.addEventListener) window.addEventListener('message', function(e){
+  const d = e.data;
+  if(!d || d.__xbox !== 1) return;
+  let from = false;
+  for(let i = 0; i < browserTabs.length; i++){ if(browserTabs[i].frame && browserTabs[i].frame.contentWindow === e.source){ from = true; break; } }
+  if(!from) return;                       // 只接受本面板代理页的消息
+  const u = (d.url||'').trim();
+  if(!u || /^(about|javascript|data):/i.test(u)) return;
+  browserOpenURL(u, d.type !== 'nav');    // newtab → 新建标签；nav → 当前标签
+});
 // 每次框架加载后：刷新标签标题 + 绑定缩放与链接拦截（同源代理，可直接操作 contentDocument）
 function browserOnFrameLoad(t){
   let doc; try{ doc = t.frame.contentDocument; }catch(e){ return; }
   if(!doc) return;
+  // 同步地址栏：页面内导航（点链接/重定向）后显示真实地址
+  try{
+    const loc = t.frame.contentWindow.location;
+    const cur = (loc.pathname||'') + (loc.search||'');
+    const raw = browserFromProxy(cur);
+    if(raw){ t.url = cur; t.raw = raw; document.getElementById('browser-url').value = raw; browserSetSub('经本机代理：'+raw); }
+  }catch(e){}
   try{ const ti = (doc.title||'').trim(); if(ti) t.title = ti.slice(0, 20); }catch(e){}
   browserRenderTabs();
   if(doc.__zb) { browserApplyZoom(doc); return; }
@@ -1513,27 +1560,17 @@ function browserOnFrameLoad(t){
     while(n && n.nodeType === 1 && n.tagName !== 'A' && n.tagName !== 'FORM' && n !== doc.documentElement) n = n.parentNode;
     if(n && n.nodeType === 1 && (n.tagName === 'A' || n.tagName === 'FORM') && n.target && n.target !== '_self'){ n.target = '_self'; }
   }, true);
-  try{ doc.defaultView.open = function(u){ try{ doc.defaultView.location.href = String(u); }catch(e){} return null; }; }catch(e){}
+  // 注：window.open 由服务端注入的脚本接管（postMessage → 宿主新建标签页），
+  // 宿主不再覆盖它，否则会把新标签请求又压回当前框架。
   browserApplyZoom(doc);
 }
 function browserApplyZoom(doc){
   try{ if(doc && doc.body) doc.body.style.zoom = browserZoom; }catch(e){}
 }
 function goBrowser(){
-  let u = (document.getElementById('browser-url').value||'').trim();
+  const u = (document.getElementById('browser-url').value||'').trim();
   if(!u) return;
-  if(!/^https?:\/\//i.test(u)) u = 'http://'+u;
-  const m = u.match(/^(https?):\/\/([^\/?#]+)([^#]*)/);
-  if(!m){ toast('网址格式错误','err'); return; }
-  // 路径式同源代理：/b/{scheme}/{host}{path}——配合服务端注入 <base>，
-  // 页面内一切相对 URL（含 JS 动态 fetch/XHR/跳转）都自动回到代理
-  const src = '/b/'+m[1]+'/'+m[2]+(m[3]||'/');
-  let t = browserTabs[browserActive];
-  if(!t) t = browserNewTab('');
-  t.url = src; t.raw = u; t.title = m[2];
-  t.frame.src = src;
-  browserRenderTabs();
-  browserSetSub('经本机代理：'+u);
+  browserOpenURL(u, false);
 }
 
 /* ---------- 终端（命令执行控制台，显式连接/断开会话） ---------- */

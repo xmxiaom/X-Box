@@ -1,29 +1,35 @@
 package main
 
-// 浏览器模块：同源网页代理（路径式 + <base> 注入）。
+// 浏览器模块：同源网页代理（路径式 + <base> 注入 + 全量 URL 重写 + JS 运行时接管）。
 //
 // 端点形态：/b/{scheme}/{host}/{path}?{query}，如
 //   /b/http/192.168.1.1/            → http://192.168.1.1/
 //   /b/https/example.com/a/b.html   → https://example.com/a/b.html
 //
-// 为什么是路径式 + base 而不是 /b?u=<url> + 属性重写：面板内 iframe 的文档
-// URL 在 /b/{scheme}/{host}/ 之下，注入 <base href="当前代理路径"> 后，浏览器
-// 对**一切相对 URL**——包括 JS 动态发起的 fetch/XHR、location 跳转、动态创建
-// 的 img/script——都按 base 解析回代理路径。零 JS 改写即可让路由器管理页
-// （192.168.1.1 等）这类大量使用相对路径 CGI 的页面正常工作（?u= 方案只重写
-// 静态属性，JS 动态请求全部 404，是"页面显示不正常"的根因）。
+// 为什么必须"全量重写"而不只是注入 <base>：
+//   面板通常经 fnOS 远程域名访问（https://xxx.fnos.net），用户的设备并不在
+//   NAS 局域网内。页面里任何**绝对 URL**（<a href="http://192.168.1.1/x">、
+//   JS 里写死的 fetch("http://192.168.1.1/cgi-bin/x")、location 跳转、302 的
+//   Location 头）一旦原样落到用户浏览器，就会被拿去直连 192.168.1.1 —— 结果
+//   就是"拒绝连接"/CORS 失败/页面残缺。所以必须把所有出口都改写成代理路径。
+//
+// 三层防线：
+//   1) 服务端静态重写：HTML 属性（href/src/action/poster/srcset/formaction/
+//      data-src…）、CSS url()、meta refresh、JS 里的 location.hostname|host|
+//      origin|protocol|port（页面 JS 用它们拼绝对 URL，替换为真实目标值）；
+//   2) 服务端注入运行时脚本：拦截 fetch / XHR.open / location.assign|replace /
+//      window.open / 动态插入节点的资源属性，一律改写为代理路径；
+//   3) <base> 兜底：覆盖 JS 动态发起的相对路径请求（无需改写任何业务逻辑）。
 //
 // 其余设计：
-//   - Cookie 双向透传（每请求独立 cookiejar 支持重定向链内种下的会话；回写给
-//     浏览器的 Cookie 默认作用域限 /b/{scheme}/{host}/ 子树，天然按站点隔离），
-//     路由器等需登录的站点可用；
+//   - 3xx 不跟随：重写 Location/Refresh 后交给浏览器重新发起代理请求（跨域跳转
+//     http↔https、换主机都能正确工作，地址栏同步更新）；
+//   - Cookie 双向透传，回写时显式 Path=/b/{scheme}/{host}/ —— 浏览器默认作用域
+//     是"当前请求目录"，在无子路径时会被抬到 /b/ 造成跨站点串 cookie，必须显式；
 //   - 保留响应原始 Content-Type（含 charset，GBK/GB2312 老页面不乱码）；
-//   - 剥离响应头 X-Frame-Options / CSP 与 HTML 内 CSP meta（解除内嵌限制）；
-//   - 非 HTML 一律流式透传（CSS 相对 url() 按 CSS 自身的代理 URL 解析，天然正确）；
-//   - 顶级路径 /b（fnOS 远程中转只拦 /api/*，页面导航路径畅通）。
-//
-// 局限（轻量级定位，有意不做）：页面内写死绝对 http:// 的资源引用不经代理；
-// 不改写 meta refresh。
+//   - 剥离 X-Frame-Options / CSP / CSP meta（解除内嵌限制）；
+//   - 代理失败返回可读中文 HTML 错误页（区分拒绝连接/超时/DNS 失败），并提示
+//     用终端在 NAS 侧自检——因为请求是 NAS 发出的，失败即"NAS 到目标不通"。
 //
 // 安全模型：与终端模块一致——面板本身仅 fnOS 账号体系可达（127.0.0.1 +
 // 局域网私网 IPv4 + fnOS 远程访问），代理不做额外鉴权/白名单：它是用户主动
@@ -42,8 +48,9 @@ import (
 )
 
 const (
-	browserMaxHTML   = 8 << 20  // HTML 注入 base 的读取上限 8MB
-	browserMaxStream = 64 << 20 // 其他内容透传上限 64MB
+	browserMaxText   = 8 << 20  // 需文本重写（HTML/CSS/JS）的读取上限 8MB
+	browserMaxStream = 64 << 20 // 其他内容流式透传上限 64MB
+	browserTimeout   = 30 * time.Second
 )
 
 // handleBrowserRoot GET /b（无子路径）：提示用法。
@@ -71,41 +78,45 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		sub += parts[2]
 	}
 	target := scheme + "://" + host + sub
+	tu, terr := url.Parse(target)
+	if terr != nil || tu.Host == "" {
+		fail(w, 400, "目标地址非法")
+		return
+	}
 
 	var body io.Reader
 	if r.Method == http.MethodPost && r.Body != nil {
 		body = r.Body // POST 表单体原样转发（登录等场景）
 	}
-	// 每请求独立 cookiejar：重定向链内（如登录 302）种下的会话 Cookie 会随
-	// 后续跳转请求自动携带；完成后回写给浏览器。
+	// 每请求独立 cookiejar：本请求（含目标站 Set-Cookie）种下的会话随响应回写。
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: browserTimeout,
 		Jar:     jar,
+		// 3xx 不跟随：重写 Location 后交给浏览器重新发起代理请求，
+		// 跨域/换协议/换主机跳转都能正确工作（跟随会导致最终 URL 与地址栏不一致）。
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 8 {
-				return http.ErrUseLastResponse
-			}
-			return nil
+			return http.ErrUseLastResponse
 		},
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
-		fail(w, 502, "构造请求失败")
+		browserFail(w, target, err)
 		return
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	if ct := r.Header.Get("Content-Type"); ct != "" && r.Method == http.MethodPost {
 		req.Header.Set("Content-Type", ct)
 	}
-	// 入向 Cookie 透传（浏览器按 /b/{host} 子树自动携带，天然按站点隔离）
+	// 入向 Cookie 透传（浏览器按 /b/{scheme}/{host}/ 子树自动携带，天然按站点隔离）
 	if ck := r.Header.Get("Cookie"); ck != "" {
 		req.Header.Set("Cookie", ck)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		fail(w, 502, "访问失败："+err.Error())
+		browserFail(w, target, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -114,37 +125,80 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	for _, h := range []string{"X-Frame-Options", "Content-Security-Policy", "Content-Security-Policy-Report-Only"} {
 		resp.Header.Del(h)
 	}
-	// 出向 Cookie 回写（jar 只存 name=value；不加属性 → 浏览器默认作用域为
-	// 当前代理路径目录 /b/{scheme}/{host}/，即只在该站点的代理请求中回传）
-	finalURL := resp.Request.URL
-	for _, c := range jar.Cookies(finalURL) {
-		w.Header().Add("Set-Cookie", c.Name+"="+c.Value)
+	// 跳转类响应头一律改写成代理路径后写给浏览器（否则浏览器直连目标 → 拒绝连接）
+	for _, h := range []string{"Location", "Content-Location", "Refresh"} {
+		v := resp.Header.Get(h)
+		if v == "" {
+			continue
+		}
+		if h == "Refresh" {
+			w.Header().Set(h, browserRewriteRefreshValue(v, tu))
+			continue
+		}
+		w.Header().Set(h, browserProxyURL(v, tu))
+	}
+	// 出向 Cookie 回写：显式 Path 限本站点代理子树（浏览器默认"当前请求目录"
+	// 在无子路径时会抬到 /b/，导致跨站点串 cookie）
+	cookiePath := "; Path=/b/" + scheme + "/" + host + "/"
+	for _, c := range jar.Cookies(tu) {
+		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePath)
 	}
 
 	ct := resp.Header.Get("Content-Type")
-	if strings.Contains(ct, "text/html") || strings.Contains(ct, "application/xhtml") {
-		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxHTML))
+	low := strings.ToLower(ct)
+	switch {
+	case strings.Contains(low, "text/html") || strings.Contains(low, "application/xhtml"):
+		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
-			fail(w, 502, "读取响应失败："+rerr.Error())
+			browserFail(w, target, rerr)
 			return
 		}
-		w.Header().Set("Content-Type", browserHTMLCT(ct)) // 保留原 charset（GBK 等不乱码）
-		_, _ = w.Write(browserInjectBase(string(data), finalURL))
-		return
+		w.Header().Set("Content-Type", browserKeepCharset(ct)) // 保留原 charset（GBK 等不乱码）
+		browserWriteStatus(w, resp.StatusCode)
+		_, _ = w.Write(browserRewriteHTML(string(data), tu))
+	case strings.Contains(low, "text/css"):
+		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
+		if rerr != nil {
+			browserFail(w, target, rerr)
+			return
+		}
+		w.Header().Set("Content-Type", browserKeepCharset(ct))
+		browserWriteStatus(w, resp.StatusCode)
+		_, _ = w.Write([]byte(browserRewriteCSS(string(data), tu)))
+	case strings.Contains(low, "javascript") || strings.Contains(low, "ecmascript"):
+		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
+		if rerr != nil {
+			browserFail(w, target, rerr)
+			return
+		}
+		w.Header().Set("Content-Type", browserKeepCharset(ct))
+		browserWriteStatus(w, resp.StatusCode)
+		_, _ = w.Write([]byte(browserRewriteJS(string(data), tu)))
+	default:
+		// 其余类型：流式透传（图片/字体/媒体/二进制）
+		if ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		if resp.ContentLength >= 0 && resp.ContentLength <= browserMaxStream {
+			w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
+		}
+		browserWriteStatus(w, resp.StatusCode)
+		if resp.StatusCode != 204 && resp.StatusCode != 304 {
+			_, _ = io.Copy(w, io.LimitReader(resp.Body, browserMaxStream))
+		}
 	}
-	// 其余类型：流式透传（CSS 相对 url() 按 CSS 自身代理 URL 解析，天然正确）
-	if ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-	if resp.ContentLength >= 0 && resp.ContentLength <= browserMaxStream {
-		w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
-	}
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, browserMaxStream))
 }
 
-// browserHTMLCT 保留原始 charset：原 Content-Type 已含 charset 原样返回；
+// browserWriteStatus 转发原始状态码（200 无需显式写）。
+func browserWriteStatus(w http.ResponseWriter, code int) {
+	if code != http.StatusOK {
+		w.WriteHeader(code)
+	}
+}
+
+// browserKeepCharset 保留原始 charset：原 Content-Type 已含 charset 原样返回；
 // 缺失时仅补 text/html（不强制 utf-8，交由页面 meta/浏览器探测）。
-func browserHTMLCT(ct string) string {
+func browserKeepCharset(ct string) string {
 	if strings.Contains(strings.ToLower(ct), "charset") {
 		return ct
 	}
@@ -152,10 +206,16 @@ func browserHTMLCT(ct string) string {
 }
 
 var (
-	browserReBase    = regexp.MustCompile(`(?i)<base\b[^>]*>`)
-	browserReHead    = regexp.MustCompile(`(?i)<head[^>]*>`)
-	browserReHTMLTag = regexp.MustCompile(`(?i)<html[^>]*>`)
-	browserReCSPMeta = regexp.MustCompile(`(?i)<meta[^>]+http-equiv\s*=\s*("content-security-policy"|'content-security-policy'|content-security-policy)[^>]*>`)
+	browserReBase      = regexp.MustCompile(`(?i)<base\b[^>]*>`)
+	browserReHead      = regexp.MustCompile(`(?i)<head[^>]*>`)
+	browserReHTMLTag   = regexp.MustCompile(`(?i)<html[^>]*>`)
+	browserReCSPMeta   = regexp.MustCompile(`(?i)<meta[^>]+http-equiv\s*=\s*("content-security-policy"|'content-security-policy'|content-security-policy)[^>]*>`)
+	browserReAttr      = regexp.MustCompile(`(?i)\s(href|src|action|poster|srcset|formaction|data-src|data-href|data-url|data-original)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`)
+	browserReSrcsetPart = regexp.MustCompile(`^(\s*)([^\s,]+)(.*)$`)
+	browserReCSSURL    = regexp.MustCompile(`(?i)url\(\s*('[^']*'|"[^"]*"|[^)]*?)\s*\)`)
+	browserReRefresh   = regexp.MustCompile(`(?i)<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>`)
+	browserReRefreshU  = regexp.MustCompile(`(?i)(url\s*=\s*)(['"]?)([^'">;]+)`)
+	browserReJSHost    = regexp.MustCompile(`(?i)\b(location|document\.location|window\.location|top\.location|self\.location|parent\.location)\s*\.\s*(hostname|host|origin|protocol|port)\b`)
 )
 
 // browserURLPath 代理路径形态的 URL（/b/{scheme}/{host}{path}?{query}）。
@@ -170,20 +230,258 @@ func browserURLPath(u *url.URL) string {
 	return "/b/" + u.Scheme + "/" + u.Host + p
 }
 
-// browserInjectBase 去掉原有 <base> 与 CSP meta，注入指向当前代理路径的
-// <base>（注入点：<head> 后 > <html> 后 > 文档最前）。base 值为 ASCII，任何
-// 字符集下注入均安全。
-func browserInjectBase(doc string, finalURL *url.URL) []byte {
+// browserProxyURL 把绝对/协议相对 URL 转成代理路径；相对 URL 与非 http(s) 原样返回。
+func browserProxyURL(s string, cur *url.URL) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	low := strings.ToLower(s)
+	for _, p := range []string{"javascript:", "mailto:", "tel:", "data:", "blob:", "about:", "vbscript:", "#"} {
+		if strings.HasPrefix(low, p) {
+			return s
+		}
+	}
+	if strings.HasPrefix(s, "//") { // 协议相对
+		s = cur.Scheme + ":" + s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return s
+	}
+	return browserURLPath(u)
+}
+
+// browserRewriteAttr 整体匹配形式：" name=value"（含引号/无引号）。
+func browserRewriteAttr(m string, tu *url.URL) string {
+	eq := strings.Index(m, "=")
+	if eq < 0 {
+		return m
+	}
+	left := m[:eq]
+	val := strings.TrimSpace(m[eq+1:])
+	q := ""
+	if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+		q = string(val[0])
+		val = val[1 : len(val)-1]
+	}
+	name := strings.ToLower(strings.TrimSpace(left))
+	var nv string
+	if name == "srcset" {
+		nv = browserRewriteSrcset(val, tu)
+	} else {
+		nv = browserProxyURL(val, tu)
+	}
+	if nv == val {
+		return m
+	}
+	if q == "" {
+		q = "\""
+	}
+	return left + "=" + q + nv + q
+}
+
+// browserRewriteSrcset "a.png 1x, b.png 2x" 逐项重写首字段。
+func browserRewriteSrcset(v string, tu *url.URL) string {
+	parts := strings.Split(v, ",")
+	for i, p := range parts {
+		m := browserReSrcsetPart.FindStringSubmatch(p)
+		if m == nil {
+			continue
+		}
+		parts[i] = m[1] + browserProxyURL(m[2], tu) + m[3]
+	}
+	return strings.Join(parts, ",")
+}
+
+// browserRewriteCSS 重写 CSS 里的绝对 url()。
+func browserRewriteCSS(css string, tu *url.URL) string {
+	return browserReCSSURL.ReplaceAllStringFunc(css, func(m string) string {
+		inner := m[strings.Index(m, "(")+1 : strings.LastIndex(m, ")")]
+		inner = strings.TrimSpace(inner)
+		q := ""
+		if len(inner) >= 2 && (inner[0] == '"' || inner[0] == '\'') && inner[len(inner)-1] == inner[0] {
+			q = string(inner[0])
+			inner = inner[1 : len(inner)-1]
+		}
+		nv := browserProxyURL(inner, tu)
+		if nv == inner {
+			return m
+		}
+		if q == "" {
+			q = "\""
+		}
+		return "url(" + q + nv + q + ")"
+	})
+}
+
+// browserRewriteRefreshValue 重写 Refresh 头里的 url=。
+func browserRewriteRefreshValue(v string, tu *url.URL) string {
+	return browserReRefreshU.ReplaceAllStringFunc(v, func(m string) string {
+		sub := browserReRefreshU.FindStringSubmatch(m)
+		if sub == nil {
+			return m
+		}
+		q := sub[2]
+		nv := browserProxyURL(sub[3], tu)
+		if q == "" {
+			q = "\""
+		}
+		return sub[1] + q + nv + q
+	})
+}
+
+// browserRewriteJS 替换页面 JS（含内联）里的 location.hostname/host/origin/
+// protocol/port —— 这些值在代理页面下是面板域名，页面 JS 若拿它们拼绝对 URL
+// 会跳回面板本身（404）或直连目标（拒绝连接），替换为真实目标值即可正常工作。
+func browserRewriteJS(js string, tu *url.URL) string {
+	vals := map[string]string{
+		"hostname": `"` + tu.Hostname() + `"`,
+		"host":     `"` + tu.Host + `"`,
+		"origin":   `"` + tu.Scheme + "://" + tu.Host + `"`,
+		"protocol": `"` + tu.Scheme + `:"`,
+		"port":     `"` + tu.Port() + `"`,
+	}
+	return browserReJSHost.ReplaceAllStringFunc(js, func(m string) string {
+		i := strings.LastIndex(m, ".")
+		if i < 0 {
+			return m
+		}
+		key := strings.ToLower(m[i+1:])
+		if v, has := vals[key]; has {
+			return v
+		}
+		return m
+	})
+}
+
+// browserRewriteHTML 全量重写 + 注入 base 与运行时脚本。
+func browserRewriteHTML(doc string, tu *url.URL) []byte {
+	doc = browserReAttr.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteAttr(m, tu) })
+	doc = browserRewriteCSS(doc, tu) // <style> 块与 style 属性内的绝对 url()
+	doc = browserReRefresh.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteRefreshValue(m, tu) })
+	doc = browserRewriteJS(doc, tu) // 内联 <script> 与事件属性里的 location.host/hostname 等
 	doc = browserReBase.ReplaceAllString(doc, "")
 	doc = browserReCSPMeta.ReplaceAllString(doc, "")
-	tag := `<base href="` + html.EscapeString(browserURLPath(finalURL)) + `">`
+	inject := `<base href="` + html.EscapeString(browserURLPath(tu)) + `">` + browserPatchScript(tu)
 	if m := browserReHead.FindStringIndex(doc); m != nil {
 		pos := m[1]
-		return []byte(doc[:pos] + tag + doc[pos:])
+		return []byte(doc[:pos] + inject + doc[pos:])
 	}
 	if m := browserReHTMLTag.FindStringIndex(doc); m != nil {
 		pos := m[1]
-		return []byte(doc[:pos] + tag + doc[pos:])
+		return []byte(doc[:pos] + inject + doc[pos:])
 	}
-	return []byte(tag + doc)
+	return []byte(inject + doc)
+}
+
+// browserPatchScript 运行时接管脚本（注入点越靠前越好：必须在页面脚本执行前）。
+// 作用：把 JS 动态发起的绝对 URL 一律改写为同源代理路径，并把新窗口/新标签请求
+// 通过 postMessage 交给面板宿主（新建面板标签页），杜绝跳出到外部浏览器或直连目标。
+func browserPatchScript(tu *url.URL) string {
+	// 目标值以字面量注入（ASCII 安全）；脚本内不出现 </script> 字面串
+	hostLit := `"` + tu.Hostname() + `"`
+	originLit := `"` + tu.Scheme + "://" + tu.Host + `"`
+	s := `<script>(function(){try{` +
+		`var P="/b/",H=` + hostLit + `,O=` + originLit + `;` +
+		// px: 任意 URL → 代理路径（相对/非 http 原样）
+		`function px(u){try{if(typeof u!=="string")return u;var s=u.replace(/^\s+|\s+$/g,"");if(!s)return u;` +
+		`var l=s.toLowerCase();if(l.indexOf("javascript:")===0||l.indexOf("data:")===0||l.indexOf("mailto:")===0||l.indexOf("#")===0)return u;` +
+		`if(s.indexOf("//")===0)s=location.protocol+s;` +
+		`var m=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!m)return u;` +
+		`return P+m[1]+"/"+m[2]+((m[3]&&m[3].charAt(0)==="/")?m[3]:"/"+(m[3]||""));}catch(e){return u;}}` +
+		// un: 代理路径 → 原始绝对 URL
+		`function un(p){try{var m=/^\/b\/(https?)\/([^\/]+)([\s\S]*)$/.exec(String(p));if(m)return m[1]+"://"+m[2]+(m[3]||"/");}catch(e){}return String(p);}` +
+		// norm: 任意形式（相对/代理路径/绝对/面板绝对）→ 原始目标绝对 URL（供宿主新标签用）
+		`function norm(u){var s=String(u==null?"":u).replace(/^\s+|\s+$/g,"");if(!s)return "";` +
+		`var i=s.indexOf("/b/");if(i>=0)return un(s.substring(i));` +
+		`if(s.indexOf("//")===0)s=location.protocol+s;` +
+		`if(/^https?:\/\//i.test(s)){var j=s.indexOf("/b/");return j>=0?un(s.substring(j)):s;}` +
+		`try{var x=new URL(s,(document.baseURI||location.href)).href,k=x.indexOf("/b/");return k>=0?un(x.substring(k)):x;}catch(e){}return s;}` +
+		`function msg(t,u){try{parent.postMessage({__xbox:1,type:t,url:norm(u)},"*");}catch(e){}}` +
+		// fetch
+		`var of=window.fetch;if(of){window.fetch=function(a,b){try{if(typeof a==="string"){a=px(a);}else if(a&&typeof a.url==="string"){a.url=px(a.url);}}catch(e){}return of.call(window,a,b);};}` +
+		// XMLHttpRequest
+		`var XP=window.XMLHttpRequest&&window.XMLHttpRequest.prototype;` +
+		`if(XP&&XP.open){var oo=XP.open;XP.open=function(){try{if(typeof arguments[1]==="string"){arguments[1]=px(arguments[1]);}}catch(e){}return oo.apply(this,arguments);};}` +
+		// location.assign / replace
+		`try{var LP=Object.getPrototypeOf(window.location)||null;` +
+		`if(LP&&LP.assign){var la=LP.assign;LP.assign=function(u){try{if(typeof u==="string")u=px(u);}catch(e){}return la.call(this,u);};}` +
+		`if(LP&&LP.replace){var lr=LP.replace;LP.replace=function(u){try{if(typeof u==="string")u=px(u);}catch(e){}return lr.call(this,u);};}}catch(e){}` +
+		// window.open / showModalDialog → 交由宿主新建标签
+		`window.open=function(u){msg("newtab",u);return null;};` +
+		`try{window.showModalDialog=function(u){msg("newtab",u);return null;};}catch(e){}` +
+		// 动态节点属性修正
+		`var ATTR=["href","src","action","poster","srcset","formaction","data-src","data-href"];` +
+		`function sx(v){var ps=String(v).split(","),o=[];for(var i=0;i<ps.length;i++){var t=ps[i].replace(/^\s+|\s+$/g,"");var sp=t.split(/\s+/);if(sp.length){sp[0]=px(sp[0]);o.push(sp.join(" "));}else{o.push(t);}}return o.join(",");}` +
+		`function fixEl(n){if(!n||n.nodeType!==1||!n.getAttribute)return;` +
+		`for(var i=0;i<ATTR.length;i++){var a=ATTR[i];if(!n.hasAttribute(a))continue;var v=n.getAttribute(a);if(!v)continue;` +
+		`var nv=(a==="srcset")?sx(v):px(v);if(nv!==v){try{n.setAttribute(a,nv);}catch(e){}}}}` +
+		`function scan(root){if(!root||!root.querySelectorAll)return;try{var ns=root.querySelectorAll("a[href],img[src],script[src],link[href],form[action],iframe[src],frame[src],source[src],video[poster],area[href],input[formaction],button[formaction],embed[src],object[data],track[src]");` +
+		`for(var i=0;i<ns.length;i++){fixEl(ns[i]);}}catch(e){}}` +
+		`try{new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var m=ms[i];` +
+		`if(m.type==="attributes"){fixEl(m.target);}else if(m.addedNodes){for(var j=0;j<m.addedNodes.length;j++){fixEl(m.addedNodes[j]);scan(m.addedNodes[j]);}}}}` +
+		`).observe(document.documentElement||document,{childList:true,subtree:true,attributes:true,attributeFilter:ATTR});}catch(e){}` +
+		`try{scan(document);}catch(e){}` +
+		`document.addEventListener("DOMContentLoaded",function(){try{scan(document);}catch(e){}},false);` +
+		`window.addEventListener("load",function(){try{scan(document);}catch(e){}},false);` +
+		// 链接点击：_blank / Ctrl / 中键 → 宿主新建标签；其余留在当前框架
+		`document.addEventListener("click",function(e){try{var n=e.target;` +
+		`while(n&&n.nodeType!==1&&n.parentNode)n=n.parentNode;` +
+		`while(n&&n.nodeType===1&&n.tagName!=="A"&&n!==document.documentElement)n=n.parentNode;` +
+		`if(!n||n.nodeType!==1||n.tagName!=="A")return;` +
+		`var t=n.getAttribute("target");if(t&&t!=="_self"){try{n.setAttribute("target","_self");}catch(e2){}}` +
+		`if(t==="_blank"||e.ctrlKey||e.metaKey||e.button===1){try{e.preventDefault();}catch(e3){}msg("newtab",n.getAttribute("href")||n.href);}}catch(e){}},true);` +
+		// 表单 target 一律收回框架内
+		`document.addEventListener("submit",function(e){try{var n=e.target;if(n&&n.nodeType===1&&n.tagName==="FORM"){var t=n.getAttribute("target");if(t&&t!=="_self"){n.setAttribute("target","_self");}}}catch(e){}},true);` +
+		`}catch(e){}})();</script>`
+	return s
+}
+
+// browserFail 代理失败：返回可读的中文 HTML 错误页（请求由 NAS 发出，
+// 失败意味着 NAS→目标不通，不是用户电脑的问题），并给出终端自检命令。
+func browserFail(w http.ResponseWriter, target string, err error) {
+	reason := err.Error()
+	if ue, ok := err.(*url.Error); ok && ue.Err != nil {
+		e := strings.ToLower(ue.Err.Error())
+		switch {
+		case strings.Contains(e, "connection refused"):
+			reason = "目标拒绝连接（端口未开放，或服务未启动）"
+		case strings.Contains(e, "no such host"), strings.Contains(e, "lookup"):
+			reason = "域名解析失败（DNS 无法解析该主机名）"
+		case strings.Contains(e, "i/o timeout"), strings.Contains(e, "deadline exceeded"), strings.Contains(e, "timeout"):
+			reason = "连接超时（目标不可达，或被防火墙丢弃）"
+		case strings.Contains(e, "network is unreachable"), strings.Contains(e, "no route to host"):
+			reason = "网络不可达（路由不通）"
+		case strings.Contains(e, "connection reset"):
+			reason = "连接被目标重置"
+		default:
+			reason = ue.Err.Error()
+		}
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(502)
+	page := `<!doctype html><html><head><meta charset="utf-8"><title>无法访问该地址</title><style>` +
+		`body{font:14px/1.8 system-ui,-apple-system,"Microsoft YaHei",sans-serif;padding:28px;color:#374151;background:#fff;margin:0}` +
+		`.box{max-width:680px;margin:0 auto;border:1px solid #FDCDC5;background:#FFF6F4;border-radius:10px;padding:20px 22px}` +
+		`h2{margin:0 0 12px;font-size:16px;color:#B42318}` +
+		`code{background:#F3F4F6;padding:2px 6px;border-radius:4px;word-break:break-all;font-family:ui-monospace,Consolas,monospace}` +
+		`ol{margin:10px 0 0 20px;padding:0}li{margin:6px 0}.tip{margin-top:14px;font-size:13px;color:#667085}</style></head><body><div class="box">` +
+		`<h2>无法访问目标地址</h2>` +
+		`<div>目标：<code>` + html.EscapeString(target) + `</code></div>` +
+		`<div>原因：` + html.EscapeString(reason) + `</div>` +
+		`<div class="tip">说明：页面由 <b>NAS 上的 X-Box 代为访问</b>（你的设备并不直连目标），所以这里失败说明 <b>NAS 到目标不通</b>，与你电脑能否访问无关。</div>` +
+		`<ol><li>确认目标已开机、端口正确（路由器管理页若非 80 端口，请写成 <code>192.168.1.1:8080</code>）；</li>` +
+		`<li>确认目标未限制只允许特定 IP / MAC 访问；</li>` +
+		`<li>到「终端」执行 <code>curl -v --max-time 8 ` + html.EscapeString(target) + `</code> 看 NAS 侧的真实报错；也可 <code>ping -c 3 ` + html.EscapeString(tu_host(target)) + `</code> 看是否可达。</li></ol>` +
+		`</div></body></html>`
+	_, _ = io.WriteString(w, page)
+}
+
+// tu_host 取目标地址的主机部分（用于错误页提示的 ping 目标），失败返回原串。
+func tu_host(target string) string {
+	if u, err := url.Parse(target); err == nil && u.Hostname() != "" {
+		return u.Hostname()
+	}
+	return target
 }

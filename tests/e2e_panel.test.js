@@ -154,6 +154,15 @@ function makeDom(opts) {
     check(fr.getAttribute('src') === '/b/https/example.com/a?b=1', 'C: 已带协议地址生成异常');
     win.browserNewTab('');
     check(doc.querySelectorAll('.browser-tab').length === 2 && doc.querySelectorAll('.browser-frame-item').length === 2, 'C: 新建标签失败');
+    // 原始地址 ↔ 代理路径互转（UI 显示真实地址，iframe 走代理）
+    check(win.browserToProxy('192.168.1.1') === '/b/http/192.168.1.1/', 'C: browserToProxy 转换异常: ' + win.browserToProxy('192.168.1.1'));
+    check(win.browserToProxy('http://192.168.1.1:8080/a#f') === '/b/http/192.168.1.1:8080/a', 'C: 带端口/锚点地址转换异常');
+    check(win.browserFromProxy('/b/https/example.com/a?b=1') === 'https://example.com/a?b=1', 'C: browserFromProxy 转换异常: ' + win.browserFromProxy('/b/https/example.com/a?b=1'));
+    // 代理页面上报（window.open / target=_blank）→ 宿主新建标签打开，不跳外部浏览器
+    win.browserOpenURL('http://192.168.1.1/x', true);
+    const frs = doc.querySelectorAll('.browser-frame-item');
+    check(frs.length === 3 && frs[2].getAttribute('src') === '/b/http/192.168.1.1/x', 'C: 新标签打开链接失败: ' + (frs[2] && frs[2].getAttribute('src')));
+    win.browserCloseTab(0);
     win.browserCloseTab(0);
     check(doc.querySelectorAll('.browser-tab').length === 1 && doc.querySelectorAll('.browser-frame-item').length === 1, 'C: 关闭标签失败');
   }

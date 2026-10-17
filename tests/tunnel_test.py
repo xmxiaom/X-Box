@@ -103,11 +103,23 @@ st, body = get(tunnel({"m": "GET", "p": "/api/update/status"}))
 j = json.loads(body) if body else {}
 check("下载状态端点", st == 200 and j.get("ok") and "running" in j and "done" in j, body[:80])
 
-# 13) 浏览器代理 /b/{scheme}/{host}/{path}：本地起迷你 HTTP 服务，
-#     验证 base 注入（旧 base 剥除）、透传、查询参数透传、Cookie 双向
+# 13) 浏览器代理 /b/{scheme}/{host}/{path}：本地起迷你 HTTP 服务，验证
+#     base 注入、绝对 URL 全量重写、CSS/meta/JS 重写、跳转重写、Cookie 隔离
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-PAGE = b'<html><head><base href="http://old.example/"><title>t</title></head><body><a href="/next">n</a><img src="pic.png"></body></html>'
+H = "127.0.0.1:8898"
+PAGE = (b'<html><head><base href="http://old.example/"><title>t</title>'
+        b'<style>body{background:url(http://' + H.encode() + b'/pic.png)}</style>'
+        b'<meta http-equiv="refresh" content="3;url=http://' + H.encode() + b'/next">'
+        b'<script>var h=location.hostname;</script></head><body>'
+        b'<a href="/rel">r</a>'                                   # 相对：交给 base
+        b'<a href="http://' + H.encode() + b'/abs">a</a>'         # 绝对：必须重写
+        b'<img src="//' + H.encode() + b'/proto.png">'            # 协议相对：必须重写
+        b'<img srcset="http://' + H.encode() + b'/s1.png 1x, /s2.png 2x">'
+        b'<form action="http://' + H.encode() + b'/login" method="post"></form>'
+        b'<a href="javascript:void(0)">j</a><a href="#top">h</a>'
+        b'</body></html>')
+JS = b'var a=location.hostname;var b=window.location.origin;var c=location.port;'
 class BH(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/page':
@@ -115,6 +127,15 @@ class BH(BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'text/html')
             self.send_header('Set-Cookie', 'sid=abc123; Path=/')
             self.end_headers(); self.wfile.write(PAGE)
+        elif self.path == '/s.js':
+            self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers(); self.wfile.write(JS)
+        elif self.path == '/style.css':
+            self.send_response(200); self.send_header('Content-Type', 'text/css'); self.end_headers()
+            self.wfile.write(b'.x{background:url("http://' + H.encode() + b'/pic.png")}')
+        elif self.path == '/redir':
+            self.send_response(302)
+            self.send_header('Location', 'http://' + H + '/next')
+            self.end_headers()
         elif self.path == '/pic.png':
             self.send_response(200); self.send_header('Content-Type', 'image/png'); self.end_headers(); self.wfile.write(b'PNGDATA')
         elif self.path.startswith('/echo'):
@@ -128,19 +149,49 @@ class BH(BaseHTTPRequestHandler):
 bh = HTTPServer(('127.0.0.1', 8898), BH)
 threading.Thread(target=bh.serve_forever, daemon=True).start()
 
-st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:8898/page")
-check("浏览器代理base注入", st == 200 and '<base href="/b/http/127.0.0.1:8898/page">' in body and 'old.example' not in body, body[:200])
-st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:8898/pic.png")
+B = "http://127.0.0.1:8899/b/http/" + H
+st, body = get(B + "/page")
+check("浏览器代理base注入", st == 200 and '<base href="/b/http/' + H + '/page">' in body and 'old.example' not in body, body[:200])
+check("浏览器代理运行时脚本注入", "__xbox" in body and "MutationObserver" in body, body[:120])
+check("浏览器代理绝对URL重写", 'href="/b/http/' + H + '/abs"' in body, body[:300])
+check("浏览器代理协议相对重写", 'src="/b/http/' + H + '/proto.png"' in body, body[:300])
+check("浏览器代理srcset重写", '/b/http/' + H + '/s1.png 1x' in body, body[:300])
+check("浏览器代理表单action重写", 'action="/b/http/' + H + '/login"' in body, body[:300])
+check("浏览器代理保留非URL协议", 'javascript:void(0)' in body and 'href="#top"' in body, body[:300])
+check("浏览器代理CSS url()重写", 'url("/b/http/' + H + '/pic.png")' in body or "url('/b/http/" + H + "/pic.png')" in body, body[:300])
+check("浏览器代理meta refresh重写", 'url="/b/http/' + H + '/next"' in body or "url='/b/http/" + H + "/next'" in body, body[:300])
+# 页面 JS 拿 location.hostname/host/origin/port 拼绝对 URL：必须替换为真实目标值
+# （否则拼出的是面板域名 → 404，或直连目标 → 拒绝连接）
+check("浏览器代理内联JS location替换", '<script>var h="127.0.0.1";</script>' in body, body[:400])
+st, body = get(B + "/s.js")
+check("浏览器代理JS文件location替换", st == 200 and body == 'var a="127.0.0.1";var b="http://127.0.0.1:8898";var c="8898";', body[:120])
+st, body = get(B + "/style.css")
+check("浏览器代理CSS文件重写", st == 200 and '/b/http/' + H + '/pic.png' in body, body[:120])
+st, body = get(B + "/pic.png")
 check("浏览器代理透传", st == 200 and body == "PNGDATA", body[:40])
-st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:8898/echo?k=v")
+st, body = get(B + "/echo?k=v")
 check("浏览器代理查询参数透传", st == 200 and 'QUERY:/echo?k=v' in body, body[:80])
-# Cookie：代理响应回写 Set-Cookie；浏览器携带的 Cookie 透传给目标
-r1 = urllib.request.urlopen("http://127.0.0.1:8899/b/http/127.0.0.1:8898/page", timeout=5)
+# 3xx 不跟随 + Location 重写为代理路径（否则浏览器直连目标 → 拒绝连接）
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl): return None
+op = urllib.request.build_opener(NoRedirect)
+try:
+    rr = op.open(B + "/redir", timeout=5)
+    loc, code = rr.headers.get("Location") or "", rr.status
+    rr.close()
+except urllib.error.HTTPError as e:
+    loc, code = e.headers.get("Location") or "", e.code
+check("浏览器代理跳转Location重写", code == 302 and loc == "/b/http/" + H + "/next", "%s %s" % (code, loc))
+# Cookie：回写带站点隔离 Path；入向透传给目标
+r1 = urllib.request.urlopen(B + "/page", timeout=5)
 sc = r1.headers.get("Set-Cookie") or ""
 r1.close()
-check("浏览器代理Cookie回写", "sid=abc123" in sc, sc)
-st, body = get(urllib.request.Request("http://127.0.0.1:8899/b/http/127.0.0.1:8898/ck", headers={"Cookie": sc}))
+check("浏览器代理Cookie回写", "sid=abc123" in sc and "Path=/b/http/" + H + "/" in sc, sc)
+st, body = get(urllib.request.Request(B + "/ck", headers={"Cookie": "sid=abc123"}))
 check("浏览器代理Cookie透传", st == 200 and "COOKIE:sid=abc123" in body, body[:80])
+# 目标不可达：返回可读的中文 HTML 错误页（请求由 NAS 发出，失败即 NAS→目标不通）
+st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:9/")
+check("浏览器代理失败错误页", st == 502 and "无法访问目标地址" in body, body[:80])
 
 # 14) 更新下载：异步任务 + 轮询状态（经 GitHub API 资产端点）
 try:
