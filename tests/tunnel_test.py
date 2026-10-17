@@ -124,6 +124,8 @@ JS = b'var a=location.hostname;var b=window.location.origin;var c=location.port;
 class BH(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/page':
+            if self.headers.get('If-None-Match') == '"abc"':   # 条件请求 → 304
+                self.send_response(304); self.end_headers(); return
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
             self.send_header('Set-Cookie', 'sid=abc123; Path=/')
@@ -215,6 +217,16 @@ r1.close()
 check("浏览器代理Cookie回写", "sid=abc123" in sc and "Path=/b/http/" + H + "/" in sc, sc)
 st, body = get(urllib.request.Request(B + "/ck", headers={"Cookie": "sid=abc123"}))
 check("浏览器代理Cookie透传", st == 200 and "COOKIE:sid=abc123" in body, body[:80])
+# 304 必须原样返回：不得重写、不得写入注入脚本（v1.2.53 修复：此前给 304 写了
+# body，浏览器收到"带 body 的 304"会反复重新加载 —— 实测 192.168.1.50 每秒几十次 304）
+rq3 = urllib.request.Request(B + "/page", headers={"If-None-Match": '"abc"'})
+try:
+    r4 = urllib.request.urlopen(rq3, timeout=5)
+    raw4, code4 = r4.read(), r4.status
+    r4.close()
+except urllib.error.HTTPError as e:
+    raw4, code4 = e.read(), e.code
+check("浏览器代理304不写body", code4 == 304 and len(raw4) == 0, "%s len=%d" % (code4, len(raw4)))
 # 目标不可达：返回可读的中文 HTML 错误页（请求由 NAS 发出，失败即 NAS→目标不通）
 st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:9/")
 check("浏览器代理失败错误页", st == 502 and "无法访问目标地址" in body, body[:80])

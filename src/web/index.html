@@ -1715,6 +1715,23 @@ function browserOnFrameLoad(t){
   }
   t.esc = 0; t.escT0 = 0;
   let doc; try{ doc = t.frame.contentDocument; }catch(e){ return; }
+  // 空白页检测（v1.2.53）：页面 JS 跳转过去的页面若"body 存在但内容为空"，
+  // 说明它在代理下渲染不出来 —— 自动退回上一个历史项，避免"从能显示一部分
+  // 退化成整页空白"（v1.2.50 起 top.location 跳转真正执行后暴露）。
+  // 注意：frameset 文档的 body 是 frameset 元素（children>0），不会被误判。
+  try{
+    const loc2 = t.frame.contentWindow.location.href || '';
+    if(doc && doc.body && loc2.indexOf('about:') !== 0 &&
+       doc.body.children.length === 0 && (doc.body.textContent || '').trim().length < 8){
+      if(t.hist && t.hi > 0 && (t.blankBack || 0) < 2){
+        t.blankBack = (t.blankBack || 0) + 1;
+        t.hi--; browserNavHist(); browserUpdateNav();
+        toast('跳转后的页面在代理下无内容，已退回上一个页面','err');
+      }
+      return;
+    }
+  }catch(e){}
+  t.blankBack = 0;
   if(!doc) return;
   // 同步地址栏：页面内导航（点链接/重定向）后显示真实地址
   try{

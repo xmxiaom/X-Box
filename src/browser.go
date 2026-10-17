@@ -330,6 +330,15 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	rec.Status = resp.StatusCode
 
+	// 304/204 无响应体：必须原样返回，绝不重写也不写 body。
+	// v1.2.53 修复：此前对 304 也走了 HTML 分支，把注入脚本写进了"无 body"的
+	// 304 响应，浏览器收到带 body 的 304 会反复重新加载（实测 192.168.1.50
+	// 每秒几十次 304 循环，页面永远刷不出来）。
+	if resp.StatusCode == http.StatusNotModified || resp.StatusCode == http.StatusNoContent {
+		browserWriteStatus(w, resp.StatusCode)
+		return
+	}
+
 	ct := resp.Header.Get("Content-Type")
 	low := strings.ToLower(ct)
 	rec.CType = ct
