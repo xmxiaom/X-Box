@@ -1316,7 +1316,7 @@ function openRecordForm(id){
   const provOpts = (ddnsData.providers||[]).map(p=>`<option value="${p.id}" ${(r&&r.providerId===p.id)?'selected':''}>${esc(p.name||p.type)}</option>`).join('');
   const srcOpts = Object.keys(IPSOURCE_LABEL).map(k=>`<option value="${k}" ${(r&&r.ipSource===k)?'selected':''}>${IPSOURCE_LABEL[k]}</option>`).join('');
   const body = `
-    <div class="form-row"><label>启用</label><label class="field-check"><input type="checkbox" id="rf-enabled" ${r?r.enabled:'checked'}> 启用后参与定时同步</label></div>
+    <div class="form-row"><label>启用</label><label class="field-check"><input type="checkbox" id="rf-enabled" ${(!r||r.enabled)?'checked':''}> 启用后参与定时同步</label></div>
     <div class="form-row"><label>服务商</label><select id="rf-provider">${provOpts}</select></div>
     <div class="form-row"><label>域名（完整记录名，如 nas.example.com）</label><input type="text" id="rf-domain" value="${esc(r?r.domain:'')}" placeholder="nas.example.com"></div>
     <div class="form-row"><label>记录类型</label><select id="rf-rt"><option value="A" ${r&&r.recordType==='A'?'selected':''}>A（IPv4）</option><option value="AAAA" ${r&&r.recordType==='AAAA'?'selected':''}>AAAA（IPv6）</option></select></div>
@@ -1398,7 +1398,8 @@ async function loadProxy(){
     proxyCache = j.sites||[];
     document.getElementById('proxy-sub').textContent = `共 ${proxyCache.length} 个站点`;
     const c = document.getElementById('proxy-rows');
-    c.innerHTML = '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button></div>' +
+    c.innerHTML = '<div class="proxy-hint">站点统一经 <b>:8899</b> 端口访问：<span class="mono">http://&lt;域名&gt;:8899/</span>（NAS 的 80/443 由 fnOS 自身占用，无法给站点使用；域名需先能解析到 NAS）</div>' +
+      '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button></div>' +
       proxyCache.map(s=>{
         const hosts=(s.hosts||[]).join(', ');
         return `<div class="row">
@@ -1419,11 +1420,11 @@ async function loadProxy(){
 function openProxyForm(id){
   const s = id? (proxyCache.find(x=>x.id===id)) : null;
   const body = `
-    <div class="form-row"><label>域名（多个用逗号分隔，支持 *.example.com 通配）</label><input type="text" id="px-hosts" value="${esc(s?(s.hosts||[]).join(', '):'')}" placeholder="nas.example.com, app.example.com"></div>
+    <div class="form-row"><label>域名（多个用逗号分隔，支持 *.example.com 通配）</label><input type="text" id="px-hosts" value="${esc(s?(s.hosts||[]).join(', '):'')}" placeholder="nas.example.com, app.example.com"><div style="font-size:12px;color:var(--text3);margin-top:4px">保存后经 <span class="mono">http://&lt;域名&gt;:8899/</span> 访问（80/443 被 fnOS 占用）</div></div>
     <div class="form-row"><label>后端地址</label><input type="text" id="px-backend" value="${esc(s?s.backend:'')}" placeholder="http://192.168.1.20:8080"></div>
     <div class="form-row"><label>路径前缀<span id="px-prefix-hint" style="color:var(--muted);font-weight:normal">（留空=整站）</span></label><input type="text" id="px-prefix" value="${esc(s?s.pathPrefix:'')}" placeholder="选填，如 /app" oninput="document.getElementById('px-prefix-hint').textContent=this.value.trim()?('（前缀 '+this.value.trim()+'）'):'（留空=整站）'"></div>
     <label class="field-check"><input type="checkbox" id="px-strip" ${s&&s.stripPrefix?'checked':''}> 转发时去除路径前缀</label>
-    <label class="field-check"><input type="checkbox" id="px-enabled" ${s?s.enabled:'checked'}> 启用此站点</label>
+    <label class="field-check"><input type="checkbox" id="px-enabled" ${(!s||s.enabled)?'checked':''}> 启用此站点</label>
     <label class="field-check"><input type="checkbox" id="px-autoddns" ${s&&s.autoDDNS?'checked':''}> 联动 DDNS：自动为域名创建解析记录</label>
     <div class="form-row"><label>备注</label><input type="text" id="px-desc" value="${esc(s?s.description:'')}"></div>`;
   confirmDialog(id?'编辑站点':'添加站点', body, async ()=>{
@@ -1458,6 +1459,7 @@ async function enterApp(){
 detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe），随后直接进入面板
 </script>
 <style>
+.proxy-hint{font-size:12.5px;color:var(--text2);background:var(--primary-light);border-radius:6px;padding:8px 12px;margin-bottom:10px;line-height:1.6}
 </style>
 
 

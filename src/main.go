@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,10 +37,12 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.39"
-	// 仅监听本机回环：面板不对局域网/公网暴露；外部访问只能经 fnOS 远程访问体系
-	// （需飞牛账号登录）由 fnOS 从本机回环转发进来。请勿改为 0.0.0.0/:port 对外暴露。
-	listenAddr = "127.0.0.1:8899"
+	version = "1.2.40"
+	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
+	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
+	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
+	// 外网访问仍只能经 fnOS 远程访问体系（需飞牛账号）。请勿改为 ":8899" 通配绑定。
+	listenPort = "8899"
 )
 
 type Server struct {
@@ -93,10 +96,68 @@ func main() {
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
 	mux.HandleFunc("GET /", srv.handleRoot)
 
-	log.Printf("X-Box v%s 启动，监听 %s（仅本机回环，外部访问经 fnOS 远程访问体系）", version, listenAddr)
-	if err := http.ListenAndServe(listenAddr, formBridge(tunnelBridge(mux))); err != nil {
-		log.Fatalf("HTTP 服务退出: %v", err)
+	handler := formBridge(tunnelBridge(mux))
+	addrs := listenAddrs()
+	listened := 0
+	for _, a := range addrs {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			log.Printf("监听 %s 失败: %v", a, err)
+			continue
+		}
+		listened++
+		go func(a string, ln net.Listener) {
+			if err := http.Serve(ln, handler); err != nil {
+				log.Printf("HTTP 服务(%s)退出: %v", a, err)
+			}
+		}(a, ln)
 	}
+	if listened == 0 {
+		log.Fatalf("所有监听地址均失败: %v", addrs)
+	}
+	log.Printf("X-Box v%s 启动，监听 %v（回环+局域网私网，不对公网暴露；外部经 fnOS 远程访问体系）", version, addrs)
+	select {} // 主协程驻留：服务在监听协程中运行
+}
+
+// listenAddrs 监听地址列表：127.0.0.1 + 首个局域网私网 IPv4（探测不到则仅回环）。
+func listenAddrs() []string {
+	addrs := []string{"127.0.0.1:" + listenPort}
+	if ip := lanIPv4(); ip != "" {
+		addrs = append(addrs, net.JoinHostPort(ip, listenPort))
+	}
+	return addrs
+}
+
+// lanIPv4 取首个局域网私网 IPv4（10.x / 172.16-31.x / 192.168.x），跳过回环/链路本地/非私网。
+func lanIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrList, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrList {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			ip4 := ip.To4()
+			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() || !ip4.IsPrivate() {
+				continue
+			}
+			return ip4.String()
+		}
+	}
+	return ""
 }
 
 // tunnelBridge：fnOS 远程访问中转会拦截 /api/ 前缀（重定向到跨域门户，导致页面内

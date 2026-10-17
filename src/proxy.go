@@ -103,10 +103,10 @@ func (r *proxyRuntime) match(hostHeader, path string) (*ProxySite, string, error
 func hostMatches(hosts []string, host string) bool {
 	for _, h := range hosts {
 		h = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
-		if h == "" || h == host {
+		if h == "" {
 			continue
 		}
-		if h == "*" {
+		if h == host || h == "*" {
 			return true
 		}
 		if strings.HasPrefix(h, "*.") {
@@ -114,8 +114,6 @@ func hostMatches(hosts []string, host string) bool {
 			if strings.HasSuffix(host, suffix) && strings.Count(host, ".") == strings.Count(suffix, ".") {
 				return true
 			}
-		} else if h == host {
-			return true
 		}
 	}
 	return false

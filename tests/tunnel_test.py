@@ -66,11 +66,33 @@ except urllib.error.HTTPError as e:
     st = e.code
 check("登录端点已移除(404/405)", st in (404, 405), "status=%s" % st)
 
-# 9) 仅监听回环验证：ss 查监听地址必须是 127.0.0.1，不得是 0.0.0.0/*（含 IPv6）
+# 9) 监听策略：必须含 127.0.0.1:8899，且不得出现 0.0.0.0/:: 通配（不对公网/所有网卡暴露）
 ss = subprocess.run(["ss", "-tln"], capture_output=True, text=True).stdout
 lines = [l for l in ss.splitlines() if ":8899" in l]
-listen_ok = bool(lines) and all(("127.0.0.1:8899" in l) for l in lines)
-check("仅监听127.0.0.1回环", listen_ok, " | ".join(lines))
+has_loop = any("127.0.0.1:8899" in l for l in lines)
+no_wild = not any(("0.0.0.0:8899" in l or "[::]:8899" in l or "*:8899" in l) for l in lines)
+check("监听含回环", has_loop, " | ".join(lines))
+check("无通配绑定(0.0.0.0/::)", no_wild, " | ".join(lines))
+
+# 10) 反代 Host 精确匹配回归（v1.2.40 修复 hostMatches 精确匹配 continue bug）
+st, body = get(tunnel({"m": "POST", "p": "/api/proxy/save", "b": json.dumps({"hosts": ["proxy-test.local"], "backend": "http://127.0.0.1:1/", "enabled": True})}))
+check("保存反代站点", st == 200 and json.loads(body).get("ok"), body)
+site_id = json.loads(body).get("id", 0)
+def get_host(host):
+    req = urllib.request.Request("http://127.0.0.1:8899/", headers={"Host": host})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+st, body = get_host("proxy-test.local:8899")   # 带端口（浏览器实际行为）
+check("反代精确匹配(带端口)", st == 502 and "不可达" in body, "status=%s %s" % (st, body[:60]))
+st, body = get_host("proxy-test.local")        # 不带端口
+check("反代精确匹配(不带端口)", st == 502 and "不可达" in body, "status=%s %s" % (st, body[:60]))
+st, body = get_host("nomatch.local")           # 不匹配 → 回落面板 HTML
+check("反代不匹配回落面板", st == 200 and "<html" in body, "status=%s" % st)
+st, body = get(tunnel({"m": "POST", "p": "/api/proxy/del?id=%d" % site_id}))
+check("清理反代站点", st == 200 and json.loads(body).get("ok"), body)
 
 srv.kill(); os.remove(TMPBIN)
 print("TUNNEL", "ALL PASS" if ok else "HAS FAILURES")

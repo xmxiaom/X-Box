@@ -45,6 +45,8 @@ function makeDom(opts) {
     if (u.includes('/api/processes')) return jsonRes({ ok: true, processes: [] });
     if (u.includes('/api/services')) return jsonRes({ ok: true, services: [], apps: [], docker: [] });
     if (u.includes('/api/update/check')) return jsonRes({ ok: true, update: {} });
+    if (u === '/api/proxy') return jsonRes({ ok: true, sites: [{ id: 7, hosts: ['a.com'], backend: 'http://10.0.0.2:8080', enabled: true, pathPrefix: '', stripPrefix: false, autoDDNS: false }] });
+    if (u === '/api/ddns') return jsonRes({ ok: true, intervalSec: 300, providers: [{ id: 1, name: '测试服务商', type: 'aliyun', cred: {} }], providersAvail: [{ type: 'aliyun', name: '阿里云' }], ifaces: [], records: [{ id: 3, enabled: !opts.ddnsRecDisabled, domain: 'x.com', providerId: 1, recordType: 'A', ipSource: 'auto', ttl: 600, lastStatus: 'pending' }] });
     return jsonRes({ ok: true });
   };
   const dom = new JSDOM(html, {
@@ -116,6 +118,28 @@ function makeDom(opts) {
     const tun2 = win.apiTunnel('/api/ddns/record/save', { method: 'POST', body: JSON.stringify({ name: '中文域名' }) });
     const tp2 = JSON.parse(b64d(decodeURIComponent(tun2.slice(tun2.indexOf('=') + 1))));
     check(JSON.parse(tp2.b).name === '中文域名', 'T: 中文载荷编解码失败');
+  }
+
+  /* ---------- 复选框回显回归（v1.2.40：模板曾将布尔值渲染为 true/false 字符串导致选中态丢失） ---------- */
+  {
+    const { doc, win } = makeDom();
+    await sleep(150);
+    await win.loadProxy(); // 经 fetch 桩自然填充 proxyCache（let 声明不挂 window，不能直接注入）
+    win.openProxyForm(7);
+    check(doc.getElementById('px-enabled').checked === true, 'C: 反代启用框回显异常（已启用却不显示选中）');
+    await win.loadDDNS(); // 自然填充 ddnsData
+    win.openRecordForm(3);
+    check(doc.getElementById('rf-enabled').checked === true, 'C: DDNS 已启用记录回显异常');
+    win.openRecordForm(999); // 不存在的 id → 新建 → 默认勾选
+    check(doc.getElementById('rf-enabled').checked === true, 'C: DDNS 新建记录启用框默认异常');
+  }
+  {
+    // 停用回显：桩返回 enabled=false 的记录
+    const { doc, win } = makeDom({ ddnsRecDisabled: true });
+    await sleep(150);
+    await win.loadDDNS();
+    win.openRecordForm(3);
+    check(doc.getElementById('rf-enabled').checked === false, 'C: DDNS 已停用记录回显异常');
   }
 
   /* ---------- 语法地板 ---------- */
