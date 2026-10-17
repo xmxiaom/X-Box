@@ -411,6 +411,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="browser-tabs" id="browser-tabs"></div>
         <div class="browser-frame-wrap" id="browser-frames"></div>
         <div class="browser-log" id="browser-log" style="display:none"></div>
+        <div class="browser-snap" id="browser-snap" style="display:none"></div>
       </div>
 
       <!-- 终端 -->
@@ -1455,7 +1456,8 @@ function browserNewTab(url){
   f.className = 'browser-frame-item';
   // 不给 allow-popups：target=_blank / window.open 一律不得弹到外部浏览器
   f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals');
-  f.setAttribute('referrerpolicy', 'no-referrer');
+  // 不用 no-referrer：Referer 由服务端还原成目标 URL 后转发，防盗链的图片/地图瓦片才能加载
+  f.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
   document.getElementById('browser-frames').appendChild(f);
   const t = {id: ++browserSeq, frame: f, url: url||'', raw: browserFromProxy(url)||'', title: '新标签页'};
   browserTabs.push(t);
@@ -1523,7 +1525,20 @@ function browserOpenURL(u, newTab){
 }
 // 诊断面板：显示最近 60 条代理请求（时间/目标/状态/字节/错误），
 // 用于区分「代理没收到请求」「NAS 连不上目标」「页面内容本身问题」三类故障
-let browserLogOn = false, browserLogTimer = null;
+let browserLogOn = false, browserLogTimer = null, browserLogItems = [];
+// 查看目标站点的原始响应源码（重写前），用于定位"200 但页面空白"
+async function browserViewSrc(i){
+  const it = browserLogItems[i];
+  if(!it) return;
+  let el = document.getElementById('browser-snap');
+  try{
+    const j = await api('/api/browser/snap?target='+encodeURIComponent(it.target||''));
+    el.innerHTML = '<div class="snap-head">响应源码 · '+esc(j.ctype||'')+' · '+esc(j.target||'')+' · '+esc(j.time||'')+
+      '<b class="sx" onclick="document.getElementById(\'browser-snap\').style.display=\'none\'">×</b></div>'+
+      '<pre>'+esc(j.body||'（空响应）')+'</pre>';
+    el.style.display = 'block';
+  }catch(e){ toast(e.message||'读取源码失败','err'); }
+}
 function browserToggleLog(){
   const el = document.getElementById('browser-log');
   browserLogOn = !browserLogOn;
@@ -1548,7 +1563,8 @@ async function browserLoadLog(){
     const j = await api('/api/browser/log');
     const items = j.items || [];
     if(!items.length){ el.innerHTML = '<div class="browser-log-empty">暂无代理请求记录（先在地址栏打开一个页面）</div>'; return; }
-    let h = '<table class="browser-log-tb"><tr><th>时间</th><th>方法</th><th>目标</th><th>状态</th><th>大小</th><th>说明 / 响应开头</th></tr>';
+    let h = '<table class="browser-log-tb"><tr><th>时间</th><th>方法</th><th>目标</th><th>状态</th><th>大小</th><th>说明 / 响应开头</th><th></th></tr>';
+    browserLogItems = items;
     for(let i = items.length - 1; i >= 0; i--){
       const it = items[i];
       const bad = it.status >= 400 || it.err;
@@ -1556,7 +1572,8 @@ async function browserLoadLog(){
       h += '<tr'+(bad ? ' class="bad"' : '')+'><td>'+esc(it.time||'')+'</td><td>'+esc(it.method||'')+'</td>'+
            '<td class="mono" title="'+esc(it.target||'')+'">'+esc(it.target||'')+'</td>'+
            '<td>'+(it.status||'')+'</td><td>'+browserLogSize(it.bytes)+'</td>'+
-           '<td class="mono" style="max-width:380px;white-space:normal;word-break:break-all" title="'+esc(detail)+'">'+esc(it.err || it.ctype || '')+(it.snippet ? ' <span class="snip">'+esc(it.snippet)+'</span>' : '')+'</td></tr>';
+           '<td class="mono" style="max-width:340px;white-space:normal;word-break:break-all" title="'+esc(detail)+'">'+esc(it.err || it.ctype || '')+(it.snippet ? ' <span class="snip">'+esc(it.snippet)+'</span>' : '')+'</td>'+
+           '<td>'+(it.status === 200 ? '<b class="lnk" onclick="browserViewSrc('+i+')">源码</b>' : '')+'</td></tr>';
     }
     el.innerHTML = h + '</table><div class="browser-log-foot"><button class="btn btn-outline btn-sm" onclick="browserCopyLog()">复制诊断信息</button></div>';
   }catch(e){ el.innerHTML = '<div class="browser-log-empty">读取失败：'+esc(e.message||e)+'</div>'; }
@@ -1745,6 +1762,13 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
 .browser-log-empty{padding:10px;color:var(--text3)}
 .browser-log-tb .snip{color:var(--text3);font-size:11px}
 .browser-log-foot{padding:6px 8px;border-top:1px solid var(--border)}
+.browser-log-tb .lnk{cursor:pointer;color:var(--primary);font-weight:400}
+.browser-log-tb .lnk:hover{text-decoration:underline}
+.browser-snap{flex:0 0 auto;margin-top:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);font-size:12px}
+.browser-snap .snap-head{display:flex;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text2);word-break:break-all}
+.browser-snap .sx{margin-left:auto;cursor:pointer;color:var(--text3);font-weight:400}
+.browser-snap .sx:hover{color:var(--danger)}
+.browser-snap pre{margin:0;padding:8px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Consolas,monospace;color:var(--text2)}
 .term-warn{background:var(--warning-light);color:var(--warning);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px;flex-shrink:0}
 .term-warn b{color:var(--danger)}
 .term-out{flex:1;min-height:0;overflow-y:auto;background:#0E1116;color:#E6E6E6;border-radius:var(--radius);padding:12px 14px;font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-all}

@@ -162,11 +162,12 @@ check("浏览器代理表单action重写", 'action="/b/http/' + H + '/login"' in
 check("浏览器代理保留非URL协议", 'javascript:void(0)' in body and 'href="#top"' in body, body[:300])
 check("浏览器代理CSS url()重写", 'url("/b/http/' + H + '/pic.png")' in body or "url('/b/http/" + H + "/pic.png')" in body, body[:300])
 check("浏览器代理meta refresh重写", 'url="/b/http/' + H + '/next"' in body or "url='/b/http/" + H + "/next'" in body, body[:300])
-# 页面 JS 拿 location.hostname/host/origin/port 拼绝对 URL：必须替换为真实目标值
-# （否则拼出的是面板域名 → 404，或直连目标 → 拒绝连接）
+# 页面 JS 拿 location.hostname/host/origin/port 拼绝对 URL：必须替换为**面板**值，
+# 让拼出的 URL 落到面板根下再由孤儿兜底回代理（v1.2.47 替换为真实目标值反而引导
+# JS 拼出 http://192.168.1.1/... 直连 → https 面板下混合内容被拦 → 页面空白）
 check("浏览器代理内联JS location替换", '<script>var h="127.0.0.1";</script>' in body, body[:400])
 st, body = get(B + "/s.js")
-check("浏览器代理JS文件location替换", st == 200 and body == 'var a="127.0.0.1";var b="http://127.0.0.1:8898";var c="8898";', body[:120])
+check("浏览器代理JS文件location替换", st == 200 and body == 'var a="127.0.0.1";var b="http://127.0.0.1:8899";var c="8899";', body[:120])
 st, body = get(B + "/style.css")
 check("浏览器代理CSS文件重写", st == 200 and '/b/http/' + H + '/pic.png' in body, body[:120])
 st, body = get(B + "/pic.png")
@@ -208,6 +209,19 @@ check("浏览器代理文本gzip回传", enc == "gzip" and '<base href="/b/http/
 rq2 = urllib.request.urlopen(B + "/page", timeout=5)
 cc = rq2.headers.get("Cache-Control") or ""; et = rq2.headers.get("ETag") or ""; rq2.close()
 check("浏览器代理缓存头透传", "max-age=60" in cc and et == '"abc"', cc + " | " + et)
+# 孤儿路径兜底：页面 JS 用面板 host 拼出的绝对 URL 落到面板根下 → 307 回最近站点代理路径
+st, body = get(B + "/page")  # 先建立"最近站点"上下文
+try:
+    rr = op.open("http://127.0.0.1:8899/cgi-bin/x?a=1", timeout=5)
+    oloc, ocode = rr.headers.get("Location") or "", rr.status
+    rr.close()
+except urllib.error.HTTPError as e:
+    oloc, ocode = e.headers.get("Location") or "", e.code
+check("孤儿路径兜底回代理", ocode == 307 and oloc == "/b/http/" + H + "/cgi-bin/x?a=1", "%s %s" % (ocode, oloc))
+# 响应源码快照：诊断"200 但页面空白"时直接看目标返回了什么
+st, body = get(tunnel({"m": "GET", "p": "/api/browser/snap?target=" + urllib.parse.quote("http://" + H + "/page", safe="")}))
+j = json.loads(body) if body else {}
+check("浏览器代理响应源码查看", st == 200 and j.get("ok") and "<html>" in (j.get("body") or ""), body[:120])
 # 代理请求日志：面板「诊断」据此区分「代理没收到请求 / NAS 连不上目标 / 页面本身问题」
 st, body = get(tunnel({"m": "GET", "p": "/api/browser/log"}))
 j = json.loads(body) if body else {}
@@ -231,9 +245,9 @@ if asset:
                            "b": json.dumps({"url": "https://api.github.com/repos/xmxiaom/X-Box/releases/assets/%d" % asset["id"], "name": "X-Box-test.fpk"})}))
     j = json.loads(body) if body else {}
     check("更新下载启动异步任务", st == 200 and j.get("ok") and j.get("started"), body[:120])
-    # 轮询状态直到完成（最长 180s）
+    # 轮询状态直到完成（最长 300s；网络慢时需更久，避免把"下载中"误判为失败）
     done, last = False, {}
-    for _ in range(120):
+    for _ in range(200):
         time.sleep(1.5)
         st, body = get(tunnel({"m": "GET", "p": "/api/update/status"}))
         last = json.loads(body) if body else {}

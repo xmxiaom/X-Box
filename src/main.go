@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.47"
+	version = "1.2.48"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -96,11 +96,15 @@ func main() {
 	mux.HandleFunc("GET /api/update/status", handleUpdateStatus)
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
 	mux.HandleFunc("GET /api/browser/log", handleBrowserLog)
+	mux.HandleFunc("GET /api/browser/snap", handleBrowserSnap)
 	// 浏览器代理走顶级路径 /b（fnOS 中转只拦 /api/*，页面导航路径畅通）
 	mux.HandleFunc("GET /b", srv.handleBrowserRoot)
 	mux.HandleFunc("GET /b/", srv.handleBrowserProxy)
 	mux.HandleFunc("POST /b/", srv.handleBrowserProxy)
-	mux.HandleFunc("GET /", srv.handleIndex)
+	// 根路径：/ 由面板渲染；其余"孤儿路径"（页面 JS 用面板 host 拼出的绝对 URL）
+	// 兜底重定向回最近代理站点——这是 location.host 替换方案的配套落点
+	mux.HandleFunc("GET /", srv.handleOrphan)
+	mux.HandleFunc("POST /", srv.handleOrphan)
 
 	handler := formBridge(tunnelBridge(mux))
 	addrs := listenAddrs()

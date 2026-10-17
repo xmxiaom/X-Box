@@ -48,6 +48,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -96,6 +97,56 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// 响应源码快照：按目标 URL 键控保存最近的原始响应（重写前），供面板「查看源码」
+// 定位"代理返回 200 但页面空白"——直接看目标到底返回了什么。
+type browserSnap struct {
+	Target string `json:"target"`
+	CType  string `json:"ctype"`
+	Time   string `json:"time"`
+	Body   string `json:"body"`
+}
+
+var (
+	browserSnapMu    sync.Mutex
+	browserSnapStore = map[string]browserSnap{}
+)
+
+func browserSnapSave(target, ctype string, data []byte) {
+	const maxSnaps = 16
+	body := string(data)
+	if len(body) > 64<<10 {
+		body = body[:64<<10]
+	}
+	browserSnapMu.Lock()
+	if len(browserSnapStore) >= maxSnaps { // 简单淘汰：满了全清（诊断用途足够）
+		browserSnapStore = map[string]browserSnap{}
+	}
+	browserSnapStore[target] = browserSnap{
+		Target: target,
+		CType:  ctype,
+		Time:   time.Now().Format("15:04:05"),
+		Body:   body,
+	}
+	browserSnapMu.Unlock()
+}
+
+// handleBrowserSnap GET /api/browser/snap?target=<url>：查看某目标的原始响应源码。
+func handleBrowserSnap(w http.ResponseWriter, r *http.Request) {
+	t := r.URL.Query().Get("target")
+	if t == "" {
+		fail(w, 400, "缺少 target 参数")
+		return
+	}
+	browserSnapMu.Lock()
+	s, has := browserSnapStore[t]
+	browserSnapMu.Unlock()
+	if !has {
+		fail(w, 404, "无该目标的响应记录（先访问一次）")
+		return
+	}
+	ok(w, map[string]any{"target": s.Target, "ctype": s.CType, "time": s.Time, "body": s.Body})
 }
 
 const (
@@ -153,6 +204,21 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	cw := &countWriter{w: w}
 	defer func() { rec.Bytes = cw.n; browserLogAdd(*rec) }()
 
+	// 面板自身的 scheme/host：JS 里的 location.host 系列替换为它，让页面 JS 拼出的
+	// 绝对 URL 落到面板根下，再由 handleOrphan 兜底回代理（fnOS 中转/反代会改写
+	// Host，优先取 X-Forwarded-Proto 还原真实协议）
+	panelScheme := "http"
+	if r.TLS != nil {
+		panelScheme = "https"
+	}
+	if fp := r.Header.Get("X-Forwarded-Proto"); fp != "" {
+		panelScheme = fp
+	}
+	panelHost := r.Host
+	if panelHost == "" {
+		panelHost = tu.Host
+	}
+
 	var body io.Reader
 	if r.Method == http.MethodPost && r.Body != nil {
 		body = r.Body // POST 表单体原样转发（登录等场景）
@@ -191,6 +257,22 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	if au := r.Header.Get("Authorization"); au != "" {
 		req.Header.Set("Authorization", au)
 	}
+	// Referer：浏览器发的是面板 /b/... 路径，还原成目标 URL 再转发。
+	// 图片/地图瓦片常有防盗链校验，Referer 不对直接 403。
+	if rf := r.Header.Get("Referer"); rf != "" {
+		req.Header.Set("Referer", browserUnProxy(rf))
+	}
+	// Accept 头转发：浏览器对 <img>/<script>/<link> 发的是 image/*、*/* 等，
+	// 用它替代固定值才能正确做内容协商（WebP/AVIF 等图片格式依赖此头）
+	if ac := r.Header.Get("Accept"); ac != "" {
+		req.Header.Set("Accept", ac)
+	}
+	// 断点续传/媒体拖动：Range 请求头透传（视频、大图渐进加载依赖）
+	for _, h := range []string{"Range", "If-Range"} {
+		if v := r.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
 	// 条件请求头透传：命中目标站 304 时浏览器直接用自己的缓存（配合上面的缓存头）
 	for _, h := range []string{"If-None-Match", "If-Modified-Since"} {
 		if v := r.Header.Get(h); v != "" {
@@ -227,6 +309,12 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	for _, c := range jar.Cookies(tu) {
 		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePath)
 	}
+	// 媒体/下载相关：断点续传与文件名（视频拖动、大文件下载依赖）
+	for _, h := range []string{"Accept-Ranges", "Content-Range", "Content-Disposition"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
 	// 缓存头双向透传：让浏览器缓存代理后的资源并支持条件请求（304），
 	// 二次点击同一站点时直接命中本地缓存，不再回源到 NAS，显著提速。
 	for _, h := range []string{"Cache-Control", "ETag", "Last-Modified", "Expires"} {
@@ -256,7 +344,9 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", browserKeepCharset(ct)) // 保留原 charset（GBK 等不乱码）
 		browserWriteStatus(w, resp.StatusCode)
 		rec.Snippet = browserSnippet(data)
-		browserWriteText(cw, w, r, browserRewriteHTML(string(data), tu))
+		browserSnapSave(target, ct, data) // 保存原始响应（重写前），供「查看源码」诊断
+		lastSite.Store(scheme + "://" + host)
+		browserWriteText(cw, w, r, browserRewriteHTML(string(data), tu, panelScheme, panelHost))
 	case strings.Contains(low, "text/css"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
@@ -267,6 +357,7 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", browserKeepCharset(ct))
 		browserWriteStatus(w, resp.StatusCode)
 		rec.Snippet = browserSnippet(data)
+		browserSnapSave(target, ct, data)
 		browserWriteText(cw, w, r, []byte(browserRewriteCSS(string(data), tu)))
 	case strings.Contains(low, "javascript") || strings.Contains(low, "ecmascript"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
@@ -278,7 +369,8 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", browserKeepCharset(ct))
 		browserWriteStatus(w, resp.StatusCode)
 		rec.Snippet = browserSnippet(data)
-		browserWriteText(cw, w, r, []byte(browserRewriteJS(string(data), tu)))
+		browserSnapSave(target, ct, data)
+		browserWriteText(cw, w, r, []byte(browserRewriteJS(string(data), panelScheme, panelHost)))
 	default:
 		// 其余类型：流式透传（图片/字体/媒体/二进制）
 		if ct != "" {
@@ -355,6 +447,26 @@ var (
 	browserReRefreshU  = regexp.MustCompile(`(?i)(url\s*=\s*)(['"]?)([^'">;]+)`)
 	browserReJSHost    = regexp.MustCompile(`(?i)\b(location|document\.location|window\.location|top\.location|self\.location|parent\.location)\s*\.\s*(hostname|host|origin|protocol|port)\b`)
 )
+
+// browserUnProxy 把面板形态的 URL（含 /b/{scheme}/{host}/...）还原为目标 URL，
+// 用于 Referer 转发（目标站防盗链校验需要真实来源）。非代理 URL 原样返回。
+func browserUnProxy(s string) string {
+	i := strings.Index(s, "/b/")
+	if i < 0 {
+		return s
+	}
+	rest := s[i+3:]
+	j := strings.Index(rest, "/")
+	if j < 0 {
+		return s
+	}
+	scheme := rest[:j]
+	tail := rest[j:]
+	if scheme != "http" && scheme != "https" {
+		return s
+	}
+	return scheme + "://" + strings.TrimPrefix(tail, "/")
+}
 
 // browserURLPath 代理路径形态的 URL（/b/{scheme}/{host}{path}?{query}）。
 func browserURLPath(u *url.URL) string {
@@ -470,15 +582,17 @@ func browserRewriteRefreshValue(v string, tu *url.URL) string {
 }
 
 // browserRewriteJS 替换页面 JS（含内联）里的 location.hostname/host/origin/
-// protocol/port —— 这些值在代理页面下是面板域名，页面 JS 若拿它们拼绝对 URL
-// 会跳回面板本身（404）或直连目标（拒绝连接），替换为真实目标值即可正常工作。
-func browserRewriteJS(js string, tu *url.URL) string {
+// protocol/port 为**面板**的对应值。这些值在代理页面下本来就是面板域名；页面
+// JS 拿它们拼 URL 时得到"面板根下的路径"（如 https://面板/cgi-bin/x），由
+// handleOrphan 兜底重定向回最近站点的代理路径。此前替换为真实目标值反而引导
+// JS 拼出 http://192.168.1.1/... 直连 URL——https 面板下被混合内容拦截 → 空白。
+func browserRewriteJS(js string, panelScheme, panelHost string) string {
 	vals := map[string]string{
-		"hostname": `"` + tu.Hostname() + `"`,
-		"host":     `"` + tu.Host + `"`,
-		"origin":   `"` + tu.Scheme + "://" + tu.Host + `"`,
-		"protocol": `"` + tu.Scheme + `:"`,
-		"port":     `"` + tu.Port() + `"`,
+		"hostname": `"` + panelHostname(panelHost) + `"`,
+		"host":     `"` + panelHost + `"`,
+		"origin":   `"` + panelScheme + "://" + panelHost + `"`,
+		"protocol": `"` + panelScheme + `:"`,
+		"port":     `"` + panelPort(panelHost) + `"`,
 	}
 	return browserReJSHost.ReplaceAllStringFunc(js, func(m string) string {
 		i := strings.LastIndex(m, ".")
@@ -493,12 +607,52 @@ func browserRewriteJS(js string, tu *url.URL) string {
 	})
 }
 
+func panelHostname(host string) string {
+	if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host[i:], "]") {
+		return host[:i]
+	}
+	return host
+}
+
+func panelPort(host string) string {
+	if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host[i:], "]") {
+		return host[i+1:]
+	}
+	return ""
+}
+
+// lastSite 最近一次经代理成功加载主文档的站点（"http://192.168.1.1" 形态），
+// 供孤儿路径兜底重定向使用。多标签同时开不同站点时可能归错站点——单站点场景
+// （路由器管理页）不受影响。
+var lastSite atomic.Value // string
+
+// handleOrphan GET/POST /（非根路径）：页面 JS 用面板 host 拼出的"面板根下
+// 绝对 URL"（如 /cgi-bin/x）会落到这里 —— 307 重定向回最近站点的代理路径
+// （307 保留方法与请求体，POST 登录表单也能继续）。
+func (s *Server) handleOrphan(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/" || r.URL.Path == "" {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			s.handleIndex(w, r)
+			return
+		}
+		fail(w, 404, "未找到")
+		return
+	}
+	site, _ := lastSite.Load().(string)
+	if site == "" {
+		fail(w, 404, "未找到")
+		return
+	}
+	dest := "/b/" + strings.Replace(site, "://", "/", 1) + r.URL.RequestURI()
+	http.Redirect(w, r, dest, http.StatusTemporaryRedirect)
+}
+
 // browserRewriteHTML 全量重写 + 注入 base 与运行时脚本。
-func browserRewriteHTML(doc string, tu *url.URL) []byte {
+func browserRewriteHTML(doc string, tu *url.URL, panelScheme, panelHost string) []byte {
 	doc = browserReAttr.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteAttr(m, tu) })
 	doc = browserRewriteCSS(doc, tu) // <style> 块与 style 属性内的绝对 url()
 	doc = browserReRefresh.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteRefreshValue(m, tu) })
-	doc = browserRewriteJS(doc, tu) // 内联 <script> 与事件属性里的 location.host/hostname 等
+	doc = browserRewriteJS(doc, panelScheme, panelHost) // 内联 <script> 与事件属性里的 location.host/hostname 等
 	doc = browserReBase.ReplaceAllString(doc, "")
 	doc = browserReCSPMeta.ReplaceAllString(doc, "")
 	inject := `<base href="` + html.EscapeString(browserURLPath(tu)) + `">` + browserPatchScript(tu)
@@ -549,6 +703,16 @@ func browserPatchScript(tu *url.URL) string {
 		// window.open / showModalDialog → 交由宿主新建标签
 		`window.open=function(u){msg("newtab",u);return null;};` +
 		`try{window.showModalDialog=function(u){msg("newtab",u);return null;};}catch(e){}` +
+		// 原型级 setter 拦截：地图瓦片/懒加载图片大量使用 new Image()、
+		// createElement('img') 且**不插入 DOM**（MutationObserver 观察不到），
+		// 只能通过原型上的 src/href setter 兜住，否则这类资源直连目标必然失败。
+		`var PS=[["HTMLImageElement","src"],["HTMLScriptElement","src"],["HTMLLinkElement","href"],` +
+		`["HTMLSourceElement","src"],["HTMLVideoElement","src"],["HTMLAudioElement","src"],` +
+		`["HTMLIFrameElement","src"],["HTMLInputElement","src"],["HTMLEmbedElement","src"],["HTMLTrackElement","src"]];` +
+		`for(var pi=0;pi<PS.length;pi++){try{(function(nm,at){var P=window[nm];if(!P||!P.prototype)return;` +
+		`var d=Object.getOwnPropertyDescriptor(P.prototype,at);if(!d||!d.set)return;` +
+		`Object.defineProperty(P.prototype,at,{set:function(v){try{d.set.call(this,px(v));}catch(e){d.set.call(this,v);}},` +
+		`get:d.get,configurable:true});})(PS[pi][0],PS[pi][1]);}catch(e){}}` +
 		// 动态节点属性修正
 		`var ATTR=["href","src","action","poster","srcset","formaction","data-src","data-href"];` +
 		`function sx(v){var ps=String(v).split(","),o=[];for(var i=0;i<ps.length;i++){var t=ps[i].replace(/^\s+|\s+$/g,"");var sp=t.split(/\s+/);if(sp.length){sp[0]=px(sp[0]);o.push(sp.join(" "));}else{o.push(t);}}return o.join(",");}` +
