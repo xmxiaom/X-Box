@@ -428,6 +428,32 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           <h3>🔄 检查更新 <span class="h-action"><span class="badge badge-blue" id="upd-latest-badge"></span></span></h3>
           <div id="upd-body"></div>
         </div>
+        <div class="card" style="margin-top:14px">
+          <h3>🔐 账户管理</h3>
+          <div class="acct-list" id="acct-list"></div>
+          <div class="acct-section">
+            <div class="sub-title">当前登录：<span id="cur-user"></span></div>
+          </div>
+          <div class="acct-section">
+            <div class="sub-title">修改密码</div>
+            <div class="form-inline">
+              <input type="password" id="cp-old" class="input" placeholder="原密码">
+              <input type="password" id="cp-new" class="input" placeholder="新密码">
+              <button class="btn btn-primary btn-sm" onclick="changePass()">保存</button>
+            </div>
+          </div>
+          <div class="acct-section">
+            <div class="sub-title">新增账户</div>
+            <div class="form-inline">
+              <input type="text" id="au-user" class="input" placeholder="用户名">
+              <input type="password" id="au-pass" class="input" placeholder="密码">
+              <button class="btn btn-primary btn-sm" onclick="addUser()">新增</button>
+            </div>
+          </div>
+          <div class="acct-section">
+            <button class="btn btn-danger-outline btn-sm" onclick="doLogout()">退出登录</button>
+          </div>
+        </div>
       </div>
 
     </div>
@@ -458,6 +484,9 @@ async function api(path, opts = {}) {
   const r = await fetch(path, {cache:'no-store', ...opts, headers: {'Content-Type': 'application/json', ...(opts.headers||{})}});
   // 非 2xx：先尝试解析后端 fail() 的具体错误信息（避免只显示"HTTP 500"这种无信息量的提示）
   if (!r.ok) {
+    if (r.status === 401) {
+      try { const j = await r.json(); if (j && j.needLogin) { showLogin(true); } } catch(e){}
+    }
     let msg = '请求失败（HTTP '+r.status+'）';
     try{ const j = await r.json(); if(j && j.error) msg = j.error; }catch(e){}
     throw new Error(msg);
@@ -869,6 +898,7 @@ async function checkUpdate(){
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = '检查更新'; }
   }
+  loadAccounts();
 }
 function renderUpdate(u){
   document.getElementById('upd-current').textContent = u.current||'—';
@@ -1341,13 +1371,106 @@ async function delProxy(id){
 }
 
 /* ---------- 启动 ---------- */
+let currentUser = '';
 async function boot(){
-  startTempLoop(); // 温度轮询无条件启动（不依赖 loadOverview 成功，失败时温度也不会永久静止）
+  startTempLoop();
+  try{
+    const st = await api('/api/auth/status');
+    if(!st.authed){ showLogin(st.configured); return; }
+    currentUser = st.user || '';
+  }catch(e){ /* status 白名单，不应失败 */ }
   try{ const j = await api('/api/overview'); document.getElementById('ver').textContent = 'v'+j.version; }catch(e){}
   loadOverview(); loadPorts(); loadProcs();
   setInterval(loadOverview, 30000);
 }
 boot();
+function showLogin(configured){
+  document.getElementById('login-title').textContent = configured ? 'X-Box 登录' : '设置管理员账户';
+  document.getElementById('login-sub').textContent = configured ? '请输入账户和密码' : '首次使用，请设置管理员账户和密码';
+  document.getElementById('login-msg').textContent = '';
+  document.getElementById('login-user').value = '';
+  document.getElementById('login-pass').value = '';
+  document.getElementById('login-mask').style.display = 'flex';
+  setTimeout(()=>{ const el=document.getElementById('login-user'); if(el) el.focus(); }, 50);
+}
+function hideLogin(){ document.getElementById('login-mask').style.display = 'none'; }
+async function doLogin(){
+  const user = document.getElementById('login-user').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  const msg = document.getElementById('login-msg');
+  if(!pass){ msg.textContent='请输入密码'; return; }
+  try{
+    const r = await fetch('/api/login', {method:'POST', cache:'no-store', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user, pass})});
+    const j = await r.json();
+    if(j.ok){ hideLogin(); location.reload(); }
+    else { msg.textContent = j.error || '登录失败'; }
+  }catch(e){ msg.textContent = '网络错误'; }
+}
+document.getElementById('login-btn').addEventListener('click', doLogin);
+document.getElementById('login-pass').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+document.getElementById('login-user').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+async function doLogout(){
+  try{ await fetch('/api/logout', {method:'POST', cache:'no-store'}); }catch(e){}
+  location.reload();
+}
+async function changePass(){
+  const o = document.getElementById('cp-old').value, n = document.getElementById('cp-new').value;
+  if(!o||!n){ toast('请填写原密码和新密码'); return; }
+  try{
+    await api('/api/auth/changepass', {method:'POST', body: JSON.stringify({old:o, new:n})});
+    toast('密码已修改');
+    document.getElementById('cp-old').value=''; document.getElementById('cp-new').value='';
+  }catch(e){ toast(e.message); }
+}
+async function addUser(){
+  const u = document.getElementById('au-user').value.trim(), p = document.getElementById('au-pass').value;
+  if(!u||!p){ toast('请填写用户名和密码'); return; }
+  try{
+    await api('/api/auth/adduser', {method:'POST', body: JSON.stringify({user:u, pass:p})});
+    toast('账户已新增');
+    document.getElementById('au-user').value=''; document.getElementById('au-pass').value='';
+    loadAccounts();
+  }catch(e){ toast(e.message); }
+}
+async function delUser(u){
+  if(!confirm('确定删除账户 '+u+'？')) return;
+  try{
+    await api('/api/auth/deluser', {method:'POST', body: JSON.stringify({user:u})});
+    toast('已删除');
+    loadAccounts();
+  }catch(e){ toast(e.message); }
+}
+async function loadAccounts(){
+  const box = document.getElementById('acct-list');
+  if(box) box.innerHTML = '<div class="acct-row"><span class="u">'+esc(currentUser)+'</span><span class="badge badge-green">已登录</span></div>';
+  const cu = document.getElementById('cur-user');
+  if(cu) cu.textContent = currentUser;
+}
 </script>
+<style>
+.login-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:9999}
+.login-card{background:#fff;border-radius:12px;padding:30px 28px;width:320px;box-shadow:0 10px 40px rgba(0,0,0,.2)}
+.login-title{font-size:18px;font-weight:600;margin-bottom:4px}
+.login-sub{font-size:13px;color:var(--text3);margin-bottom:18px}
+.login-input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;margin-bottom:10px;box-sizing:border-box}
+.login-btn{width:100%;justify-content:center;margin-top:4px}
+.login-msg{font-size:13px;color:var(--danger);min-height:18px;margin-top:8px;text-align:center}
+.acct-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+.acct-row{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg);border-radius:6px}
+.acct-row .u{flex:1;font-weight:500}
+.form-inline{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.form-inline .input{flex:1;min-width:120px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;box-sizing:border-box}
+.sub-title{font-size:13px;color:var(--text2);margin:12px 0 8px;font-weight:500}
+</style>
+<div id="login-mask" class="login-mask">
+  <div class="login-card">
+    <div class="login-title" id="login-title">X-Box 登录</div>
+    <div class="login-sub" id="login-sub">请输入账户和密码</div>
+    <input type="text" id="login-user" class="login-input" placeholder="账户" autocomplete="username">
+    <input type="password" id="login-pass" class="login-input" placeholder="密码" autocomplete="current-password">
+    <button class="btn btn-primary login-btn" id="login-btn">进入</button>
+    <div class="login-msg" id="login-msg"></div>
+  </div>
+</div>
 </body>
 </html>

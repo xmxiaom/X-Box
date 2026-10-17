@@ -10,3 +10,6 @@ pkg/app/server/xbox-arm64
 
 # 本地测试缓存
 dump_tmp.js
+
+# 运行时配置（含真实 DDNS 凭据/域名/账户，禁止提交）
+data/

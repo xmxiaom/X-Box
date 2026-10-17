@@ -10,8 +10,9 @@
 //   2. 只删普通文件：跳过符号链接、socket、设备、目录，绝不递归删目录树；
 //   3. 每个分类有最小文件年龄阈值，扫描与清理两阶段都各自复核。
 //
-// 注意：面板无登录（应用户要求），仅监听 127.0.0.1:8899——fnOS 桌面窗口 iframe 在本机加载、
-// 手机 APP 经 fnOS 系统网关反代访问，均不依赖对外监听；如需局域网直接访问可改回 ":8899"。
+// 注意：面板默认监听 :8899（所有接口，含 IPv6），以便通过 DDNS 域名从外部访问；已内置登录保护
+// （多账户 + 10 分钟空闲超时 + 防暴力破解）。对外开放仍意味着可达者经登录后可操作 NAS，
+// 请在路由器/光猫仅放行可信来源，并登录后及时修改默认账户密码。
 package main
 
 import (
@@ -29,10 +30,10 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.24"
-	// 仅监听本机回环：fnOS 桌面窗口（iframe）在本机加载，手机 APP 经系统网关反代，
-	// 均不需要对外暴露端口；局域网/公网其它主机无法直接访问 8899。
-	listenAddr = "127.0.0.1:8899"
+	version    = "1.2.25"
+	// 监听所有接口（含 IPv6）：允许通过 DDNS 域名（如 your-domain.example.com:8899）从外部访问面板。
+	// 已配合 auth.go 的登录保护（多账户 + 10 分钟空闲超时）；请仅在路由器/光猫放行可信来源。
+	listenAddr = ":8899"
 )
 
 type Server struct {
@@ -56,6 +57,7 @@ func main() {
 	// 初始化 DDNS、反向代理子系统（注册联动、后台同步）
 	initDDNS(dataDir)
 	initProxy(dataDir)
+	initAuth(dataDir)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/overview", srv.handleOverview)
@@ -84,10 +86,16 @@ func main() {
 	mux.HandleFunc("POST /api/update/download", handleUpdateDownload)
 	mux.HandleFunc("GET /api/update/dirs", handleUpdateDirs)
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
+	mux.HandleFunc("POST /api/login", srv.handleLogin)
+	mux.HandleFunc("POST /api/logout", srv.handleLogout)
+	mux.HandleFunc("GET /api/auth/status", srv.handleAuthStatus)
+	mux.HandleFunc("POST /api/auth/changepass", srv.handleAuthChangePass)
+	mux.HandleFunc("POST /api/auth/adduser", srv.handleAuthAddUser)
+	mux.HandleFunc("POST /api/auth/deluser", srv.handleAuthDelUser)
 	mux.HandleFunc("GET /", srv.handleRoot)
 
-	log.Printf("X-Box v%s 启动，监听 %s（无登录，请勿暴露公网）", version, listenAddr)
-	if err := http.ListenAndServe(listenAddr, mux); err != nil {
+	log.Printf("X-Box v%s 启动，监听 %s（已启用登录保护，面板对外需登录）", version, listenAddr)
+	if err := http.ListenAndServe(listenAddr, authMiddleware(mux)); err != nil {
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
 }
