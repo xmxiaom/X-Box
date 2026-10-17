@@ -28,12 +28,20 @@ global.setInterval = () => 0;
 global.setTimeout = (f) => { try { f && f(); } catch (e) {} return 0; }; // toast 自动移除用立即执行
 
 // fetch 桩：overview / nat / ports / processes / services 全覆盖（r.ok 供 api() 的状态检查）
-global.fetch = async (url) => ({
+// 隧道解码：页面 api() 走 /?__x=<base64url(JSON{m,p,b,sid})>，需还原真实路径再路由
+function b64d(s){ s=String(s).replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return decodeURIComponent(escape(atob(s))); }
+global.fetch = async (url) => {
+  let u = String(url);
+  const qi = u.indexOf('?__x=');
+  if (qi >= 0) {
+    try { const tp = JSON.parse(b64d(decodeURIComponent(u.slice(qi + 5).split('&')[0]))); if (tp.p) u = tp.p; } catch(e){}
+  }
+  return {
   ok: true, status: 200,
   json: async () => {
-    if (String(url).includes('/api/auth/status')) return { ok: true, configured: true, authed: true, user: 'admin' }; // 已登录，boot 直通 enterApp
-    if (String(url).includes('/api/auth/listusers')) return { ok: true, users: [{user:'admin', current:true}] };
-    if (String(url).includes('/api/overview')) return {
+    if (u.includes('/api/auth/status')) return { ok: true, configured: true, authed: true, user: 'admin' }; // 已登录，boot 直通 enterApp
+    if (u.includes('/api/auth/listusers')) return { ok: true, users: [{user:'admin', current:true}] };
+    if (u.includes('/api/overview')) return {
       ok: true, version: '1.1.0', hostname: 'nas', cpuCores: 4, cpuModel: 'Test CPU',
       load1: 0.5, memTotalKB: 8000000, memAvailKB: 4000000, uptimeSeconds: 90000,
       kernel: '6.1.0', listeningPorts: 5, publicPorts: 1,
@@ -58,14 +66,15 @@ global.fetch = async (url) => ({
         gateway: '192.168.1.1', gateway6: 'fe80::1', dns: ['192.168.1.1', '223.5.5.5'],
       },
     };
-    if (String(url).includes('/api/nat')) return { ok: true, nat: { type: 'symmetric', natLevel: 3, natLevelText: 'NAT3 · 严格（对称型）', optimize: '对称型 NAT 下 P2P 打洞困难：建议改用中继方案', publicIP: '1.2.3.4', publicPort: 12345, cgnat: false, p2pNote: '需中继', detail: 'x', testedAt: 'now' } };
-    if (String(url).includes('/api/temps')) return { ok: true, cpuMax: 52.5, disks: [{device:'sda', mount:'/', tempC:38}, {device:'nvme0n1', mount:'/vol1', tempC:46.5}] };
-    if (String(url).includes('/api/ports')) return { ok: true, ports: [] }; // listeners/public 缺失
-    if (String(url).includes('/api/processes')) return { ok: true, processes: [] };
-    if (String(url).includes('/api/services')) return { ok: true, services: null, apps: null, docker: null };
+    if (u.includes('/api/nat')) return { ok: true, nat: { type: 'symmetric', natLevel: 3, natLevelText: 'NAT3 · 严格（对称型）', optimize: '对称型 NAT 下 P2P 打洞困难：建议改用中继方案', publicIP: '1.2.3.4', publicPort: 12345, cgnat: false, p2pNote: '需中继', detail: 'x', testedAt: 'now' } };
+    if (u.includes('/api/temps')) return { ok: true, cpuMax: 52.5, disks: [{device:'sda', mount:'/', tempC:38}, {device:'nvme0n1', mount:'/vol1', tempC:46.5}] };
+    if (u.includes('/api/ports')) return { ok: true, ports: [] }; // listeners/public 缺失
+    if (u.includes('/api/processes')) return { ok: true, processes: [] };
+    if (u.includes('/api/services')) return { ok: true, services: null, apps: null, docker: null };
     return { ok: true };
   },
-});
+  };
+}
 
 // HTML 指向 ../src/web/index.html
 const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'web', 'index.html'), 'utf-8');

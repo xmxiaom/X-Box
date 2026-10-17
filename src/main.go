@@ -17,12 +17,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -33,7 +35,7 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.36"
+	version    = "1.2.37"
 	// 监听所有接口（含 IPv6）：允许通过 DDNS 域名（如 your-domain.example.com:8899）从外部访问面板。
 	// 已配合 auth.go 的登录保护（多账户 + 10 分钟空闲超时）；请仅在路由器/光猫放行可信来源。
 	listenAddr = ":8899"
@@ -100,9 +102,47 @@ func main() {
 	mux.HandleFunc("GET /", srv.handleRoot)
 
 	log.Printf("X-Box v%s 启动，监听 %s（已启用登录保护，面板对外需登录）", version, listenAddr)
-	if err := http.ListenAndServe(listenAddr, formBridge(authMiddleware(mux))); err != nil {
+	if err := http.ListenAndServe(listenAddr, formBridge(tunnelBridge(authMiddleware(mux)))); err != nil {
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
+}
+
+// tunnelBridge：fnOS 远程访问中转会拦截 /api/ 前缀（重定向到跨域门户，导致页面内
+// XHR 被 CORS 拦、fetch/iframe 挂起），而 / 路径畅通。前端把所有 API 请求编码进
+// /?__x=<base64url(JSON{m,p,b,sid})> 隧道参数，此处还原成真实请求再交给后续中间件。
+func tunnelBridge(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			if t := r.URL.Query().Get("__x"); t != "" {
+				var tp struct {
+					M   string `json:"m"`
+					P   string `json:"p"`
+					B   string `json:"b"`
+					Sid string `json:"sid"`
+				}
+				if raw, err := base64.URLEncoding.WithPadding(base64.NoPadding).DecodeString(t); err == nil && json.Unmarshal(raw, &tp) == nil && tp.P != "" {
+					if u, perr := url.Parse(tp.P); perr == nil && strings.HasPrefix(u.Path, "/api/") {
+						r2 := r.Clone(r.Context())
+						r2.Method = tp.M
+						if r2.Method == "" {
+							r2.Method = "GET"
+						}
+						r2.URL.Path = u.Path
+						r2.URL.RawQuery = u.RawQuery
+						r2.Body = io.NopCloser(strings.NewReader(tp.B))
+						r2.ContentLength = int64(len(tp.B))
+						r2.Header.Set("Content-Type", "application/json")
+						if tp.Sid != "" {
+							r2.Header.Set("Authorization", "Bearer "+tp.Sid)
+						}
+						next.ServeHTTP(w, r2)
+						return
+					}
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // formBridge 表单桥接：fnOS 客户端 iframe 内 fetch/XHR 子资源请求不可用，

@@ -14,6 +14,13 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms)); // Node 定时器
 
 function jsonRes(obj) { return { ok: true, status: 200, json: async () => obj }; }
 
+// base64url 解码（与页面 tunnelB64 互为逆操作，用于在测试桩里还原隧道请求）
+function b64d(s) {
+  s = String(s).replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return decodeURIComponent(escape(atob(s)));
+}
+
 function makeDom(authed, opts) {
   opts = opts || {};
   const calls = [];
@@ -23,8 +30,17 @@ function makeDom(authed, opts) {
   ];
   const stubFetch = async (url, o) => {
     o = o || {};
-    const u = String(url);
-    calls.push({ url: u, method: o.method || 'GET', body: o.body || '', headers: (o && o.headers) || {} });
+    let u = String(url);
+    let sid = '';
+    // 隧道解码：/?__x=<base64url(JSON{m,p,b,sid})> → 还原真实方法/路径/载荷
+    const qi = u.indexOf('?__x=');
+    if (qi >= 0) {
+      const t = decodeURIComponent(u.slice(qi + 5).split('&')[0]);
+      const tp = JSON.parse(b64d(t));
+      u = tp.p; sid = tp.sid || '';
+      o = { method: tp.m || 'GET', body: tp.b || '' };
+    }
+    calls.push({ url: u, method: o.method || 'GET', body: o.body || '', sid: sid, headers: (o && o.headers) || {} });
     if (u.includes('/api/auth/status')) return jsonRes(opts.statusOverride || { ok: true, configured: true, authed: authed, user: authed ? 'admin' : '' });
     if (u.includes('/api/login')) {
       const b = JSON.parse(o.body || '{}');
@@ -146,12 +162,12 @@ function makeDom(authed, opts) {
     await sleep(200);
     check(!doc.querySelector('.app').classList.contains('show'), 'B: 未登录时 .app 不应显示');
     check(doc.getElementById('login-mask').style.display === 'flex', 'B: boot 后登录层应保持可见');
-    // 诊断行：组件状态 + 双通道网络探测（排障传感器）
+    // 诊断行：隧道探测 + 根路径对照（排障传感器）
     const diagTxt = doc.getElementById('login-diag').textContent;
     check(diagTxt.includes('面板组件: 已加载'), 'B: 诊断行未识别主脚本存活: ' + diagTxt);
     check(diagTxt.includes('地址: http://localhost:8899'), 'B: 诊断行缺地址: ' + diagTxt);
     const netTxt = doc.getElementById('login-diag-net').textContent;
-    check(netTxt.includes('fetch=正常') && netTxt.includes('fetch通道=正常') && netTxt.includes('根路径=正常'), 'B: 通道探测异常: ' + netTxt);
+    check(netTxt.includes('隧道=正常') && netTxt.includes('根路径=正常'), 'B: 通道探测异常: ' + netTxt);
 
     // 错误密码 → 显示后端错误信息，不进入面板
     doc.getElementById('login-user').value = 'admin';
@@ -171,9 +187,10 @@ function makeDom(authed, opts) {
     check(doc.getElementById('ver').textContent === 'v1.2.29', 'B: 登录后未加载概览（ver 未更新）'); // let 声明的 currentUser 不挂 window，用概览加载结果验证 enterApp
     check(win.__xboxToken === 'test-sid-123', 'B: 登录后 token 未存入 window.__xboxToken');
     check(win.localStorage.getItem('xbox_sid_token') === 'test-sid-123', 'B: token 未持久化到 localStorage');
-    // Bearer 链路：登录后的 API 请求必须带 Authorization 头部（iframe 第三方 Cookie 被拦截时的生命线）
+    // Bearer 链路：登录后的 API 请求必须在隧道 payload 里携带 sid（iframe/XHR-GET 无法带头部）
     const listCall = calls.find(x => x.url.includes('/api/auth/listusers'));
-    check(!!listCall && listCall.headers['Authorization'] === 'Bearer test-sid-123', 'B: 登录后请求未带 Bearer 头部');
+    check(!!listCall && listCall.sid === 'test-sid-123', 'B: 隧道请求未携带 sid: ' + (listCall && listCall.sid));
+    check(!!listCall && listCall.method === 'GET', 'B: 隧道请求方法错误');
 
     // 退出登录 → 回登录层，token 清除
     win.doLogout();
@@ -230,19 +247,27 @@ function makeDom(authed, opts) {
   const stripped = blocks[1].replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1'); // 去注释，避免注释文字误报
   check(/\bconst\b|\blet\b|=>|async |await |\.\.\.|\?\?/.test(stripped) === false, 'R: ES5 登录层含现代语法');
 
-  /* ---------- 场景D：fetch 通道失败 → 自动切换导航通道（iframe） ---------- */
+  /* ---------- 场景D：XHR 与 fetch 都失败 → 回退导航通道；隧道编解码断言 ---------- */
   {
     const { doc, win } = makeDom(true, { failFetch: true });
     await sleep(250);
-    // 不 await：jsdom 下 iframe onload 不触发，navApi promise 永不 settle（真实浏览器会触发）
-    win.api('/api/overview').catch(() => {});
-    await sleep(50); // 等 fetch 拒绝的微任务链跑完（catch → switchToNav → navApi 建 iframe）
-    check(win.__navMode === true, 'D: fetch 失败后未切换到导航通道');
-    check(!!doc.querySelector('iframe[id^="navf"]'), 'D: 未创建导航通道 iframe');
-    check(typeof win.navApi === 'function' && typeof win.navUrl === 'function', 'D: 导航通道函数缺失');
+    // XHR 通道打挂（抛错）+ fetch 失败 → api() 应逐一回退到 navApi
+    win.XMLHttpRequest = function () { throw new Error('xhr dead'); };
+    win.navApi = function (p, o) { win.__navCalls = (win.__navCalls || 0) + 1; return Promise.resolve({ ok: true, via: 'nav-stub' }); };
+    const j = await win.api('/api/overview');
+    check(j && j.via === 'nav-stub', 'D: XHR/fetch 均失败后未回退导航通道');
+    check(win.__navMode === true, 'D: 未进入导航模式');
+    check((win.__navCalls || 0) >= 1, 'D: navApi 未被调用');
+    // 隧道编解码：apiTunnel 输出可被镜像解码还原
     win.saveAuthToken('tok123');
-    check(win.navUrl('/api/overview') === '/api/overview?sid=tok123', 'D: navUrl 未带 sid: ' + win.navUrl('/api/overview'));
-    check(win.navUrl('/api/ddns/sync?x=1') === '/api/ddns/sync?x=1&sid=tok123', 'D: navUrl 带查询参数时 sid 拼接错误');
+    const tun = win.apiTunnel('/api/login', { method: 'POST', body: '{"user":"a","pass":"b"}' });
+    check(tun.indexOf('/?__x=') === 0, 'D: apiTunnel 输出格式错误: ' + tun);
+    const tp = JSON.parse(b64d(decodeURIComponent(tun.slice(tun.indexOf("=") + 1))));
+    check(tp.m === 'POST' && tp.p === '/api/login' && tp.b === '{"user":"a","pass":"b"}' && tp.sid === 'tok123', 'D: 隧道 payload 解码错误: ' + JSON.stringify(tp));
+    // 中文载荷（base64 必须 UTF-8 安全）
+    const tun2 = win.apiTunnel('/api/ddns/record/save', { method: 'POST', body: JSON.stringify({ name: '中文域名' }) });
+    const tp2 = JSON.parse(b64d(decodeURIComponent(tun2.slice(tun2.indexOf("=") + 1))));
+    check(tp2.p === '/api/ddns/record/save' && JSON.parse(tp2.b).name === '中文域名', 'D: 中文载荷隧道编解码失败');
   }
 
   if (failures.length) {
