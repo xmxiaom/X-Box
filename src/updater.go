@@ -82,10 +82,26 @@ type ghRelease struct {
 	Body        string `json:"body"`
 	PublishedAt string `json:"published_at"`
 	Assets      []struct {
+		ID                 int64  `json:"id"`
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 		Size               int64  `json:"size"`
 	} `json:"assets"`
+}
+
+// ghAssetAPIURL 资产下载走 GitHub API 端点（Accept: application/octet-stream 返回二进制）。
+// 不用 browser_download_url：它会 302 到 objects.githubusercontent.com，国内网络大量
+// 不可达（更新下载 HTTP 0 的根因）；api.github.com 与版本检测同域，实测可达。
+func ghAssetAPIURL(assetID int64) string {
+	return fmt.Sprintf("https://api.github.com/repos/%s/releases/assets/%d", ghRepo, assetID)
+}
+
+// fmtGhTime GitHub 时间（RFC3339 UTC）→ 本地可读格式；解析失败原样返回。
+func fmtGhTime(s string) string {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Local().Format("2006-01-02 15:04:05")
+	}
+	return s
 }
 
 // fetchRawVersion 从 raw manifest 读取远程版本号（无限流主路径）。
@@ -129,11 +145,11 @@ func checkUpdate() UpdateInfo {
 	if info.HasUpdate && info.Latest != "" {
 		if rel, ok := fetchLatestRelease(); ok {
 			info.Notes = strings.TrimSpace(rel.Body)
-			info.PublishedAt = rel.PublishedAt
+			info.PublishedAt = fmtGhTime(rel.PublishedAt)
 			for _, a := range rel.Assets {
 				if strings.HasSuffix(a.Name, ".fpk") {
 					info.AssetName = a.Name
-					info.DownloadURL = a.BrowserDownloadURL
+					info.DownloadURL = ghAssetAPIURL(a.ID) // API 资产端点（穿透 objects.githubusercontent.com 不可达）
 					break
 				}
 			}
@@ -173,11 +189,11 @@ func checkUpdateViaAPI(info UpdateInfo) UpdateInfo {
 	info.Source = "release-api"
 	info.Latest = strings.TrimPrefix(rel.TagName, "v")
 	info.Notes = strings.TrimSpace(rel.Body)
-	info.PublishedAt = rel.PublishedAt
+	info.PublishedAt = fmtGhTime(rel.PublishedAt)
 	for _, a := range rel.Assets {
 		if strings.HasSuffix(a.Name, ".fpk") {
 			info.AssetName = a.Name
-			info.DownloadURL = a.BrowserDownloadURL
+			info.DownloadURL = ghAssetAPIURL(a.ID) // API 资产端点（穿透 objects.githubusercontent.com 不可达）
 			break
 		}
 	}
@@ -351,8 +367,13 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "参数错误")
 		return
 	}
-	// 只允许 GitHub 官方域名下载（防 SSRF）
-	if !strings.HasPrefix(req.URL, "https://github.com/"+ghRepo+"/releases/download/") {
+	// 只允许 GitHub 官方下载地址（防 SSRF）：
+	//   1) api.github.com 资产端点（首选，穿透 objects.githubusercontent.com 不可达）
+	//   2) github.com/.../releases/download/ 直链（兜底）
+	apiAssetPrefix := "https://api.github.com/repos/" + ghRepo + "/releases/assets/"
+	dlPrefix := "https://github.com/" + ghRepo + "/releases/download/"
+	isAPI := strings.HasPrefix(req.URL, apiAssetPrefix) && strings.TrimPrefix(req.URL, apiAssetPrefix) != "" && isAllDigits(strings.TrimPrefix(req.URL, apiAssetPrefix))
+	if !isAPI && !strings.HasPrefix(req.URL, dlPrefix) {
 		fail(w, 400, "仅支持从 GitHub Release 下载")
 		return
 	}
@@ -375,7 +396,15 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	dst := filepath.Join(dir, name)
 
 	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Get(req.URL)
+	httpReq, err := http.NewRequest("GET", req.URL, nil)
+	if err != nil {
+		fail(w, 500, "下载失败："+err.Error())
+		return
+	}
+	if isAPI {
+		httpReq.Header.Set("Accept", "application/octet-stream") // API 资产端点：带此头返回二进制，否则返回 JSON 元数据
+	}
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		fail(w, 500, "下载失败："+err.Error())
 		return
@@ -409,6 +438,19 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		"bytes":   n,
 		"hint":    "请到飞牛 应用中心 → 手动安装 选择该文件完成覆盖安装（数据与配置保留）",
 	})
+}
+
+// isAllDigits 判断字符串是否全为数字（资产 ID 校验）。
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // isFpkFile 校验 fpk 文件：fnpack 打出的 fpk 是 **gzip** 容器（1F 8B），

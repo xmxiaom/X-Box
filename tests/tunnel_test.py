@@ -94,6 +94,42 @@ check("反代不匹配回落面板", st == 200 and "<html" in body, "status=%s" 
 st, body = get(tunnel({"m": "POST", "p": "/api/proxy/del?id=%d" % site_id}))
 check("清理反代站点", st == 200 and json.loads(body).get("ok"), body)
 
+def get_long(url, timeout=180):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+# 10) 更新下载：经 GitHub API 资产端点（穿透 objects.githubusercontent.com 不可达）
+try:
+    rel = json.load(urllib.request.urlopen(urllib.request.Request(
+        "https://api.github.com/repos/xmxiaom/X-Box/releases/latest",
+        headers={"User-Agent": "xbox-test"}), timeout=15))
+    asset = next((a for a in rel.get("assets", []) if a["name"].endswith(".fpk")), None)
+except Exception as e:
+    rel, asset = {}, None
+    print("（GitHub 不可达，跳过更新下载实测）", e)
+if asset:
+    st, body = get_long(tunnel({"m": "POST", "p": "/api/update/download",
+                                "b": json.dumps({"url": "https://api.github.com/repos/xmxiaom/X-Box/releases/assets/%d" % asset["id"], "name": "X-Box-test.fpk"})}))
+    j = json.loads(body) if body else {}
+    check("更新下载(API资产端点)", st == 200 and j.get("ok") and j.get("bytes", 0) > 1000000, body[:120])
+    # SSRF 防护：非 GitHub 地址必须拒绝
+    st, body = get(tunnel({"m": "POST", "p": "/api/update/download", "b": json.dumps({"url": "https://evil.example.com/x.fpk", "name": "x.fpk"})}))
+    check("下载SSRF防护", st == 400 and "仅支持" in body, body[:80])
+    # 检查更新：发布时间本地化 + 下载 URL 走 API 端点（仅在本地版本低于远程最新版时填充）
+    st, body = get(tunnel({"m": "GET", "p": "/api/update/check"}))
+    upd = (json.loads(body).get("update") or {}) if body else {}
+    if upd.get("hasUpdate"):
+        pa = upd.get("publishedAt") or ""
+        check("发布时间本地化格式", bool(pa) and "T" not in pa and "Z" not in pa, pa)
+        check("下载URL走API端点", (upd.get("downloadUrl") or "").startswith("https://api.github.com/repos/xmxiaom/X-Box/releases/assets/"), upd.get("downloadUrl"))
+    else:
+        print("SKIP 发布时间/下载URL 断言（本地版本 %s 不低于远程 %s，发布新版本后此路径生效）" % (upd.get("current"), upd.get("latest")))
+else:
+    check("更新下载(API资产端点)", False, "未找到 fpk 资产")
+
 srv.kill(); os.remove(TMPBIN)
 print("TUNNEL", "ALL PASS" if ok else "HAS FAILURES")
 sys.exit(0 if ok else 1)
