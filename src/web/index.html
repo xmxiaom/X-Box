@@ -450,7 +450,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 let portsData = [], procsData = [], servicesData = [], appsData = [], dockerData = [];
 let portFilter = 'all', svcFilter = 'all';
 let cleanData = null;
-let ddnsData = null;
+let ddnsData = null, ddnsIfaces = [];
 
 /* ---------- 工具 ---------- */
 async function api(path, opts = {}) {
@@ -1108,6 +1108,7 @@ const IPSOURCE_LABEL = {auto:'自动（公网查询）',web:'自定义查询 URL
 async function loadDDNS(){
   try{
     ddnsData = await api('/api/ddns');
+    ddnsIfaces = ddnsData.ifaces||[];
     const _ddnsProvs = ddnsData.providers||[], _ddnsRecs = ddnsData.records||[];
     document.getElementById('ddns-sub').textContent = `同步间隔 ${ddnsData.intervalSec||300}s · ${_ddnsProvs.length} 个服务商 · ${_ddnsRecs.length} 条记录`;
     renderDDNSProviders();
@@ -1123,9 +1124,24 @@ function renderDDNSProviders(){
     return `<tr><td style="font-weight:500">${esc(p.name||avail[p.type]||p.type)}</td>
       <td><span class="badge badge-purple">${esc(avail[p.type]||p.type)}</span></td>
       <td class="mono" style="font-size:12px;color:var(--text3)">${esc(credTxt)}</td>
-      <td><button class="btn btn-text btn-sm" onclick="openProviderForm(${p.id})">编辑</button>
+      <td><button class="btn btn-text btn-sm" onclick="testProvider(${p.id},this)">测试</button>
+          <button class="btn btn-text btn-sm" onclick="openProviderForm(${p.id})">编辑</button>
           <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="delProvider(${p.id})">删除</button></td></tr>`;
   }).join('') || '<tr><td colspan="4"><div class="empty">尚未配置服务商，点击右上角「添加服务商」</div></td></tr>';
+}
+// 服务商连通性测试：用保存的凭据做一次真实轻量 API 调用，验证是否通
+async function testProvider(id, btn){
+  const orig = btn? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin spin-dark" style="width:11px;height:11px"></span> 测试中'; }
+  try{
+    const j = await api('/api/ddns/provider/test',{method:'POST',body:JSON.stringify({id})});
+    toast('✅ '+j.message,'good');
+    if(btn){ btn.textContent = '✓ 通'; btn.style.color = 'var(--success)'; setTimeout(()=>{ btn.textContent = orig||'测试'; btn.style.color=''; }, 5000); }
+  }catch(e){
+    toast('❌ 测试失败：'+e.message,'err');
+    if(btn){ btn.textContent = '✗ 失败'; btn.style.color = 'var(--danger)'; setTimeout(()=>{ btn.textContent = orig||'测试'; btn.style.color=''; }, 5000); }
+  }
+  if(btn) btn.disabled = false;
 }
 function renderDDNSRecords(){
   const t = document.getElementById('ddns-records');
@@ -1160,10 +1176,21 @@ function openProviderForm(id){
     const name = document.getElementById('pf-name').value.trim() || (avail.find(a=>a.type===type)||{}).name || type;
     const cred = {};
     document.querySelectorAll('#pf-cred [data-cred]').forEach(i=>{ if(i.value.trim()) cred[i.dataset.cred]=i.value.trim(); });
+    let newId = 0;
     try{
-      await api('/api/ddns/provider/save',{method:'POST',body:JSON.stringify({id:id||0,name,type,cred})});
+      const j = await api('/api/ddns/provider/save',{method:'POST',body:JSON.stringify({id:id||0,name,type,cred})});
+      newId = j.id||0;
       toast('已保存服务商','good'); loadDDNS();
-    }catch(e){ toast(e.message,'err'); }
+    }catch(e){ toast(e.message,'err'); return; }
+    // 保存后自动做一次连通性测试（不阻塞界面，结果用 toast 呈现）
+    if(newId){
+      try{
+        const r = await api('/api/ddns/provider/test',{method:'POST',body:JSON.stringify({id:newId})});
+        toast('✅ 连通性测试：'+r.message,'good');
+      }catch(e){
+        toast('⚠️ 已保存，但连通性测试未通过：'+e.message,'err');
+      }
+    }
   }, id?'保存':'添加');
   // 类型切换时重建凭据字段
   document.getElementById('pf-type').addEventListener('change', function(){
@@ -1188,7 +1215,7 @@ function openRecordForm(id){
     <div class="form-row"><label>域名（完整记录名，如 nas.example.com）</label><input type="text" id="rf-domain" value="${esc(r?r.domain:'')}" placeholder="nas.example.com"></div>
     <div class="form-row"><label>记录类型</label><select id="rf-rt"><option value="A" ${r&&r.recordType==='A'?'selected':''}>A（IPv4）</option><option value="AAAA" ${r&&r.recordType==='AAAA'?'selected':''}>AAAA（IPv6）</option></select></div>
     <div class="form-row"><label>IP 来源</label><select id="rf-src">${srcOpts}</select></div>
-    <div class="form-row" id="rf-arg-wrap" style="display:none"><label id="rf-arg-label">附加参数</label><input type="text" id="rf-arg" value="${esc(r?r.ipSourceArg:'')}"></div>
+    <div class="form-row" id="rf-arg-wrap" style="display:none"></div>
     <div class="form-row"><label>TTL（秒，0 用默认值）</label><input type="number" id="rf-ttl" value="${r?r.ttl:600}"></div>`;
   confirmDialog(id?'编辑记录':'添加记录', body, async ()=>{
     const payload = {
@@ -1203,13 +1230,25 @@ function openRecordForm(id){
     if(!payload.domain){ toast('域名不能为空','err'); return; }
     try{ await api('/api/ddns/record/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存记录','good'); loadDDNS(); }catch(e){ toast(e.message,'err'); }
   }, id?'保存':'添加');
-  const argLabel = {auto:'',web:'查询 URL（返回纯文本 IP）',interface:'网卡名（可留空自动挑选）',custom:'固定 IP 地址',dns:'要解析的域名'};
-  document.getElementById('rf-src').addEventListener('change', function(){
-    const v=this.value, wrap=document.getElementById('rf-arg-wrap');
-    if(argLabel[v]){ wrap.style.display='block'; document.getElementById('rf-arg-label').textContent=argLabel[v]; }
-    else wrap.style.display='none';
-  });
-  document.getElementById('rf-src').dispatchEvent(new Event('change'));
+  const argLabel = {auto:'',web:'查询 URL（返回纯文本 IP）',interface:'网卡名（下拉选择）',custom:'固定 IP 地址',dns:'要解析的域名'};
+  // IP 来源切换时重建附加参数字段：网卡地址源渲染为下拉选择（物理网卡列表），其余为输入框
+  function renderArgField(){
+    const v = document.getElementById('rf-src').value;
+    const wrap = document.getElementById('rf-arg-wrap');
+    const label = argLabel[v];
+    if(!label){ wrap.style.display='none'; return; }
+    wrap.style.display='block';
+    if(v==='interface'){
+      const cur = (r&&r.ipSourceArg)||'';
+      const opts = (ddnsIfaces||[]).map(n=>`<option value="${esc(n)}" ${n===cur?'selected':''}>${esc(n)}</option>`).join('');
+      wrap.innerHTML = `<label id="rf-arg-label">${label}</label><select id="rf-arg">${opts||'<option value="">（未检测到网卡）</option>'}</select>`;
+    }else{
+      const cur = (r&&r.ipSourceArg)||'';
+      wrap.innerHTML = `<label id="rf-arg-label">${label}</label><input type="text" id="rf-arg" value="${esc(cur)}">`;
+    }
+  }
+  document.getElementById('rf-src').addEventListener('change', renderArgField);
+  renderArgField();
 }
 async function delRecord(id){
   confirmDialog('删除记录','确认删除该解析记录？', async ()=>{

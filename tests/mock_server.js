@@ -98,6 +98,7 @@ const MOCK = {
   },
   '/api/ddns': {
     ok: true, intervalSec: 300,
+    ifaces: ['enp3s0', 'enp4s0', 'wlan0'],
     providersAvail: [
       { type: 'aliyun', name: '阿里云', needSecret: true },
       { type: 'tencentcloud', name: '腾讯云', needSecret: true },

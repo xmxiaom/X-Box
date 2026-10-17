@@ -29,7 +29,7 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.18"
+	version    = "1.2.19"
 	// 仅监听本机回环：fnOS 桌面窗口（iframe）在本机加载，手机 APP 经系统网关反代，
 	// 均不需要对外暴露端口；局域网/公网其它主机无法直接访问 8899。
 	listenAddr = "127.0.0.1:8899"
@@ -71,6 +71,7 @@ func main() {
 	mux.HandleFunc("GET /api/ddns", srv.handleDDNSList)
 	mux.HandleFunc("POST /api/ddns/provider/save", srv.handleDDNSProviderSave)
 	mux.HandleFunc("POST /api/ddns/provider/del", srv.handleDDNSProviderDel)
+	mux.HandleFunc("POST /api/ddns/provider/test", srv.handleDDNSProviderTest)
 	mux.HandleFunc("POST /api/ddns/record/save", srv.handleDDNSRecordSave)
 	mux.HandleFunc("POST /api/ddns/record/del", srv.handleDDNSRecordDel)
 	mux.HandleFunc("POST /api/ddns/sync", srv.handleDDNSSync)

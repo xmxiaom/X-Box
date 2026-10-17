@@ -251,11 +251,64 @@ func (s *Server) handleDDNSList(w http.ResponseWriter, r *http.Request) {
 	ddns.mu.RLock()
 	defer ddns.mu.RUnlock()
 	ok(w, map[string]any{
-		"intervalSec": ddns.cfg.IntervalSec,
-		"providers":   ddns.cfg.Providers,
-		"records":     ddns.cfg.Records,
+		"intervalSec":    ddns.cfg.IntervalSec,
+		"providers":      ddns.cfg.Providers,
+		"records":        ddns.cfg.Records,
 		"providersAvail": availableProviders(),
+		"ifaces":         physicalIfaces(),
 	})
+}
+
+// physicalIfaces 物理网卡名列表（供 DDNS「网卡地址」IP 来源下拉选择）：
+// 排除 lo、docker/veth/br- 等虚拟网卡，仅保留可用于公网访问的真实网卡。
+func physicalIfaces() []string {
+	var out []string
+	entries, _ := os.ReadDir("/sys/class/net")
+	for _, e := range entries {
+		n := e.Name()
+		if n == "lo" || strings.HasPrefix(n, "docker") || strings.HasPrefix(n, "veth") ||
+			strings.HasPrefix(n, "br-") || strings.HasPrefix(n, "virbr") || strings.HasPrefix(n, "tun") ||
+			strings.HasPrefix(n, "tap") {
+			continue
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		out = append(out, "eth0")
+	}
+	return out
+}
+
+// handleDDNSProviderTest POST /api/ddns/provider/test {id}：服务商连通性测试。
+// 用保存的凭据做一次真实轻量 API 调用（只读/最小请求，不修改任何解析记录）。
+func (s *Server) handleDDNSProviderTest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID uint `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == 0 {
+		fail(w, 400, "参数错误")
+		return
+	}
+	ddns.mu.RLock()
+	var prov *DDNSProvider
+	for i := range ddns.cfg.Providers {
+		if ddns.cfg.Providers[i].ID == req.ID {
+			p := ddns.cfg.Providers[i]
+			prov = &p
+			break
+		}
+	}
+	ddns.mu.RUnlock()
+	if prov == nil {
+		fail(w, 404, "服务商不存在")
+		return
+	}
+	if err := testDNSProvider(prov.Type, prov.Cred); err != nil {
+		// 注意：必须走 fail（非 200 + ok:false），前端才能进入 catch 显示失败态
+		fail(w, 400, err.Error())
+		return
+	}
+	ok(w, map[string]any{"message": "连接正常，凭据有效"})
 }
 
 type ddnsProviderReq struct {
@@ -265,8 +318,7 @@ type ddnsProviderReq struct {
 	Cred map[string]string `json:"cred"`
 }
 
-func (s *Server) handleDDNSProviderSave(w http.ResponseWriter, r *http.Request) {
-	var req ddnsProviderReq
+func (s *Server) handleDDNSProviderSave(w http.ResponseWriter, r *http.Request) {	var req ddnsProviderReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, 400, "参数错误")
 		return
