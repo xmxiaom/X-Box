@@ -1265,10 +1265,24 @@ async function delRecord(id){
   });
 }
 async function syncOneDDNS(id){
-  try{ const j=await api('/api/ddns/sync?id='+id,{method:'POST'}); toast(j.message||'已触发同步','good'); }catch(e){ toast(e.message,'err'); }
+  try{ const j=await api('/api/ddns/sync?id='+id,{method:'POST'}); toast(j.message||'已触发同步','good'); await pollDDNSSync(id); }catch(e){ toast(e.message,'err'); }
 }
 async function syncAllDDNS(){
-  try{ const j=await api('/api/ddns/sync?id=0',{method:'POST'}); toast(j.message||'已触发全量同步','good'); }catch(e){ toast(e.message,'err'); }
+  try{ const j=await api('/api/ddns/sync?id=0',{method:'POST'}); toast(j.message||'已触发全量同步','good'); await pollDDNSSync(0); }catch(e){ toast(e.message,'err'); }
+}
+// 触发同步后轮询刷新列表：后端在 goroutine 中异步执行真实 DNS 写入，状态会从 pending 变为 成功/失败。
+// 每 1.5s 刷新一次，直到目标记录不再处于 pending（最多约 30s），避免界面一直停在「待同步」。
+async function pollDDNSSync(id){
+  for(let k=0;k<20;k++){
+    await new Promise(r=>setTimeout(r,1500));
+    await loadDDNS();
+    if(id===0){
+      if((ddnsData.records||[]).length===0 || (ddnsData.records||[]).every(r=>r.lastStatus!=='pending')) break;
+    }else{
+      const rec=(ddnsData.records||[]).find(r=>r.id===id);
+      if(rec && rec.lastStatus!=='pending') break;
+    }
+  }
 }
 
 /* ---------- 反向代理 ---------- */
