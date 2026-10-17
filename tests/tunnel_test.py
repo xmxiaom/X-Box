@@ -140,6 +140,28 @@ class BH(BaseHTTPRequestHandler):
         elif self.path == '/t.js':
             self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
             self.wfile.write(b'if(top.location.href!=self.location.href){top.location="http://x/y";}document.domain="192.168.1.1";location.href="/a.html";')
+        elif self.path == '/p.js':
+            # 自定义对象上的同名属性（n.location.protocol / h[o][h.location.hostname]）
+            # 不是全局 location：旧正则从 location 处起匹配 → n."https:" 整包 SyntaxError
+            # （实测百度 all_async_search 第 3017 行、min_super 第 59 行）
+            self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
+            self.wfile.write(b'var s=("https:"===n.location.protocol?1:0);var t=h[o][h.location.hostname];var u=location.host;')
+        elif self.path == '/f.js':
+            # 帧跳出惯用法（光猫/路由器登录页必备）：右侧是 Location 对象，
+            # 包成导航等于把当前 URL 再导航一次——在 iframe 里就是自己刷自己，
+            # 页面永远白屏（实测 192.168.1.1 的 if(top!=self){top.location=self.location;}）
+            self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
+            self.wfile.write(b'if(top!=self){top.location = self.location;}var r=/["\']/g;var k=location.host;')
+        elif self.path == '/n.js':
+            # 赋值语句没有分号、且嵌在 void(...) 里（百度 all_async_search 实测）：
+            # 正则"吞到下一个分号"会把 ):void 0} 也包进 __xbp() → 语法错误
+            self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
+            self.wfile.write(b'var h=function(e,t){return e?void(f&&(g.p(e,t),location.href=build())):void 0};')
+        elif self.path == '/v.js':
+            # 裸 location = x 可能是局部变量赋值（jQuery 1.x：location=window.location），
+            # 绝不能当成导航改写
+            self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
+            self.wfile.write(b'var a=typeof undefined,location=window.location,doc=window.document;boot(location.href);')
         elif self.path == '/style.css':
             self.send_response(200); self.send_header('Content-Type', 'text/css'); self.end_headers()
             self.wfile.write(b'.x{background:url("http://' + H.encode() + b'/pic.png")}')
@@ -193,6 +215,27 @@ check("浏览器代理location赋值走代理", st == 200 and body.count('__xbp(
 st, body = get(B + "/u.js")
 check("浏览器代理字符串内不替换", st == 200 and '"if(location.host==1){}"' in body
       and body.endswith('var h="127.0.0.1:8899";var p="8899";'), body[:160])
+# 自定义对象上的同名属性不能改写（百度大包实测：n.location.protocol → n."https:"）
+st, body = get(B + "/p.js")
+check("浏览器代理自定义对象同名属性不改写", st == 200
+      and 'n.location.protocol' in body and 'h[o][h.location.hostname]' in body
+      and 'var u="127.0.0.1:8899";' in body, body[:240])
+# 帧跳出惯用法（top.location = self.location）必须中和为无操作（v1.2.54）
+st, body = get(B + "/f.js")
+check("浏览器代理帧跳出赋值中和", st == 200 and '{void 0;}' in body
+      and '__xbp(self.location)' not in body, body[:240])
+# 正则字面量里的引号不能干扰字符串掩码（否则后续字符串被当代码改写）
+check("浏览器代理正则字面量不干扰掩码", st == 200 and 'var r=/["\']/g;' in body
+      and 'var k="127.0.0.1:8899";' in body, body[:240])
+# 赋值无分号、嵌在外层表达式里：只能按括号配平截断，不能吞到下一个 ';'
+st, body = get(B + "/n.js")
+check("浏览器代理赋值表达式边界", st == 200
+      and 'self.location.href=(window.__xbp?__xbp(build()):(build())))' in body
+      and ':void 0};' in body, body[:240])
+# 裸 location = x（局部变量赋值）不能当导航改写（jQuery 1.x 实测：整包报废）
+st, body = get(B + "/v.js")
+check("浏览器代理变量同名赋值不改写", st == 200
+      and 'location=window.location' in body and 'boot(location.href)' in body, body[:220])
 st, body = get(B + "/style.css")
 check("浏览器代理CSS文件重写", st == 200 and '/b/http/' + H + '/pic.png' in body, body[:120])
 st, body = get(B + "/pic.png")

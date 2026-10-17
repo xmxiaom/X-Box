@@ -1678,7 +1678,11 @@ if(window.addEventListener) window.addEventListener('message', function(e){
   if(!from) return;                       // 只接受本面板代理页的消息
   const u = (d.url||'').trim();
   if(d.type === 'jserr'){                 // 代理页面的脚本错误上报（定位"登录按钮等不渲染"类问题）
-    const line = '页面脚本错误：' + (d.msg||'未知') + '（第' + (d.line||'?') + '行）';
+    // 附带出错文件（同源代理脚本才能拿到真实文件名；内联脚本的 s 是文档地址，不显示）
+    const src = String(d.src || '');
+    const file = (src && src !== String(d.url || '')) ? src.split('/').pop().split('?')[0] : '';
+    const where = file ? (' [' + file + ':' + (d.line||'?') + ']') : ('（第' + (d.line||'?') + '行）');
+    const line = '页面脚本错误：' + (d.msg||'未知') + where;
     if(browserJSErrs.length < 10 && browserJSErrs.indexOf(line) < 0){
       browserJSErrs.push(line);
       toast(line, 'err');
