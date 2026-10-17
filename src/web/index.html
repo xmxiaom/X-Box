@@ -405,6 +405,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="browser-bar">
           <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
           <button class="btn btn-primary btn-sm" onclick="goBrowser()">前往</button>
+          <button class="btn btn-outline btn-sm" id="btn-browser-back" onclick="browserBack()" disabled title="后退">←</button>
+          <button class="btn btn-outline btn-sm" id="btn-browser-fwd" onclick="browserForward()" disabled title="前进">→</button>
           <button class="btn btn-outline btn-sm" onclick="browserNewTab('')">＋ 新标签页</button>
           <button class="btn btn-outline btn-sm" id="btn-browser-log" onclick="browserToggleLog()">诊断</button>
         </div>
@@ -1459,7 +1461,7 @@ function browserNewTab(url){
   // 不用 no-referrer：Referer 由服务端还原成目标 URL 后转发，防盗链的图片/地图瓦片才能加载
   f.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
   document.getElementById('browser-frames').appendChild(f);
-  const t = {id: ++browserSeq, frame: f, url: url||'', raw: browserFromProxy(url)||'', title: '新标签页'};
+  const t = {id: ++browserSeq, frame: f, url: url||'', raw: browserFromProxy(url)||'', title: '新标签页', hist: url ? [url] : [], hi: url ? 0 : -1};
   browserTabs.push(t);
   f.addEventListener('load', function(){ browserOnFrameLoad(t); });
   browserSetActive(browserTabs.length-1);
@@ -1475,6 +1477,7 @@ function browserSetActive(i){
   document.getElementById('browser-url').value = t.raw;
   browserSetSub(t.raw ? '经本机代理：'+t.raw : '');
   browserRenderTabs();
+  browserUpdateNav();
 }
 function browserCloseTab(i){
   const t = browserTabs[i];
@@ -1494,6 +1497,42 @@ function browserRenderTabs(){
   box.innerHTML = h;
 }
 function browserSetSub(s){ document.getElementById('browser-sub').textContent = s || '经本机代理加载（Ctrl+滚轮缩放；链接在新标签打开，不跳外部浏览器）'; }
+/* 前进/后退：每个标签一条 URL 历史（页面内点链接也会入栈） */
+function browserPushHist(t, src){
+  if(!t || !src) return;
+  t.hist = t.hist || [];
+  if(t.hi >= 0 && t.hist[t.hi] === src) return;      // 与当前项相同不入栈
+  t.hist = t.hist.slice(0, (t.hi || 0) + 1);          // 跳转会截断"前进"分支
+  t.hist.push(src);
+  t.hi = t.hist.length - 1;
+}
+function browserNavHist(){
+  const t = browserTabs[browserActive];
+  if(!t || !t.hist || t.hi < 0) return;
+  const src = t.hist[t.hi];
+  if(!src || src === t.url) return;
+  t.url = src; t.raw = browserFromProxy(src);
+  t.frame.src = src;
+  document.getElementById('browser-url').value = t.raw;
+  browserSetSub('经本机代理：'+t.raw);
+}
+function browserBack(){
+  const t = browserTabs[browserActive];
+  if(!t || !t.hist || t.hi <= 0) return;
+  t.hi--; browserNavHist(); browserUpdateNav();
+}
+function browserForward(){
+  const t = browserTabs[browserActive];
+  if(!t || !t.hist || t.hi >= t.hist.length - 1) return;
+  t.hi++; browserNavHist(); browserUpdateNav();
+}
+function browserUpdateNav(){
+  const t = browserTabs[browserActive];
+  const b = document.getElementById('btn-browser-back'), f = document.getElementById('btn-browser-fwd');
+  if(!b || !f) return;
+  b.disabled = !t || !t.hist || t.hi <= 0;
+  f.disabled = !t || !t.hist || t.hi >= t.hist.length - 1;
+}
 // 原始 URL → 代理路径 /b/{scheme}/{host}{path}（fragment 不发给服务端）
 function browserToProxy(u){
   u = (u||'').trim();
@@ -1518,10 +1557,12 @@ function browserOpenURL(u, newTab){
   if(!t) t = browserNewTab(src);
   if(!t) return;
   t.url = src; t.raw = raw; t.title = (raw.match(/^https?:\/\/([^\/:]+)/)||['',''])[1].slice(0,20) || t.title;
+  browserPushHist(t, src);   // 入栈：地址栏跳转/新标签打开都算一次导航
   t.frame.src = src;
   document.getElementById('browser-url').value = raw;
   browserSetSub('经本机代理：'+raw);
   browserRenderTabs();
+  browserUpdateNav();
 }
 // 诊断面板：显示最近 60 条代理请求（时间/目标/状态/字节/错误），
 // 用于区分「代理没收到请求」「NAS 连不上目标」「页面内容本身问题」三类故障
@@ -1651,23 +1692,28 @@ if(window.addEventListener) window.addEventListener('message', function(e){
 function browserOnFrameLoad(t){
   // 逃逸检测：页面 JS 把 iframe 导航到绝对 URL（跳出代理直连目标）。此时
   // contentWindow 跨域，读 location 抛 SecurityError；直连失败则是浏览器错误页。
-  // 两种情况都把 iframe 拉回代理路径（限 2 次，防"页面加载即跳转"死循环）。
-  let escaped = false;
-  try{
-    const href = t.frame.contentWindow.location.href || '';
-    escaped = href.indexOf('/b/') < 0 && href.indexOf('about:') !== 0;
-  }catch(e){ escaped = true; }
+  // 两种情况都把 iframe 拉回代理路径。
+  // 防循环三条（v1.2.51）：①about:blank 属"重载中间态"，既不拉回也**不能清零计数**
+  //   ——v1.2.50 就是在中间态把计数清零，导致"加载→跳转→拉回"无限循环；
+  //   ②5 秒窗口内最多拉回 2 次；③超限时只提示一次，不再重载。
+  let href = '';
+  try{ href = t.frame.contentWindow.location.href || ''; }catch(e){ href = ''; }
+  const blank = href.indexOf('about:') === 0;
+  if(blank) return;                                   // 中间态：什么也不做
+  const escaped = href === '' || href.indexOf('/b/') < 0;
   if(escaped){
+    const now = Date.now();
+    if(now - (t.escT0 || 0) > 5000){ t.escT0 = now; t.esc = 0; }
     t.esc = (t.esc || 0) + 1;
     if(t.esc <= 2 && t.url){
       toast('该页面试图跳出代理直连目标，已拦截并重载（'+t.esc+'/2）','err');
       t.frame.src = t.url;
-    }else{
-      toast('该页面反复跳出代理，建议改用支持代理的访问方式或反馈日志','err');
+    }else if(t.esc === 3){
+      toast('该页面反复跳出代理，已停止自动重载（页面停留在代理内的版本）','err');
     }
     return;
   }
-  t.esc = 0;
+  t.esc = 0; t.escT0 = 0;
   let doc; try{ doc = t.frame.contentDocument; }catch(e){ return; }
   if(!doc) return;
   // 同步地址栏：页面内导航（点链接/重定向）后显示真实地址
@@ -1675,7 +1721,7 @@ function browserOnFrameLoad(t){
     const loc = t.frame.contentWindow.location;
     const cur = (loc.pathname||'') + (loc.search||'');
     const raw = browserFromProxy(cur);
-    if(raw){ t.url = cur; t.raw = raw; document.getElementById('browser-url').value = raw; browserSetSub('经本机代理：'+raw); }
+    if(raw){ t.url = cur; t.raw = raw; document.getElementById('browser-url').value = raw; browserSetSub('经本机代理：'+raw); browserPushHist(t, cur); browserUpdateNav(); }
   }catch(e){}
   try{ const ti = (doc.title||'').trim(); if(ti) t.title = ti.slice(0, 20); }catch(e){}
   browserRenderTabs();

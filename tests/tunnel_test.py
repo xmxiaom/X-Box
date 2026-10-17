@@ -131,9 +131,12 @@ class BH(BaseHTTPRequestHandler):
             self.end_headers(); self.wfile.write(PAGE)
         elif self.path == '/s.js':
             self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers(); self.wfile.write(JS)
+        elif self.path == '/u.js':
+            self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
+            self.wfile.write(b'var code="if(location.host==1){}";var h=location.host;var p=location.port;')
         elif self.path == '/t.js':
             self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
-            self.wfile.write(b'if(top.location.href!=self.location.href){top.location="http://x/y";}document.domain="192.168.1.1";')
+            self.wfile.write(b'if(top.location.href!=self.location.href){top.location="http://x/y";}document.domain="192.168.1.1";location.href="/a.html";')
         elif self.path == '/style.css':
             self.send_response(200); self.send_header('Content-Type', 'text/css'); self.end_headers()
             self.wfile.write(b'.x{background:url("http://' + H.encode() + b'/pic.png")}')
@@ -174,8 +177,17 @@ check("浏览器代理JS文件location替换", st == 200 and body == 'var a="127
 # 老光猫页面两类必崩写法的中和（v1.2.50）：
 # document.domain 赋值在现代 Chrome 抛错中断整个 script；top.location 跨源读抛 SecurityError
 st, body = get(B + "/t.js")
-check("浏览器代理top.location中和", st == 200 and 'top.location' not in body and body.count('self.location') == 3, body[:160])
-check("浏览器代理document.domain中和", st == 200 and 'document.domain=' not in body and '192.168.1.1' not in body.split('xb*/')[0], body[:160])
+check("浏览器代理top.location中和", st == 200 and 'top.location' not in body, body[:160])
+check("浏览器代理document.domain中和", st == 200 and 'document.domain=' not in body, body[:160])
+# location 赋值必须经 __xbp 走代理（v1.2.50 未包装导致跳转直连 → 逃逸 → 无限重载循环）
+check("浏览器代理location赋值走代理", st == 200 and body.count('__xbp(') == 2
+      and 'self.location.href=(window.__xbp?__xbp("http://x/y"):("http://x/y"));' in body
+      and 'self.location.href=(window.__xbp?__xbp("/a.html"):("/a.html"));' in body, body[:220])
+# 字符串/注释里的 location.* 绝不能替换（否则 SyntaxError，实测 music.taihe.com、
+# image.baidu.com 整页脚本报废："Uncaught SyntaxError: Unexpected string"）
+st, body = get(B + "/u.js")
+check("浏览器代理字符串内不替换", st == 200 and '"if(location.host==1){}"' in body
+      and body.endswith('var h="127.0.0.1:8899";var p="8899";'), body[:160])
 st, body = get(B + "/style.css")
 check("浏览器代理CSS文件重写", st == 200 and '/b/http/' + H + '/pic.png' in body, body[:120])
 st, body = get(B + "/pic.png")
