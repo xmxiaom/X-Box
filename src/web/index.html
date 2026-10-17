@@ -280,9 +280,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
         DDNS服务
       </div>
-      <div class="menu-item" data-page="proxy">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v4M16 3v4M4 7h16M4 7v13a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7"/><path d="M12 11v6M9 14h6"/></svg>
-        反向代理
+      <div class="menu-item" data-page="browser">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>
+        浏览器
+      </div>
+      <div class="menu-item" data-page="terminal">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+        终端
       </div>
       <div class="menu-item" data-page="diskfix">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 12l7-4"/><circle cx="12" cy="12" r="2.5"/><path d="M4.5 19l2-2M19.5 19l-2-2"/></svg>
@@ -395,11 +399,27 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         </div>
       </div>
 
-      <!-- 反向代理 -->
-      <div class="page" id="page-proxy">
-        <div class="page-head"><h2>反向代理</h2><span class="sub" id="proxy-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadProxy()">刷新</button></div>
-        <div class="rows" id="proxy-rows">
-          <div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button></div>
+      <!-- 浏览器 -->
+      <div class="page" id="page-browser">
+        <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub">内嵌 iframe 直连（部分站点禁止内嵌；fnOS 远程客户端内可能受限，建议局域网直连或新窗口打开）</span><div class="spacer"></div></div>
+        <div class="browser-bar">
+          <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
+          <button class="btn btn-primary btn-sm" onclick="goBrowser()">前往</button>
+          <button class="btn btn-outline btn-sm" onclick="browserOpenNew()">新窗口打开</button>
+        </div>
+        <div class="browser-frame-wrap">
+          <iframe id="browser-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals" referrerpolicy="no-referrer"></iframe>
+        </div>
+      </div>
+
+      <!-- 终端 -->
+      <div class="page" id="page-terminal">
+        <div class="page-head"><h2>终端</h2><span class="sub" id="term-sub">命令执行控制台（保持 cd 会话目录；以 root 运行）</span><div class="spacer"></div><button class="btn btn-outline btn-sm" onclick="termClear()">清屏</button></div>
+        <div class="term-warn">⚠️ 此终端以 <b>root</b> 身份在 NAS 上执行任意命令，仅经飞牛账号可访问。请谨慎操作。</div>
+        <div class="term-out" id="term-out"></div>
+        <div class="term-input-row">
+          <span class="term-prompt" id="term-prompt">root@xbox:~$</span>
+          <input type="text" id="term-input" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter') termExec()">
         </div>
       </div>
 
@@ -592,7 +612,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, proxy:loadProxy, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, browser:()=>{}, terminal:loadTerminal, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -1390,61 +1410,57 @@ async function pollDDNSSync(id){
   }
 }
 
-/* ---------- 反向代理 ---------- */
-let proxyCache = [];
-async function loadProxy(){
+/* ---------- 浏览器（内嵌 iframe 直连） ---------- */
+function goBrowser(){
+  let u = (document.getElementById('browser-url').value||'').trim();
+  if(!u) return;
+  if(!/^https?:\/\//i.test(u)) u = 'http://'+u;
+  document.getElementById('browser-frame').src = u;
+  document.getElementById('browser-sub').textContent = u;
+}
+function browserOpenNew(){
+  const u = document.getElementById('browser-frame').src;
+  if(u) window.open(u, '_blank');
+}
+
+/* ---------- 终端（命令执行控制台） ---------- */
+let termCwd = '';
+async function loadTerminal(){
   try{
-    const j = await api('/api/proxy');
-    proxyCache = j.sites||[];
-    document.getElementById('proxy-sub').textContent = `共 ${proxyCache.length} 个站点`;
-    const c = document.getElementById('proxy-rows');
-    c.innerHTML = '<div class="proxy-hint">站点统一经 <b>:8899</b> 端口访问：<span class="mono">http://&lt;域名&gt;:8899/</span>（NAS 的 80/443 由 fnOS 自身占用，无法给站点使用；域名需先能解析到 NAS）</div>' +
-      '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button></div>' +
-      proxyCache.map(s=>{
-        const hosts=(s.hosts||[]).join(', ');
-        return `<div class="row">
-          <div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v4M16 3v4M4 7h16M4 7v13a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7"/></svg></div>
-          <div class="info">
-            <div class="name">${esc(hosts)} ${s.enabled?'<span class="badge badge-green"><span class="dot"></span>启用</span>':'<span class="badge badge-gray"><span class="dot"></span>停用</span>'}
-              ${s.autoDDNS?'<span class="badge badge-blue"><span class="dot"></span>联动 DDNS</span>':''}</div>
-            <div class="desc mono" style="font-size:11.5px">→ ${esc(s.backend)}${s.pathPrefix?' · 前缀 '+esc(s.pathPrefix):''}${s.stripPrefix?' · 去前缀':''}</div>
-          </div>
-          <div class="actions">
-            <button class="btn btn-text btn-sm" onclick="openProxyForm(${s.id})">编辑</button>
-            <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="delProxy(${s.id})">删除</button>
-          </div>
-        </div>`;
-      }).join('');
-  }catch(e){ toast(e.message,'err'); }
+    const j = await api('/api/terminal/info');
+    termCwd = j.cwd || '/';
+    updateTermPrompt();
+    const o = document.getElementById('term-out');
+    o.textContent = '已连接终端 · 当前目录 '+termCwd+'\n';
+    o.scrollTop = o.scrollHeight;
+  }catch(e){ toast(e.message, 'err'); }
 }
-function openProxyForm(id){
-  const s = id? (proxyCache.find(x=>x.id===id)) : null;
-  const body = `
-    <div class="form-row"><label>域名（多个用逗号分隔，支持 *.example.com 通配）</label><input type="text" id="px-hosts" value="${esc(s?(s.hosts||[]).join(', '):'')}" placeholder="nas.example.com, app.example.com"><div style="font-size:12px;color:var(--text3);margin-top:4px">保存后经 <span class="mono">http://&lt;域名&gt;:8899/</span> 访问（80/443 被 fnOS 占用）</div></div>
-    <div class="form-row"><label>后端地址</label><input type="text" id="px-backend" value="${esc(s?s.backend:'')}" placeholder="http://192.168.1.20:8080"></div>
-    <div class="form-row"><label>路径前缀<span id="px-prefix-hint" style="color:var(--muted);font-weight:normal">（留空=整站）</span></label><input type="text" id="px-prefix" value="${esc(s?s.pathPrefix:'')}" placeholder="选填，如 /app" oninput="document.getElementById('px-prefix-hint').textContent=this.value.trim()?('（前缀 '+this.value.trim()+'）'):'（留空=整站）'"></div>
-    <label class="field-check"><input type="checkbox" id="px-strip" ${s&&s.stripPrefix?'checked':''}> 转发时去除路径前缀</label>
-    <label class="field-check"><input type="checkbox" id="px-enabled" ${(!s||s.enabled)?'checked':''}> 启用此站点</label>
-    <label class="field-check"><input type="checkbox" id="px-autoddns" ${s&&s.autoDDNS?'checked':''}> 联动 DDNS：自动为域名创建解析记录</label>
-    <div class="form-row"><label>备注</label><input type="text" id="px-desc" value="${esc(s?s.description:'')}"></div>`;
-  confirmDialog(id?'编辑站点':'添加站点', body, async ()=>{
-    const hosts = document.getElementById('px-hosts').value.split(/[,\s]+/).map(x=>x.trim()).filter(Boolean);
-    const backend = document.getElementById('px-backend').value.trim();
-    if(!hosts.length || !backend){ toast('域名与后端地址不能为空','err'); return; }
-    const payload = {id:id||0, hosts, backend,
-      pathPrefix:document.getElementById('px-prefix').value.trim(),
-      stripPrefix:document.getElementById('px-strip').checked,
-      enabled:document.getElementById('px-enabled').checked,
-      autoDDNS:document.getElementById('px-autoddns').checked,
-      description:document.getElementById('px-desc').value.trim()};
-    try{ const j=await api('/api/proxy/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存站点 '+(j.message||''),'good'); loadProxy(); }catch(e){ toast(e.message,'err'); }
-  }, id?'保存':'添加');
+function updateTermPrompt(){
+  const base = termCwd === '/root' ? '~' : termCwd;
+  document.getElementById('term-prompt').textContent = 'root@xbox:'+base+'$';
 }
-async function delProxy(id){
-  confirmDialog('删除站点','确认删除该反向代理站点？若开启了联动 DDNS，其自动创建的记录也会一并清理。', async ()=>{
-    try{ const j=await api('/api/proxy/del?id='+id,{method:'POST'}); toast('已删除'+(j.removedDDNS?`（清理 ${j.removedDDNS} 条联动记录）`:''),'good'); loadProxy(); }catch(e){ toast(e.message,'err'); }
-  });
+function termAppend(s){
+  const o = document.getElementById('term-out');
+  o.textContent += s;
+  o.scrollTop = o.scrollHeight;
 }
+async function termExec(){
+  const inp = document.getElementById('term-input');
+  const cmd = inp.value;
+  if(cmd.trim() === ''){ termAppend('\n'); return; }
+  termAppend(document.getElementById('term-prompt').textContent+' '+cmd+'\n');
+  inp.value = '';
+  try{
+    const j = await api('/api/terminal/exec', {method:'POST', body:JSON.stringify({cmd})});
+    termCwd = j.cwd || termCwd;
+    updateTermPrompt();
+    let out = j.output || '';
+    if(out && !out.endsWith('\n')) out += '\n';
+    termAppend(out);
+    if(j.exitCode !== 0) termAppend('[退出码 '+j.exitCode+']\n');
+  }catch(e){ termAppend('[错误] '+(e.message||e)+'\n'); }
+}
+function termClear(){ document.getElementById('term-out').textContent = ''; }
 
 /* ---------- 启动（无登录态：探测通道后直接进入面板） ---------- */
 let appEntered = false, appRefreshTimer = null;
@@ -1459,7 +1475,18 @@ async function enterApp(){
 detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe），随后直接进入面板
 </script>
 <style>
-.proxy-hint{font-size:12.5px;color:var(--text2);background:var(--primary-light);border-radius:6px;padding:8px 12px;margin-bottom:10px;line-height:1.6}
+.browser-bar{display:flex;gap:8px;margin-bottom:12px;flex-shrink:0}
+.browser-bar input{flex:1}
+.browser-frame-wrap{flex:1;min-height:0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;background:#fff}
+#browser-frame{width:100%;height:100%;border:none;display:block}
+.term-warn{background:var(--warning-light);color:var(--warning);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px;flex-shrink:0}
+.term-warn b{color:var(--danger)}
+.term-out{flex:1;min-height:0;overflow-y:auto;background:#0E1116;color:#E6E6E6;border-radius:var(--radius);padding:12px 14px;font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-all}
+.term-input-row{display:flex;align-items:center;gap:8px;margin-top:10px;flex-shrink:0}
+.term-prompt{font-family:Consolas,monospace;font-size:13px;color:#3DDC84;white-space:nowrap}
+.term-input-row input{flex:1;background:#0E1116;color:#E6E6E6;border-color:#2A2F36}
+.term-input-row input:focus{box-shadow:0 0 0 2px rgba(61,220,132,.25)}
+#page-browser.active,#page-terminal.active{display:flex;flex-direction:column;height:100%}
 </style>
 
 

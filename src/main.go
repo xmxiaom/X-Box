@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.41"
+	version = "1.2.42"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -63,9 +63,9 @@ func main() {
 
 	srv := &Server{dataDir: dataDir, candidate: map[string]map[string]int64{}}
 
-	// 初始化 DDNS、反向代理子系统（注册联动、后台同步）
+	// 初始化 DDNS、终端子系统
 	initDDNS(dataDir)
-	initProxy(dataDir)
+	initTerminal()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/overview", srv.handleOverview)
@@ -85,16 +85,15 @@ func main() {
 	mux.HandleFunc("POST /api/ddns/record/save", srv.handleDDNSRecordSave)
 	mux.HandleFunc("POST /api/ddns/record/del", srv.handleDDNSRecordDel)
 	mux.HandleFunc("POST /api/ddns/sync", srv.handleDDNSSync)
-	mux.HandleFunc("GET /api/proxy", srv.handleProxyList)
-	mux.HandleFunc("POST /api/proxy/save", srv.handleProxySave)
-	mux.HandleFunc("POST /api/proxy/del", srv.handleProxyDel)
+	mux.HandleFunc("GET /api/terminal/info", srv.handleTerminalInfo)
+	mux.HandleFunc("POST /api/terminal/exec", srv.handleTerminalExec)
 	mux.HandleFunc("GET /api/nvme-sleep", handleNVMeSleepList)
 	mux.HandleFunc("POST /api/nvme-sleep", handleNVMeSleepSet)
 	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
 	mux.HandleFunc("POST /api/update/download", handleUpdateDownload)
 	mux.HandleFunc("GET /api/update/dirs", handleUpdateDirs)
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
-	mux.HandleFunc("GET /", srv.handleRoot)
+	mux.HandleFunc("GET /", srv.handleIndex)
 
 	handler := formBridge(tunnelBridge(mux))
 	addrs := listenAddrs()

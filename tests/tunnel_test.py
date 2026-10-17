@@ -33,9 +33,10 @@ st, body = get(tunnel({"m": "GET", "p": "/api/overview"}))
 j = json.loads(body) if body else {}
 check("隧道GET(无凭据)", st == 200 and j.get("ok") and j.get("version"), body)
 
-# 2) 隧道 POST 业务接口（空载荷触发应用错误，验证传输与分发）
-st, body = get(tunnel({"m": "POST", "p": "/api/proxy/save", "b": json.dumps({})}))
-check("隧道POST业务", st in (200, 400) and ("ok" in body or "error" in body), body)
+# 2) 隧道 POST 业务接口（终端 exec 经隧道分发）
+st, body = get(tunnel({"m": "POST", "p": "/api/terminal/exec", "b": json.dumps({"cmd": "echo tunnel-ok"})})) 
+j = json.loads(body) if body else {}
+check("隧道POST终端exec", st == 200 and j.get("ok") and "tunnel-ok" in (j.get("output") or ""), body[:80])
 
 # 3) 隧道 POST 带真实载荷（DDNS provider save，合法结构）
 st, body = get(tunnel({"m": "POST", "p": "/api/ddns/provider/save", "b": json.dumps({"name": "测试", "type": "aliyun", "cred": {}})}))
@@ -74,25 +75,16 @@ no_wild = not any(("0.0.0.0:8899" in l or "[::]:8899" in l or "*:8899" in l) for
 check("监听含回环", has_loop, " | ".join(lines))
 check("无通配绑定(0.0.0.0/::)", no_wild, " | ".join(lines))
 
-# 10) 反代 Host 精确匹配回归（v1.2.40 修复 hostMatches 精确匹配 continue bug）
-st, body = get(tunnel({"m": "POST", "p": "/api/proxy/save", "b": json.dumps({"hosts": ["proxy-test.local"], "backend": "http://127.0.0.1:1/", "enabled": True})}))
-check("保存反代站点", st == 200 and json.loads(body).get("ok"), body)
-site_id = json.loads(body).get("id", 0)
-def get_host(host):
-    req = urllib.request.Request("http://127.0.0.1:8899/", headers={"Host": host})
-    try:
-        with urllib.request.urlopen(req, timeout=5) as r:
-            return r.status, r.read().decode()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
-st, body = get_host("proxy-test.local:8899")   # 带端口（浏览器实际行为）
-check("反代精确匹配(带端口)", st == 502 and "不可达" in body, "status=%s %s" % (st, body[:60]))
-st, body = get_host("proxy-test.local")        # 不带端口
-check("反代精确匹配(不带端口)", st == 502 and "不可达" in body, "status=%s %s" % (st, body[:60]))
-st, body = get_host("nomatch.local")           # 不匹配 → 回落面板 HTML
-check("反代不匹配回落面板", st == 200 and "<html" in body, "status=%s" % st)
-st, body = get(tunnel({"m": "POST", "p": "/api/proxy/del?id=%d" % site_id}))
-check("清理反代站点", st == 200 and json.loads(body).get("ok"), body)
+# 10) 终端：cd 维持会话目录 + pwd 回填 + 退出码
+st, body = get(tunnel({"m": "POST", "p": "/api/terminal/exec", "b": json.dumps({"cmd": "cd /tmp"})}))
+j = json.loads(body) if body else {}
+check("终端cd更新目录", st == 200 and j.get("ok") and j.get("cwd") == "/tmp", body[:80])
+st, body = get(tunnel({"m": "POST", "p": "/api/terminal/exec", "b": json.dumps({"cmd": "pwd"})}))
+j = json.loads(body) if body else {}
+check("终端pwd返回cwd", st == 200 and j.get("ok") and "/tmp" in (j.get("output") or ""), body[:80])
+st, body = get(tunnel({"m": "POST", "p": "/api/terminal/exec", "b": json.dumps({"cmd": "false"})}))
+j = json.loads(body) if body else {}
+check("终端非零退出码", st == 200 and j.get("ok") and j.get("exitCode") == 1, body[:80])
 
 def get_long(url, timeout=180):
     try:

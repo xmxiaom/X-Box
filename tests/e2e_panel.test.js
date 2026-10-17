@@ -45,7 +45,8 @@ function makeDom(opts) {
     if (u.includes('/api/processes')) return jsonRes({ ok: true, processes: [] });
     if (u.includes('/api/services')) return jsonRes({ ok: true, services: [], apps: [], docker: [] });
     if (u.includes('/api/update/check')) return jsonRes({ ok: true, update: {} });
-    if (u === '/api/proxy') return jsonRes({ ok: true, sites: [{ id: 7, hosts: ['a.com'], backend: 'http://10.0.0.2:8080', enabled: true, pathPrefix: '', stripPrefix: false, autoDDNS: false }] });
+    if (u === '/api/terminal/info') return jsonRes({ ok: true, cwd: '/root' });
+    if (u === '/api/terminal/exec') return jsonRes({ ok: true, output: '', exitCode: 0, cwd: '/root' });
     if (u === '/api/ddns') return jsonRes({ ok: true, intervalSec: 300, providers: [{ id: 1, name: '测试服务商', type: 'aliyun', cred: {} }], providersAvail: [{ type: 'aliyun', name: '阿里云' }], ifaces: [], records: [{ id: 3, enabled: !opts.ddnsRecDisabled, domain: 'x.com', providerId: 1, recordType: 'A', ipSource: 'auto', ttl: 600, lastStatus: 'pending' }] });
     return jsonRes({ ok: true });
   };
@@ -124,9 +125,8 @@ function makeDom(opts) {
   {
     const { doc, win } = makeDom();
     await sleep(150);
-    await win.loadProxy(); // 经 fetch 桩自然填充 proxyCache（let 声明不挂 window，不能直接注入）
-    win.openProxyForm(7);
-    check(doc.getElementById('px-enabled').checked === true, 'C: 反代启用框回显异常（已启用却不显示选中）');
+    await win.loadTerminal(); // 经 fetch 桩填充 termCwd + 渲染提示符（验证终端面板已就位）
+    check(doc.getElementById('term-prompt').textContent.indexOf('root@xbox') === 0, 'C: 终端提示符未渲染: ' + doc.getElementById('term-prompt').textContent);
     await win.loadDDNS(); // 自然填充 ddnsData
     win.openRecordForm(3);
     check(doc.getElementById('rf-enabled').checked === true, 'C: DDNS 已启用记录回显异常');

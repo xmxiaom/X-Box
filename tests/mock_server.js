@@ -116,13 +116,6 @@ const MOCK = {
       { id: 1, enabled: true, providerId: 1, domain: 'nas.example.com', recordType: 'A', ipSource: 'web', ipSourceArg: '', ttl: 600, autoCreated: false, lastIP: '113.66.23.108', lastStatus: 'success', lastMessage: 'OK', lastCheckAt: '2026-10-16T13:20:00Z', lastSyncAt: '2026-10-16T13:25:00Z' },
     ],
   },
-  '/api/proxy': {
-    ok: true,
-    sites: [
-      { id: 1, hosts: ['nas.example.com', '*.example.com'], backend: 'http://192.168.31.166:8080', pathPrefix: '/jellyfin', stripPrefix: true, enabled: true, autoDDNS: true, description: '影视服务' },
-      { id: 2, hosts: ['files.example.com'], backend: 'http://192.168.31.166:9000', pathPrefix: '', stripPrefix: false, enabled: false, autoDDNS: false, description: '文件管理' },
-    ],
-  },
   '/api/nvme-sleep': {
     ok: true,
     disks: [
