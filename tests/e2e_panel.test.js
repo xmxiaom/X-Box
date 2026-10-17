@@ -165,6 +165,10 @@ function makeDom(opts) {
     win.browserCloseTab(0);
     win.browserCloseTab(0);
     check(doc.querySelectorAll('.browser-tab').length === 1 && doc.querySelectorAll('.browser-frame-item').length === 1, 'C: 关闭标签失败');
+    // 长标题下关闭按钮仍须渲染可点（标题独立为可收缩 flex 子项）
+    check(doc.querySelectorAll('.browser-tab .bx').length === 1 && doc.querySelectorAll('.browser-tab .bt').length === 1,
+      'C: 标签标题/关闭按钮结构异常');
+    check(!!doc.getElementById('browser-log'), 'C: 诊断面板缺失');
   }
   {
     // 停用回显：桩返回 enabled=false 的记录

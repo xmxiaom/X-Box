@@ -406,9 +406,11 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
           <button class="btn btn-primary btn-sm" onclick="goBrowser()">前往</button>
           <button class="btn btn-outline btn-sm" onclick="browserNewTab('')">＋ 新标签页</button>
+          <button class="btn btn-outline btn-sm" id="btn-browser-log" onclick="browserToggleLog()">诊断</button>
         </div>
         <div class="browser-tabs" id="browser-tabs"></div>
         <div class="browser-frame-wrap" id="browser-frames"></div>
+        <div class="browser-log" id="browser-log" style="display:none"></div>
       </div>
 
       <!-- 终端 -->
@@ -1484,7 +1486,8 @@ function browserRenderTabs(){
   const box = document.getElementById('browser-tabs');
   let h = '';
   browserTabs.forEach(function(t, k){
-    h += '<span class="browser-tab'+(k === browserActive ? ' on' : '')+'" onclick="browserSetActive('+k+')" title="'+esc(t.raw||'新标签页')+'">'+esc(t.title)+'<b class="bx" onclick="event.stopPropagation();browserCloseTab('+k+')">×</b></span>';
+    // 标题独立成 flex 子项并允许收缩：长标题只截断标题，关闭按钮永远不被挤出
+    h += '<span class="browser-tab'+(k === browserActive ? ' on' : '')+'" onclick="browserSetActive('+k+')" title="'+esc(t.raw||'新标签页')+'"><span class="bt">'+esc(t.title)+'</span><b class="bx" onclick="event.stopPropagation();browserCloseTab('+k+')">×</b></span>';
   });
   box.innerHTML = h;
 }
@@ -1517,6 +1520,44 @@ function browserOpenURL(u, newTab){
   document.getElementById('browser-url').value = raw;
   browserSetSub('经本机代理：'+raw);
   browserRenderTabs();
+}
+// 诊断面板：显示最近 60 条代理请求（时间/目标/状态/字节/错误），
+// 用于区分「代理没收到请求」「NAS 连不上目标」「页面内容本身问题」三类故障
+let browserLogOn = false, browserLogTimer = null;
+function browserToggleLog(){
+  const el = document.getElementById('browser-log');
+  browserLogOn = !browserLogOn;
+  el.style.display = browserLogOn ? 'block' : 'none';
+  if(browserLogOn){
+    browserLoadLog();
+    if(!browserLogTimer) browserLogTimer = setInterval(browserLoadLog, 3000);
+  }else if(browserLogTimer){ clearInterval(browserLogTimer); browserLogTimer = null; }
+}
+function browserLogSize(n){
+  n = n || 0;
+  if(n < 1024) return n + ' B';
+  if(n < 1048576) return (n/1024).toFixed(1) + ' KB';
+  return (n/1048576).toFixed(1) + ' MB';
+}
+async function browserLoadLog(){
+  const el = document.getElementById('browser-log');
+  if(!el) return;
+  const pg = document.getElementById('page-browser');
+  if(pg && pg.className.indexOf('active') < 0) return; // 离开浏览器页不再轮询
+  try{
+    const j = await api('/api/browser/log');
+    const items = j.items || [];
+    if(!items.length){ el.innerHTML = '<div class="browser-log-empty">暂无代理请求记录（先在地址栏打开一个页面）</div>'; return; }
+    let h = '<table class="browser-log-tb"><tr><th>时间</th><th>方法</th><th>目标</th><th>状态</th><th>大小</th><th>说明</th></tr>';
+    for(let i = items.length - 1; i >= 0; i--){
+      const it = items[i];
+      const bad = it.status >= 400 || it.err;
+      h += '<tr'+(bad ? ' class="bad"' : '')+'><td>'+esc(it.time||'')+'</td><td>'+esc(it.method||'')+'</td>'+
+           '<td class="mono" title="'+esc(it.target||'')+'">'+esc(it.target||'')+'</td>'+
+           '<td>'+(it.status||'')+'</td><td>'+browserLogSize(it.bytes)+'</td><td>'+esc(it.err||'')+'</td></tr>';
+    }
+    el.innerHTML = h + '</table>';
+  }catch(e){ el.innerHTML = '<div class="browser-log-empty">读取失败：'+esc(e.message||e)+'</div>'; }
 }
 // 接收代理页面（同源）上报：新标签打开 / 新窗口请求
 if(window.addEventListener) window.addEventListener('message', function(e){
@@ -1648,13 +1689,22 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
 .browser-bar{display:flex;gap:8px;margin-bottom:10px;flex-shrink:0}
 .browser-bar input{flex:1}
 .browser-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;flex-shrink:0}
-.browser-tab{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;color:var(--text2);cursor:pointer;max-width:180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;background:var(--card)}
+.browser-tab{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;color:var(--text2);cursor:pointer;max-width:180px;background:var(--card)}
 .browser-tab.on{border-color:var(--primary);color:var(--primary);font-weight:600}
-.browser-tab .bx{cursor:pointer;color:var(--text3);font-weight:400;padding:0 2px}
+.browser-tab .bt{min-width:0;flex:1 1 auto;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.browser-tab .bx{flex:0 0 auto;cursor:pointer;color:var(--text3);font-weight:400;padding:0 2px}
 .browser-tab .bx:hover{color:var(--danger)}
-.browser-frame-wrap{flex:1;min-height:0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;background:#fff}
-.browser-frame-item{width:100%;height:100%;border:none;display:none;background:#fff}
+/* 框架容器可滚动：页面尺寸超出可视区时可横纵滚动查看（含缩放放大后的内容） */
+.browser-frame-wrap{flex:1;min-height:0;border:1px solid var(--border);border-radius:var(--radius);overflow:auto;background:#fff}
+.browser-frame-item{width:100%;height:100%;border:none;display:none;background:#fff;min-width:640px;min-height:480px}
 .browser-frame-item.on{display:block}
+.browser-log{flex:0 0 auto;max-height:170px;overflow:auto;margin-top:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);font-size:12px}
+.browser-log-tb{width:100%;border-collapse:collapse}
+.browser-log-tb th,.browser-log-tb td{padding:4px 8px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+.browser-log-tb th{color:var(--text3);font-weight:500}
+.browser-log-tb td.mono{max-width:300px;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,Consolas,monospace}
+.browser-log-tb tr.bad td{color:var(--danger)}
+.browser-log-empty{padding:10px;color:var(--text3)}
 .term-warn{background:var(--warning-light);color:var(--warning);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px;flex-shrink:0}
 .term-warn b{color:var(--danger)}
 .term-out{flex:1;min-height:0;overflow-y:auto;background:#0E1116;color:#E6E6E6;border-radius:var(--radius);padding:12px 14px;font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-all}

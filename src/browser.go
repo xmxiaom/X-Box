@@ -36,6 +36,7 @@ package main
 // 输入网址的通用浏览工具，内网设备（192.168.1.1 等）是合法目标。
 
 import (
+	"crypto/tls"
 	"html"
 	"io"
 	"net/http"
@@ -44,8 +45,54 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// 代理请求日志：环形缓冲保留最近若干条，供面板「诊断」查看（定位"页面打不开"
+// 到底是代理没收到请求、目标连不上，还是页面内容本身的问题）。
+type browserLogItem struct {
+	Time   string `json:"time"`
+	Method string `json:"method"`
+	Target string `json:"target"`
+	Status int    `json:"status"`
+	Bytes  int64  `json:"bytes"`
+	Err    string `json:"err,omitempty"`
+}
+
+var browserLog = struct {
+	mu    sync.Mutex
+	items []browserLogItem
+}{}
+
+func browserLogAdd(it browserLogItem) {
+	browserLog.mu.Lock()
+	browserLog.items = append(browserLog.items, it)
+	if len(browserLog.items) > 60 {
+		browserLog.items = browserLog.items[len(browserLog.items)-60:]
+	}
+	browserLog.mu.Unlock()
+}
+
+// handleBrowserLog GET /api/browser/log：最近 60 条代理请求记录。
+func handleBrowserLog(w http.ResponseWriter, r *http.Request) {
+	browserLog.mu.Lock()
+	items := append([]browserLogItem(nil), browserLog.items...)
+	browserLog.mu.Unlock()
+	ok(w, map[string]any{"items": items})
+}
+
+// countWriter 统计实际写给浏览器的字节数（用于日志）。
+type countWriter struct {
+	w http.ResponseWriter
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
 
 const (
 	browserMaxText   = 8 << 20  // 需文本重写（HTML/CSS/JS）的读取上限 8MB
@@ -84,6 +131,11 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 请求日志（诊断用）：无论成功失败都记录，供面板「诊断」面板查看
+	rec := &browserLogItem{Time: time.Now().Format("15:04:05"), Method: r.Method, Target: target, Status: 502}
+	cw := &countWriter{w: w}
+	defer func() { rec.Bytes = cw.n; browserLogAdd(*rec) }()
+
 	var body io.Reader
 	if r.Method == http.MethodPost && r.Body != nil {
 		body = r.Body // POST 表单体原样转发（登录等场景）
@@ -98,9 +150,16 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
+		// 内网设备（路由器/NAS/摄像头）普遍使用自签证书，证书校验必然失败；
+		// 本代理的定位就是访问这类设备，故跳过校验（与浏览器"继续访问"等价）。
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			Proxy:           nil,
+		},
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
+		rec.Err = "构造请求失败：" + err.Error()
 		browserFail(w, target, err)
 		return
 	}
@@ -114,8 +173,13 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	if ck := r.Header.Get("Cookie"); ck != "" {
 		req.Header.Set("Cookie", ck)
 	}
+	// Basic/Digest 认证透传（路由器管理页常见；浏览器弹框输入后由 iframe 请求带上）
+	if au := r.Header.Get("Authorization"); au != "" {
+		req.Header.Set("Authorization", au)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
+		rec.Err = browserErrText(err)
 		browserFail(w, target, err)
 		return
 	}
@@ -143,6 +207,13 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	for _, c := range jar.Cookies(tu) {
 		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePath)
 	}
+	// 认证挑战透传：让浏览器能弹出账号密码框（401 场景）
+	for _, h := range []string{"WWW-Authenticate", "Proxy-Authenticate"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	rec.Status = resp.StatusCode
 
 	ct := resp.Header.Get("Content-Type")
 	low := strings.ToLower(ct)
@@ -150,30 +221,33 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(low, "text/html") || strings.Contains(low, "application/xhtml"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
+			rec.Err = "读取响应失败：" + rerr.Error()
 			browserFail(w, target, rerr)
 			return
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct)) // 保留原 charset（GBK 等不乱码）
 		browserWriteStatus(w, resp.StatusCode)
-		_, _ = w.Write(browserRewriteHTML(string(data), tu))
+		_, _ = cw.Write(browserRewriteHTML(string(data), tu))
 	case strings.Contains(low, "text/css"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
+			rec.Err = "读取响应失败：" + rerr.Error()
 			browserFail(w, target, rerr)
 			return
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct))
 		browserWriteStatus(w, resp.StatusCode)
-		_, _ = w.Write([]byte(browserRewriteCSS(string(data), tu)))
+		_, _ = cw.Write([]byte(browserRewriteCSS(string(data), tu)))
 	case strings.Contains(low, "javascript") || strings.Contains(low, "ecmascript"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
+			rec.Err = "读取响应失败：" + rerr.Error()
 			browserFail(w, target, rerr)
 			return
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct))
 		browserWriteStatus(w, resp.StatusCode)
-		_, _ = w.Write([]byte(browserRewriteJS(string(data), tu)))
+		_, _ = cw.Write([]byte(browserRewriteJS(string(data), tu)))
 	default:
 		// 其余类型：流式透传（图片/字体/媒体/二进制）
 		if ct != "" {
@@ -184,7 +258,7 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		browserWriteStatus(w, resp.StatusCode)
 		if resp.StatusCode != 204 && resp.StatusCode != 304 {
-			_, _ = io.Copy(w, io.LimitReader(resp.Body, browserMaxStream))
+			_, _ = io.Copy(cw, io.LimitReader(resp.Body, browserMaxStream))
 		}
 	}
 }
@@ -438,27 +512,34 @@ func browserPatchScript(tu *url.URL) string {
 	return s
 }
 
-// browserFail 代理失败：返回可读的中文 HTML 错误页（请求由 NAS 发出，
-// 失败意味着 NAS→目标不通，不是用户电脑的问题），并给出终端自检命令。
-func browserFail(w http.ResponseWriter, target string, err error) {
-	reason := err.Error()
+// browserErrText 把代理失败原因翻译成可读中文（日志与错误页共用）。
+func browserErrText(err error) string {
 	if ue, ok := err.(*url.Error); ok && ue.Err != nil {
 		e := strings.ToLower(ue.Err.Error())
 		switch {
 		case strings.Contains(e, "connection refused"):
-			reason = "目标拒绝连接（端口未开放，或服务未启动）"
+			return "目标拒绝连接（端口未开放，或服务未启动）"
 		case strings.Contains(e, "no such host"), strings.Contains(e, "lookup"):
-			reason = "域名解析失败（DNS 无法解析该主机名）"
+			return "域名解析失败（DNS 无法解析该主机名）"
 		case strings.Contains(e, "i/o timeout"), strings.Contains(e, "deadline exceeded"), strings.Contains(e, "timeout"):
-			reason = "连接超时（目标不可达，或被防火墙丢弃）"
+			return "连接超时（目标不可达，或被防火墙丢弃）"
 		case strings.Contains(e, "network is unreachable"), strings.Contains(e, "no route to host"):
-			reason = "网络不可达（路由不通）"
+			return "网络不可达（路由不通）"
 		case strings.Contains(e, "connection reset"):
-			reason = "连接被目标重置"
+			return "连接被目标重置"
+		case strings.Contains(e, "certificate"):
+			return "TLS 证书校验失败（已跳过校验仍失败，多为协议不匹配）"
 		default:
-			reason = ue.Err.Error()
+			return ue.Err.Error()
 		}
 	}
+	return err.Error()
+}
+
+// browserFail 代理失败：返回可读的中文 HTML 错误页（请求由 NAS 发出，
+// 失败意味着 NAS→目标不通，不是用户电脑的问题），并给出终端自检命令。
+func browserFail(w http.ResponseWriter, target string, err error) {
+	reason := browserErrText(err)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(502)
 	page := `<!doctype html><html><head><meta charset="utf-8"><title>无法访问该地址</title><style>` +
@@ -470,6 +551,7 @@ func browserFail(w http.ResponseWriter, target string, err error) {
 		`<h2>无法访问目标地址</h2>` +
 		`<div>目标：<code>` + html.EscapeString(target) + `</code></div>` +
 		`<div>原因：` + html.EscapeString(reason) + `</div>` +
+		`<div>时间：` + time.Now().Format("2006-01-02 15:04:05") + `（NAS 本地时间）</div>` +
 		`<div class="tip">说明：页面由 <b>NAS 上的 X-Box 代为访问</b>（你的设备并不直连目标），所以这里失败说明 <b>NAS 到目标不通</b>，与你电脑能否访问无关。</div>` +
 		`<ol><li>确认目标已开机、端口正确（路由器管理页若非 80 端口，请写成 <code>192.168.1.1:8080</code>）；</li>` +
 		`<li>确认目标未限制只允许特定 IP / MAC 访问；</li>` +

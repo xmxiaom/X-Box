@@ -192,6 +192,13 @@ check("浏览器代理Cookie透传", st == 200 and "COOKIE:sid=abc123" in body, 
 # 目标不可达：返回可读的中文 HTML 错误页（请求由 NAS 发出，失败即 NAS→目标不通）
 st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:9/")
 check("浏览器代理失败错误页", st == 502 and "无法访问目标地址" in body, body[:80])
+# 代理请求日志：面板「诊断」据此区分「代理没收到请求 / NAS 连不上目标 / 页面本身问题」
+st, body = get(tunnel({"m": "GET", "p": "/api/browser/log"}))
+j = json.loads(body) if body else {}
+items = j.get("items") or []
+check("浏览器代理日志端点", st == 200 and j.get("ok") and len(items) > 0
+      and any(i.get("target", "").startswith("http://127.0.0.1:8898") for i in items)
+      and any(i.get("status") == 200 for i in items), body[:120])
 
 # 14) 更新下载：异步任务 + 轮询状态（经 GitHub API 资产端点）
 try:
