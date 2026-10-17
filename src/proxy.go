@@ -4,6 +4,7 @@ package main
 // 简化端口管理：站点统一挂主服务端口（service_port=8899），由上游 NAT/路由把域名流量引到 8899。
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -146,7 +147,9 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(indexHTML)
+	// 注入版本标识到登录卡片：便于确认客户端实际加载的构建版本（iframe 缓存/未重启排障）
+	page := bytes.Replace(indexHTML, []byte("<!--XBOX_VER-->"), []byte("v"+version), 1)
+	_, _ = w.Write(page)
 }
 
 func (r *proxyRuntime) serve(site *ProxySite, w http.ResponseWriter, req *http.Request) {

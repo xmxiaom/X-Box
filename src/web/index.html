@@ -466,13 +466,15 @@ async function api(path, opts) {
   // cache:'no-store'：APP 内嵌 WebView 可能缓存 GET 响应，导致 /api/temps 等实时接口拿到旧值（手机端与网页端"不同步"）
   opts = opts || {};
   const init = {cache:'no-store', method: opts.method || 'GET', headers: {'Content-Type': 'application/json'}};
+  // Bearer 头部鉴权：穿透 PC/手机客户端 iframe 的第三方 Cookie 拦截（Cookie 方式作为兼容保留）
+  if(window.__xboxToken) init.headers['Authorization'] = 'Bearer ' + window.__xboxToken;
   if (opts.body) init.body = opts.body;
   if (opts.headers) { for (const k in opts.headers) init.headers[k] = opts.headers[k]; }
   const r = await fetch(path, init);
   // 非 2xx：先尝试解析后端 fail() 的具体错误信息（避免只显示"HTTP 500"这种无信息量的提示）
   if (!r.ok) {
     if (r.status === 401) {
-      try { const j = await r.json(); if (j && j.needLogin) { showLogin(true); } } catch(e){}
+      try { const j = await r.json(); if (j && j.needLogin) { clearAuthToken(); showLogin(true); } } catch(e){}
     }
     let msg = '请求失败（HTTP '+r.status+'）';
     try{ const j = await r.json(); if(j && j.error) msg = j.error; }catch(e){}
@@ -1360,6 +1362,17 @@ async function delProxy(id){
 /* ---------- 启动 ---------- */
 let currentUser = '';
 let appEntered = false, appRefreshTimer = null;
+// ---- Bearer Token 存取（iframe 第三方 Cookie 拦截时的鉴权通道；localStorage 不可用时退化为内存态）----
+window.__xboxToken = '';
+function loadAuthToken(){
+  try{ window.__xboxToken = window.localStorage.getItem('xbox_sid_token') || ''; }catch(e){}
+}
+function saveAuthToken(t){
+  window.__xboxToken = t || '';
+  try{ if(t) window.localStorage.setItem('xbox_sid_token', t); else window.localStorage.removeItem('xbox_sid_token'); }catch(e){}
+}
+function clearAuthToken(){ saveAuthToken(''); }
+loadAuthToken();
 // 登录成功后进入主面板：直接在当前页面显示后台并加载数据，不依赖 location.reload()。
 // 飞牛原生应用 webview 中 location.reload() 可能不生效，会导致登录层被 hideLogin 隐藏后后台未显示 → 一片空白。
 async function enterApp(){
@@ -1418,6 +1431,7 @@ async function doLogout(){
   if(typeof procsRefreshTimer !== 'undefined' && procsRefreshTimer){ clearInterval(procsRefreshTimer); procsRefreshTimer = null; }
   document.querySelector('.app').classList.remove('show');
   currentUser = '';
+  clearAuthToken(); // 同时清除本地 token
   loginFocused = false; // 登出后允许重新自动聚焦账户栏
   showLogin(true);
 }
@@ -1544,6 +1558,7 @@ function delUser(u){
 }
 .login-btn{width:100%;justify-content:center;margin-top:4px}
 .login-msg{font-size:13px;color:var(--danger);min-height:18px;margin-top:8px;text-align:center}
+.login-ver{font-size:11px;color:var(--text3);margin-top:10px;text-align:center}
 .acct-list{display:flex;flex-direction:column;gap:8px}
 .acct-row{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg);border-radius:8px;transition:background .15s ease}
 .acct-row:hover{background:#EAECF0}
@@ -1562,6 +1577,7 @@ function delUser(u){
     <input type="password" id="login-pass" class="login-input" placeholder="密码" autocomplete="current-password">
     <button class="btn btn-primary login-btn" id="login-btn">进入</button>
     <div class="login-msg" id="login-msg"></div>
+    <div class="login-ver" id="login-ver"><!--XBOX_VER--></div>
   </div>
 </div>
 <script>
@@ -1572,6 +1588,15 @@ function delUser(u){
  * 登录成功后：主脚本活着 → 回调 window.enterApp() 进入面板；否则 reload 靠服务端已登录态进面板。 */
 (function(){
   function $(id){ return document.getElementById(id); }
+  // token 存取（ES5）：localStorage 不可用（隐私模式/被禁）时退化为页面内存态
+  function saveToken(t){
+    window.__xboxToken = t || '';
+    try{ if(t) window.localStorage.setItem('xbox_sid_token', t); else window.localStorage.removeItem('xbox_sid_token'); }catch(e){}
+  }
+  function loadToken(){
+    try{ window.__xboxToken = window.localStorage.getItem('xbox_sid_token') || ''; }catch(e){}
+  }
+  loadToken();
   function bind(){
     var btn = $('login-btn'), pass = $('login-pass'), user = $('login-user'), msg = $('login-msg');
     if(!btn) return;
@@ -1592,6 +1617,7 @@ function delUser(u){
         var j = null;
         try{ j = JSON.parse(xhr.responseText); }catch(e){}
         if(xhr.status === 200 && j && j.ok){
+          saveToken(j.sid || ''); // 持久化 Bearer token（iframe 下 Cookie 可能被拦截）
           if(typeof window.enterApp === 'function'){
             window.__loginUser = (u || 'admin'); // 主脚本 currentUser 为 let 声明不挂 window，经此桥传
             window.enterApp();

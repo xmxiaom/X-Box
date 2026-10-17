@@ -24,11 +24,11 @@ function makeDom(authed, opts) {
   const stubFetch = async (url, o) => {
     o = o || {};
     const u = String(url);
-    calls.push({ url: u, method: o.method || 'GET', body: o.body || '' });
+    calls.push({ url: u, method: o.method || 'GET', body: o.body || '', headers: (o && o.headers) || {} });
     if (u.includes('/api/auth/status')) return jsonRes(opts.statusOverride || { ok: true, configured: true, authed: authed, user: authed ? 'admin' : '' });
     if (u.includes('/api/login')) {
       const b = JSON.parse(o.body || '{}');
-      if (b.pass === 'pw-correct') return jsonRes({ ok: true });
+      if (b.pass === 'pw-correct') return jsonRes({ ok: true, sid: 'test-sid-123' });
       return { ok: false, status: 401, json: async () => ({ ok: false, error: '账户或密码错误' }) };
     }
     if (u.includes('/api/auth/listusers')) return jsonRes({ ok: true, users: usersDB });
@@ -163,13 +163,18 @@ function makeDom(authed, opts) {
     check(doc.querySelector('.app').classList.contains('show'), 'B: 登录成功后 .app 未显示');
     check(doc.getElementById('login-mask').style.display === 'none', 'B: 登录成功后登录层未隐藏');
     check(doc.getElementById('ver').textContent === 'v1.2.29', 'B: 登录后未加载概览（ver 未更新）'); // let 声明的 currentUser 不挂 window，用概览加载结果验证 enterApp
-    check(calls.some(x => x.url.includes('/api/auth/listusers')), 'B: 登录后未拉取账户列表');
+    check(win.__xboxToken === 'test-sid-123', 'B: 登录后 token 未存入 window.__xboxToken');
+    check(win.localStorage.getItem('xbox_sid_token') === 'test-sid-123', 'B: token 未持久化到 localStorage');
+    // Bearer 链路：登录后的 API 请求必须带 Authorization 头部（iframe 第三方 Cookie 被拦截时的生命线）
+    const listCall = calls.find(x => x.url.includes('/api/auth/listusers'));
+    check(!!listCall && listCall.headers['Authorization'] === 'Bearer test-sid-123', 'B: 登录后请求未带 Bearer 头部');
 
-    // 退出登录 → 回登录层
+    // 退出登录 → 回登录层，token 清除
     win.doLogout();
     await sleep(30);
     check(doc.getElementById('login-mask').style.display === 'flex', 'B: 退出登录后未回登录层');
     check(!doc.querySelector('.app').classList.contains('show'), 'B: 退出登录后 .app 仍显示');
+    check(win.__xboxToken === '' && win.localStorage.getItem('xbox_sid_token') === null, 'B: 退出登录后 token 未清除');
   }
 
   /* ---------- 场景C：降级内核（fetch 不可用）→ 登录必须仍可用 ---------- */
@@ -186,6 +191,7 @@ function makeDom(authed, opts) {
     await sleep(80);
     check(doc.querySelector('.app').classList.contains('show'), 'C: fetch 缺失时登录后 .app 未显示');
     check(doc.getElementById('login-mask').style.display === 'none', 'C: fetch 缺失时登录后登录层未隐藏');
+    check(win.__xboxToken === 'test-sid-123', 'C: fetch 缺失时 token 未保存');
     // 错误密码同样要有提示
     win.doLogout();
     await sleep(30);

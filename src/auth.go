@@ -68,6 +68,9 @@ func initAuth(dataDir string) {
 		}
 		_ = r.addAccount("admin", pw)
 	}
+	// 防爆破锁定态重置：锁定计数本就在内存中，服务重启（安装/升级/手动重启）时自然清零，
+	// 与会话一同刷新——避免用户反复尝试后被长期挡在门外，重装即可恢复
+	loginFails = &failLimiter{byIP: map[string]*failEntry{}, byUser: map[string]*failEntry{}}
 	authRT = r
 }
 
@@ -193,23 +196,33 @@ func (r *authStore) delSession(token string) {
 }
 
 // checkSession 校验会话：存在、未超空闲/绝对时限；通过则刷新活跃时间并返回用户名。
+// 支持两种凭据：Authorization: Bearer <token> 头部（优先，穿透 PC 客户端 iframe 的
+// 第三方 Cookie 拦截）或 xbox_sid Cookie（传统方式，手机/电脑浏览器同源访问时有效）。
 func (r *authStore) checkSession(req *http.Request) (string, bool) {
-	c, err := req.Cookie("xbox_sid")
-	if err != nil {
+	token := ""
+	if ah := req.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
+		token = strings.TrimSpace(ah[len("Bearer "):])
+	}
+	if token == "" {
+		if c, err := req.Cookie("xbox_sid"); err == nil {
+			token = c.Value
+		}
+	}
+	if token == "" {
 		return "", false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	si, ok := r.sessions[c.Value]
+	si, ok := r.sessions[token]
 	if !ok {
 		return "", false
 	}
 	if time.Since(si.LastActive) > sessionMaxAge {
-		delete(r.sessions, c.Value)
+		delete(r.sessions, token)
 		return "", false
 	}
 	if time.Since(si.LastActive) > sessionIdleTimeout {
-		delete(r.sessions, c.Value)
+		delete(r.sessions, token)
 		return "", false
 	}
 	si.LastActive = time.Now() // 操作即续期，10 分钟无操作失效
@@ -345,12 +358,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Name: "xbox_sid", Value: token, Path: "/", HttpOnly: true,
 		MaxAge: int(sessionMaxAge.Seconds()), SameSite: http.SameSiteLaxMode,
 	})
-	ok(w, map[string]any{"ok": true})
+	// 同时在响应体返回 token：供 iframe 内嵌场景（PC/手机客户端第三方 Cookie 被拦截时）
+	// 前端改用 Authorization: Bearer <token> 头部鉴权
+	ok(w, map[string]any{"sid": token})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie("xbox_sid"); err == nil {
-		authRT.delSession(c.Value)
+	token := ""
+	if ah := r.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
+		token = strings.TrimSpace(ah[len("Bearer "):])
+	}
+	if token == "" {
+		if c, err := r.Cookie("xbox_sid"); err == nil {
+			token = c.Value
+		}
+	}
+	if token != "" {
+		authRT.delSession(token)
 	}
 	http.SetCookie(w, &http.Cookie{Name: "xbox_sid", Value: "", Path: "/", MaxAge: -1})
 	ok(w, map[string]any{"ok": true})
