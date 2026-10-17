@@ -1548,16 +1548,35 @@ async function browserLoadLog(){
     const j = await api('/api/browser/log');
     const items = j.items || [];
     if(!items.length){ el.innerHTML = '<div class="browser-log-empty">暂无代理请求记录（先在地址栏打开一个页面）</div>'; return; }
-    let h = '<table class="browser-log-tb"><tr><th>时间</th><th>方法</th><th>目标</th><th>状态</th><th>大小</th><th>说明</th></tr>';
+    let h = '<table class="browser-log-tb"><tr><th>时间</th><th>方法</th><th>目标</th><th>状态</th><th>大小</th><th>说明 / 响应开头</th></tr>';
     for(let i = items.length - 1; i >= 0; i--){
       const it = items[i];
       const bad = it.status >= 400 || it.err;
+      const detail = [it.ctype ? '类型: '+it.ctype : '', it.snippet ? '开头: '+it.snippet : '', it.err || ''].filter(Boolean).join('\n');
       h += '<tr'+(bad ? ' class="bad"' : '')+'><td>'+esc(it.time||'')+'</td><td>'+esc(it.method||'')+'</td>'+
            '<td class="mono" title="'+esc(it.target||'')+'">'+esc(it.target||'')+'</td>'+
-           '<td>'+(it.status||'')+'</td><td>'+browserLogSize(it.bytes)+'</td><td>'+esc(it.err||'')+'</td></tr>';
+           '<td>'+(it.status||'')+'</td><td>'+browserLogSize(it.bytes)+'</td>'+
+           '<td class="mono" style="max-width:380px;white-space:normal;word-break:break-all" title="'+esc(detail)+'">'+esc(it.err || it.ctype || '')+(it.snippet ? ' <span class="snip">'+esc(it.snippet)+'</span>' : '')+'</td></tr>';
     }
-    el.innerHTML = h + '</table>';
+    el.innerHTML = h + '</table><div class="browser-log-foot"><button class="btn btn-outline btn-sm" onclick="browserCopyLog()">复制诊断信息</button></div>';
   }catch(e){ el.innerHTML = '<div class="browser-log-empty">读取失败：'+esc(e.message||e)+'</div>'; }
+}
+function browserCopyLog(){
+  api('/api/browser/log').then(function(j){
+    const items = j.items || [];
+    let txt = 'X-Box 浏览器代理诊断（最近 '+items.length+' 条）\n';
+    items.forEach(function(it){
+      txt += '['+it.time+'] '+it.method+' '+it.target+' → '+(it.status||'?')+'，'+browserLogSize(it.bytes)+
+             (it.ctype ? '，'+it.ctype : '')+(it.err ? '，错误: '+it.err : '')+(it.snippet ? '\n  开头: '+it.snippet : '')+'\n';
+    });
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(txt).then(function(){ toast('诊断信息已复制','good'); }, function(){ toast('复制失败，请手动截图','err'); });
+    }else{
+      const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
+      try{ document.execCommand('copy'); toast('诊断信息已复制','good'); }catch(e){ toast('复制失败，请手动截图','err'); }
+      ta.remove();
+    }
+  }).catch(function(e){ toast(e.message||'读取失败','err'); });
 }
 // 接收代理页面（同源）上报：新标签打开 / 新窗口请求
 if(window.addEventListener) window.addEventListener('message', function(e){
@@ -1572,6 +1591,25 @@ if(window.addEventListener) window.addEventListener('message', function(e){
 });
 // 每次框架加载后：刷新标签标题 + 绑定缩放与链接拦截（同源代理，可直接操作 contentDocument）
 function browserOnFrameLoad(t){
+  // 逃逸检测：页面 JS 把 iframe 导航到绝对 URL（跳出代理直连目标）。此时
+  // contentWindow 跨域，读 location 抛 SecurityError；直连失败则是浏览器错误页。
+  // 两种情况都把 iframe 拉回代理路径（限 2 次，防"页面加载即跳转"死循环）。
+  let escaped = false;
+  try{
+    const href = t.frame.contentWindow.location.href || '';
+    escaped = href.indexOf('/b/') < 0 && href.indexOf('about:') !== 0;
+  }catch(e){ escaped = true; }
+  if(escaped){
+    t.esc = (t.esc || 0) + 1;
+    if(t.esc <= 2 && t.url){
+      toast('该页面试图跳出代理直连目标，已拦截并重载（'+t.esc+'/2）','err');
+      t.frame.src = t.url;
+    }else{
+      toast('该页面反复跳出代理，建议改用支持代理的访问方式或反馈日志','err');
+    }
+    return;
+  }
+  t.esc = 0;
   let doc; try{ doc = t.frame.contentDocument; }catch(e){ return; }
   if(!doc) return;
   // 同步地址栏：页面内导航（点链接/重定向）后显示真实地址
@@ -1705,6 +1743,8 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
 .browser-log-tb td.mono{max-width:300px;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,Consolas,monospace}
 .browser-log-tb tr.bad td{color:var(--danger)}
 .browser-log-empty{padding:10px;color:var(--text3)}
+.browser-log-tb .snip{color:var(--text3);font-size:11px}
+.browser-log-foot{padding:6px 8px;border-top:1px solid var(--border)}
 .term-warn{background:var(--warning-light);color:var(--warning);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px;flex-shrink:0}
 .term-warn b{color:var(--danger)}
 .term-out{flex:1;min-height:0;overflow-y:auto;background:#0E1116;color:#E6E6E6;border-radius:var(--radius);padding:12px 14px;font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-all}

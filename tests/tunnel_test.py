@@ -126,6 +126,8 @@ class BH(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
             self.send_header('Set-Cookie', 'sid=abc123; Path=/')
+            self.send_header('Cache-Control', 'max-age=60')
+            self.send_header('ETag', '"abc"')
             self.end_headers(); self.wfile.write(PAGE)
         elif self.path == '/s.js':
             self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers(); self.wfile.write(JS)
@@ -192,13 +194,28 @@ check("浏览器代理Cookie透传", st == 200 and "COOKIE:sid=abc123" in body, 
 # 目标不可达：返回可读的中文 HTML 错误页（请求由 NAS 发出，失败即 NAS→目标不通）
 st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:9/")
 check("浏览器代理失败错误页", st == 502 and "无法访问目标地址" in body, body[:80])
+# 文本类响应 gzip 回传（远程访问经 fnOS 域名中转，带宽常是瓶颈）
+import gzip as _gz
+rq = urllib.request.Request(B + "/page", headers={"Accept-Encoding": "gzip"})
+rr = urllib.request.urlopen(rq, timeout=5)
+raw = rr.read(); enc = (rr.headers.get("Content-Encoding") or "").lower(); rr.close()
+try:
+    txt = _gz.decompress(raw).decode("utf-8", "replace")
+except Exception:
+    txt = raw.decode("utf-8", "replace")
+check("浏览器代理文本gzip回传", enc == "gzip" and '<base href="/b/http/' + H + '/page">' in txt and len(raw) < len(txt), enc)
+# 缓存头透传（二次访问命中浏览器缓存 / 条件请求 304）
+rq2 = urllib.request.urlopen(B + "/page", timeout=5)
+cc = rq2.headers.get("Cache-Control") or ""; et = rq2.headers.get("ETag") or ""; rq2.close()
+check("浏览器代理缓存头透传", "max-age=60" in cc and et == '"abc"', cc + " | " + et)
 # 代理请求日志：面板「诊断」据此区分「代理没收到请求 / NAS 连不上目标 / 页面本身问题」
 st, body = get(tunnel({"m": "GET", "p": "/api/browser/log"}))
 j = json.loads(body) if body else {}
 items = j.get("items") or []
 check("浏览器代理日志端点", st == 200 and j.get("ok") and len(items) > 0
       and any(i.get("target", "").startswith("http://127.0.0.1:8898") for i in items)
-      and any(i.get("status") == 200 for i in items), body[:120])
+      and any(i.get("status") == 200 for i in items)
+      and any("<html>" in (i.get("snippet") or "") for i in items), body[:160])
 
 # 14) 更新下载：异步任务 + 轮询状态（经 GitHub API 资产端点）
 try:

@@ -36,6 +36,8 @@ package main
 // 输入网址的通用浏览工具，内网设备（192.168.1.1 等）是合法目标。
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"html"
 	"io"
@@ -52,12 +54,14 @@ import (
 // 代理请求日志：环形缓冲保留最近若干条，供面板「诊断」查看（定位"页面打不开"
 // 到底是代理没收到请求、目标连不上，还是页面内容本身的问题）。
 type browserLogItem struct {
-	Time   string `json:"time"`
-	Method string `json:"method"`
-	Target string `json:"target"`
-	Status int    `json:"status"`
-	Bytes  int64  `json:"bytes"`
-	Err    string `json:"err,omitempty"`
+	Time    string `json:"time"`
+	Method  string `json:"method"`
+	Target  string `json:"target"`
+	Status  int    `json:"status"`
+	Bytes   int64  `json:"bytes"`
+	CType   string `json:"ctype,omitempty"`  // 响应 Content-Type（定位"空白是否因类型/编码"）
+	Snippet string `json:"snippet,omitempty"` // 文本响应开头 200 字节（定位页面实际内容）
+	Err     string `json:"err,omitempty"`
 }
 
 var browserLog = struct {
@@ -98,7 +102,20 @@ const (
 	browserMaxText   = 8 << 20  // 需文本重写（HTML/CSS/JS）的读取上限 8MB
 	browserMaxStream = 64 << 20 // 其他内容流式透传上限 64MB
 	browserTimeout   = 30 * time.Second
+	browserGzipMin   = 1024     // 文本类响应超过该体积才压缩回传
 )
+
+// browserTransport 包级共享：连接复用（keep-alive）对代理性能是决定性的——
+// 页面往往有几十个资源，每个都新建 TCP/TLS 连接会让点击链接明显变慢。
+// 内网设备普遍自签证书，故跳过校验（与浏览器"继续访问"等价）。
+var browserTransport = &http.Transport{
+	TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+	Proxy:             nil,
+	ForceAttemptHTTP2: true,
+	MaxIdleConns:      64,
+	MaxIdleConnsPerHost: 8,
+	IdleConnTimeout:   90 * time.Second,
+}
 
 // handleBrowserRoot GET /b（无子路径）：提示用法。
 func (s *Server) handleBrowserRoot(w http.ResponseWriter, r *http.Request) {
@@ -150,12 +167,9 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
-		// 内网设备（路由器/NAS/摄像头）普遍使用自签证书，证书校验必然失败；
-		// 本代理的定位就是访问这类设备，故跳过校验（与浏览器"继续访问"等价）。
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			Proxy:           nil,
-		},
+		// 必须用包级共享 Transport：v1.2.46 曾在此处每请求 new 一个 Transport，
+		// 导致每次代理请求都重新 TCP/TLS 握手（页面每个资源一次），点击链接明显变慢。
+		Transport: browserTransport,
 	}
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
@@ -176,6 +190,12 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	// Basic/Digest 认证透传（路由器管理页常见；浏览器弹框输入后由 iframe 请求带上）
 	if au := r.Header.Get("Authorization"); au != "" {
 		req.Header.Set("Authorization", au)
+	}
+	// 条件请求头透传：命中目标站 304 时浏览器直接用自己的缓存（配合上面的缓存头）
+	for _, h := range []string{"If-None-Match", "If-Modified-Since"} {
+		if v := r.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -207,6 +227,13 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	for _, c := range jar.Cookies(tu) {
 		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePath)
 	}
+	// 缓存头双向透传：让浏览器缓存代理后的资源并支持条件请求（304），
+	// 二次点击同一站点时直接命中本地缓存，不再回源到 NAS，显著提速。
+	for _, h := range []string{"Cache-Control", "ETag", "Last-Modified", "Expires"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
 	// 认证挑战透传：让浏览器能弹出账号密码框（401 场景）
 	for _, h := range []string{"WWW-Authenticate", "Proxy-Authenticate"} {
 		if v := resp.Header.Get(h); v != "" {
@@ -217,6 +244,7 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 
 	ct := resp.Header.Get("Content-Type")
 	low := strings.ToLower(ct)
+	rec.CType = ct
 	switch {
 	case strings.Contains(low, "text/html") || strings.Contains(low, "application/xhtml"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
@@ -227,7 +255,8 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct)) // 保留原 charset（GBK 等不乱码）
 		browserWriteStatus(w, resp.StatusCode)
-		_, _ = cw.Write(browserRewriteHTML(string(data), tu))
+		rec.Snippet = browserSnippet(data)
+		browserWriteText(cw, w, r, browserRewriteHTML(string(data), tu))
 	case strings.Contains(low, "text/css"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
@@ -237,7 +266,8 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct))
 		browserWriteStatus(w, resp.StatusCode)
-		_, _ = cw.Write([]byte(browserRewriteCSS(string(data), tu)))
+		rec.Snippet = browserSnippet(data)
+		browserWriteText(cw, w, r, []byte(browserRewriteCSS(string(data), tu)))
 	case strings.Contains(low, "javascript") || strings.Contains(low, "ecmascript"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
@@ -247,7 +277,8 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct))
 		browserWriteStatus(w, resp.StatusCode)
-		_, _ = cw.Write([]byte(browserRewriteJS(string(data), tu)))
+		rec.Snippet = browserSnippet(data)
+		browserWriteText(cw, w, r, []byte(browserRewriteJS(string(data), tu)))
 	default:
 		// 其余类型：流式透传（图片/字体/媒体/二进制）
 		if ct != "" {
@@ -277,6 +308,39 @@ func browserKeepCharset(ct string) string {
 		return ct
 	}
 	return "text/html"
+}
+
+// browserWriteText 文本类响应回写：客户端支持 gzip 且压缩确有收益时压缩回传。
+// 远程访问经 fnOS 域名中转、带宽常是瓶颈，HTML/CSS/JS 压缩后通常只剩原文的
+// 1/4~1/3，点击链接的等待时间明显缩短。
+func browserWriteText(cw *countWriter, w http.ResponseWriter, r *http.Request, data []byte) {
+	if len(data) >= browserGzipMin && strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		if _, err := gz.Write(data); err == nil && gz.Close() == nil && buf.Len() < len(data) {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Vary", "Accept-Encoding")
+			_, _ = cw.Write(buf.Bytes())
+			return
+		}
+	}
+	_, _ = cw.Write(data)
+}
+
+// browserSnippet 取文本响应开头 200 字节做日志摘要（控制字符转空格，便于诊断
+// "代理返回 200 但页面空白"——直接看页面实际返回了什么）。
+func browserSnippet(data []byte) string {
+	const n = 200
+	if len(data) > n {
+		data = data[:n]
+	}
+	s := strings.Map(func(r rune) rune {
+		if r < 32 && r != '\n' && r != '\t' {
+			return ' '
+		}
+		return r
+	}, string(data))
+	return strings.TrimSpace(s)
 }
 
 var (
