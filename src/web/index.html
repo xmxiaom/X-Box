@@ -1373,6 +1373,20 @@ async function delProxy(id){
 
 /* ---------- 启动 ---------- */
 let currentUser = '';
+let appEntered = false, appRefreshTimer = null;
+// 登录成功后进入主面板：直接在当前页面显示后台并加载数据，不依赖 location.reload()。
+// 飞牛原生应用 webview 中 location.reload() 可能不生效，会导致登录层被 hideLogin 隐藏后后台未显示 → 一片空白。
+async function enterApp(){
+  document.getElementById('login-mask').style.display = 'none';
+  document.querySelector('.app').classList.add('show');
+  if(appEntered) return;            // 防止重复初始化（boot 已登录 与 doLogin 成功 都会走到这里）
+  appEntered = true;
+  try{ const j = await api('/api/overview'); document.getElementById('ver').textContent = 'v'+j.version; }catch(e){}
+  loadOverview(); loadPorts(); loadProcs();
+  startTempLoop();
+  if(!appRefreshTimer) appRefreshTimer = setInterval(loadOverview, 30000);
+  loadAccounts();
+}
 async function boot(){
   let authed = false, configured = false, user = '';
   try{
@@ -1381,13 +1395,7 @@ async function boot(){
   }catch(e){ authed = false; } // status 白名单不应失败；失败按未登录处理，避免误显示后台
   if(!authed){ showLogin(configured); return; }
   currentUser = user;
-  // 已登录：隐藏登录层、显示主面板，再启动温度轮询（温度接口需登录，未登录轮询会触发 401 清空登录框）
-  document.getElementById('login-mask').style.display = 'none';
-  document.querySelector('.app').classList.add('show');
-  startTempLoop();
-  try{ const j = await api('/api/overview'); document.getElementById('ver').textContent = 'v'+j.version; }catch(e){}
-  loadOverview(); loadPorts(); loadProcs();
-  setInterval(loadOverview, 30000);
+  enterApp();
 }
 boot();
 function showLogin(configured){
@@ -1413,7 +1421,7 @@ async function doLogin(){
   try{
     const r = await fetch('/api/login', {method:'POST', cache:'no-store', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user, pass})});
     const j = await r.json();
-    if(j.ok){ hideLogin(); location.reload(); }
+    if(j.ok){ currentUser = user || 'admin'; enterApp(); }
     else { msg.textContent = j.error || '登录失败'; }
   }catch(e){ msg.textContent = '网络错误'; }
 }
@@ -1430,7 +1438,13 @@ if(document.readyState === 'loading') document.addEventListener('DOMContentLoade
 else bindLogin();
 async function doLogout(){
   try{ await fetch('/api/logout', {method:'POST', cache:'no-store'}); }catch(e){}
-  location.reload();
+  // 重置前端会话态并直接回到登录层，不依赖 location.reload()（避免 webview reload 不生效导致空白）
+  appEntered = false;
+  if(appRefreshTimer){ clearInterval(appRefreshTimer); appRefreshTimer = null; }
+  if(typeof procsRefreshTimer !== 'undefined' && procsRefreshTimer){ clearInterval(procsRefreshTimer); procsRefreshTimer = null; }
+  document.querySelector('.app').classList.remove('show');
+  currentUser = '';
+  showLogin(true);
 }
 async function changePass(){
   const o = document.getElementById('cp-old').value, n = document.getElementById('cp-new').value;
