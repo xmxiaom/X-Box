@@ -512,8 +512,9 @@ function navUrl(path){
   const sep = path.indexOf('?') >= 0 ? '&' : '?';
   return window.__xboxToken ? path + sep + 'sid=' + encodeURIComponent(window.__xboxToken) : path;
 }
-function navApi(path, opts){
+function navApi(path, opts, timeoutMs){
   opts = opts || {};
+  timeoutMs = timeoutMs || 8000;
   const method = opts.method || 'GET';
   return new Promise((resolve, reject) => {
     const id = 'navf' + (navSeq++);
@@ -522,8 +523,9 @@ function navApi(path, opts){
     frame.style.cssText = 'display:none;width:0;height:0;border:0';
     let form = null, done = false;
     const cleanup = () => { setTimeout(() => { try{ frame.remove(); }catch(e){} if(form){ try{ form.remove(); }catch(e){} } }, 0); };
+    const timer = setTimeout(() => { if(done) return; done = true; reject(new Error('TIMEOUT')); cleanup(); }, timeoutMs);
     frame.onload = () => {
-      if(done) return; done = true;
+      if(done) return; done = true; clearTimeout(timer);
       try{
         const text = (frame.contentDocument && frame.contentDocument.body) ? frame.contentDocument.body.textContent : '';
         const j = JSON.parse(text);
@@ -533,7 +535,7 @@ function navApi(path, opts){
       }catch(e){ reject(new Error('响应解析失败')); }
       cleanup();
     };
-    frame.onerror = () => { if(done) return; done = true; reject(new Error('网络错误')); cleanup(); };
+    frame.onerror = () => { if(done) return; done = true; clearTimeout(timer); reject(new Error('网络错误')); cleanup(); };
     document.body.appendChild(frame);
     if(method === 'POST'){
       form = document.createElement('form');
@@ -551,16 +553,17 @@ function navApi(path, opts){
     }
   });
 }
-// 启动时探测通道：fetch 3 秒不通且导航通道可用 → 直接用导航通道（避免首次请求干等 8 秒）
+// 启动时探测通道：fetch 3 秒不通 → 导航通道 6 秒；都不通返回 'none'（不再干等，直接显示登录框）
 async function detectChannel(){
   try{
     const r = await Promise.race([
       fetch('/api/auth/status', {cache:'no-store'}),
       new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT')), 3000))
     ]);
-    if(r) return; // fetch 通道可用（401 也算通）
+    if(r) return 'fetch'; // fetch 通道可用（401 也算通）
   }catch(e){}
-  try{ await navApi('/api/auth/status'); switchToNav(); }catch(e){}
+  try{ await navApi('/api/auth/status', {}, 6000); switchToNav(); return 'nav'; }catch(e){}
+  return 'none';
 }
 function fmtB(n){if(n==null||isNaN(n))return'—';if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<3);return n.toFixed(2)+' '+u[i]}
 function fmtKB(n){return fmtB(n*1024)}
@@ -1477,7 +1480,11 @@ async function boot(){
   }
   showLogin(!!(st && st.configured));
 }
-detectChannel().then(boot); // 先探测网络通道（客户端域名下 fetch/XHR 可能挂起），再启动
+// 通道预探测：都不通（'none'）时直接展示登录框（HTML 默认标题），不再反复重试干等
+detectChannel().then(function(ch){
+  if(ch === 'none'){ window.__noChannel = true; return; }
+  boot();
+});
 let loginFocused = false;
 function showLogin(configured){
   const mask = document.getElementById('login-mask');
@@ -1502,6 +1509,7 @@ function hideLogin(){ document.getElementById('login-mask').style.display = 'non
 // ---- 登录（主通道 fetch + 8 秒超时回退 XHR；无 fetch 时整体交给页面尾部 ES5 层）----
 function doLoginXHR(user, pass, msg, btn){
   var xhr = new XMLHttpRequest();
+  xhr.timeout = 8000;
   xhr.open('POST', '/api/login', true);
   xhr.setRequestHeader('Content-Type', 'application/json');
   xhr.onreadystatechange = function(){
@@ -1516,6 +1524,7 @@ function doLoginXHR(user, pass, msg, btn){
       if(msg) msg.textContent = (j && j.error) || ('登录失败（HTTP ' + xhr.status + '）');
     }
   };
+  xhr.ontimeout = function(){ if(btn) btn.disabled = false; if(msg) msg.textContent = '登录请求超时，请查看诊断行'; };
   xhr.onerror = function(){ if(btn) btn.disabled = false; if(msg) msg.textContent = '网络错误，请检查连接后重试'; };
   xhr.send(JSON.stringify({user: user, pass: pass}));
 }
@@ -1526,6 +1535,16 @@ async function doLogin(){
   if(!pass){ msg.textContent='请输入密码'; return; }
   const btn = document.getElementById('login-btn');
   if(btn) btn.disabled = true; // 防重复提交
+  // 启动时探测无可用通道：点击时快速重探一次（2s+4s 有界），通则继续，不通立即报错不干等
+  if(window.__noChannel){
+    const ch = await detectChannel();
+    if(ch === 'none'){
+      msg.textContent = '网络不通：页面能显示但请求无法到达服务器，请查看登录页诊断行';
+      if(btn) btn.disabled = false;
+      return;
+    }
+    window.__noChannel = false;
+  }
   try{
     // api() 内部已含通道回退：fetch 8 秒不通自动切导航通道（隐藏 iframe 表单 POST）
     const j = await api('/api/login', {method:'POST', body: JSON.stringify({user: user, pass: pass})});
@@ -1736,35 +1755,56 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
       el.textContent = parts.join(' · ');
     }
     if(!netEl) return;
-    var results = {fetch: '检测中', xhr: '检测中', nav: '检测中'};
-    function render(){ netEl.textContent = '网络: fetch=' + results.fetch + ' · xhr=' + results.xhr + ' · 导航=' + results.nav; }
-    function finish(tag, ok, detail){ results[tag] = ok ? '正常' : detail; render(); }
-    render();
-    // 通道一：XHR
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', '/api/auth/status', true);
-    xhr.onreadystatechange = function(){ if(xhr.readyState !== 4) return; finish('xhr', xhr.status === 200, 'HTTP ' + xhr.status); };
-    xhr.onerror = function(){ finish('xhr', false, '无法连接'); };
-    try{ xhr.send(); }catch(e){ finish('xhr', false, '异常'); }
-    // 通道二：fetch（主脚本存活即有；与 XHR 独立探测，定位是哪条通道被客户端卡住）
-    if(window.fetch){
-      fetch('/api/auth/status', {cache:'no-store'}).then(function(r){ finish('fetch', r.ok, 'HTTP ' + r.status); })
-        .catch(function(){ finish('fetch', false, '无法连接'); });
-    }else{
-      finish('fetch', false, '不可用');
+    var results = {};
+    function render(){
+      var s = [];
+      for(var k in results) s.push(k + '=' + results[k]);
+      netEl.textContent = '网络: ' + s.join(' · ');
     }
-    // 通道三：导航（隐藏 iframe.src）——页面文档能加载说明此通道可达
+    function finish(tag, ok, detail){ results[tag] = ok ? '正常' : detail; render(); }
+    function probeXHR(tag, url){
+      results[tag] = '检测中'; render();
+      var settled = false;
+      var xhr = new XMLHttpRequest();
+      xhr.timeout = 5000;
+      xhr.open('GET', url, true);
+      xhr.onreadystatechange = function(){
+        if(xhr.readyState !== 4 || settled) return;
+        settled = true;
+        finish(tag, xhr.status === 200, xhr.status === 0 ? '被阻止/跨域' : ('HTTP ' + xhr.status));
+      };
+      xhr.ontimeout = function(){ if(settled) return; settled = true; finish(tag, false, '挂起(5s超时)'); };
+      xhr.onerror = function(){ if(settled) return; settled = true; finish(tag, false, '无法连接'); };
+      try{ xhr.send(); }catch(e){ settled = true; finish(tag, false, '异常'); }
+    }
+    // 三条通道 + 两个定位探测：根路径（非 API，判断是否中转只挂 /api）+ 局域网 IP 直连
+    probeXHR('fetch通道', '/api/auth/status'); // XHR 代 fetch 通道（两者同栈，结果一致）
+    probeXHR('根路径', '/');                    // 文档自身路径：通=webview 能到服务器，挂=webview 网络不通
+    probeXHR('局域网', 'http://192.168.1.200:8899/api/auth/status'); // 局域网 IP 直连（ mixed content 会被阻止=快速报错）
+    // 导航通道（iframe）
+    results['导航'] = '检测中'; render();
     var nf = document.createElement('iframe');
     nf.style.cssText = 'display:none;width:0;height:0;border:0';
+    var navSettled = false;
+    var navTimer = setTimeout(function(){ if(!navSettled){ navSettled = true; finish('导航', false, '挂起(5s超时)'); } }, 5000);
     nf.onload = function(){
+      if(navSettled) return; navSettled = true; clearTimeout(navTimer);
       var t = '', okFlag = false;
       try{ t = nf.contentDocument && nf.contentDocument.body ? nf.contentDocument.body.textContent : ''; }catch(e){}
       try{ okFlag = t ? !!JSON.parse(t).ok : false; }catch(e){}
-      finish('nav', okFlag, '失败');
+      finish('导航', okFlag, '加载但非JSON');
       setTimeout(function(){ try{ nf.remove(); }catch(e){} }, 0);
     };
-    nf.onerror = function(){ finish('nav', false, '无法连接'); };
+    nf.onerror = function(){ if(navSettled) return; navSettled = true; clearTimeout(navTimer); finish('导航', false, '无法连接'); };
     nf.src = '/api/auth/status';
+    // fetch 通道独立探测（与 XHR 同栈但单独显示）
+    if(window.fetch){
+      results['fetch'] = '检测中'; render();
+      var fetchDone = false;
+      var fetchTimer = setTimeout(function(){ if(!fetchDone){ fetchDone = true; finish('fetch', false, '挂起(5s超时)'); } }, 5000);
+      fetch('/api/auth/status', {cache:'no-store'}).then(function(r){ if(fetchDone) return; fetchDone = true; clearTimeout(fetchTimer); finish('fetch', r.ok, 'HTTP ' + r.status); })
+        .catch(function(){ if(fetchDone) return; fetchDone = true; clearTimeout(fetchTimer); finish('fetch', false, '无法连接'); });
+    }
   }
   function bind(){
     var btn = $('login-btn'), pass = $('login-pass'), user = $('login-user'), msg = $('login-msg');

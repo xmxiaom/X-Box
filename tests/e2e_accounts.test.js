@@ -151,7 +151,7 @@ function makeDom(authed, opts) {
     check(diagTxt.includes('面板组件: 已加载'), 'B: 诊断行未识别主脚本存活: ' + diagTxt);
     check(diagTxt.includes('地址: http://localhost:8899'), 'B: 诊断行缺地址: ' + diagTxt);
     const netTxt = doc.getElementById('login-diag-net').textContent;
-    check(netTxt.includes('fetch=正常') && netTxt.includes('xhr=正常'), 'B: 双通道探测异常: ' + netTxt);
+    check(netTxt.includes('fetch=正常') && netTxt.includes('fetch通道=正常') && netTxt.includes('根路径=正常'), 'B: 通道探测异常: ' + netTxt);
 
     // 错误密码 → 显示后端错误信息，不进入面板
     doc.getElementById('login-user').value = 'admin';
