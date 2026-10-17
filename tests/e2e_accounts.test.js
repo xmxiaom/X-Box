@@ -146,6 +146,10 @@ function makeDom(authed, opts) {
     await sleep(200);
     check(!doc.querySelector('.app').classList.contains('show'), 'B: 未登录时 .app 不应显示');
     check(doc.getElementById('login-mask').style.display === 'flex', 'B: boot 后登录层应保持可见');
+    // 诊断行：服务器连通性 + 面板组件状态（排障传感器）
+    const diagTxt = doc.getElementById('login-diag').textContent;
+    check(diagTxt.includes('服务器: 连接正常'), 'B: 诊断行未显示服务器连通: ' + diagTxt);
+    check(diagTxt.includes('面板组件: 已加载'), 'B: 诊断行未识别主脚本存活: ' + diagTxt);
 
     // 错误密码 → 显示后端错误信息，不进入面板
     doc.getElementById('login-user').value = 'admin';

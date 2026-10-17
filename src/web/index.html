@@ -1545,6 +1545,7 @@ function delUser(u){
     }catch(e){ toast(e.message,'err'); }
   }, '删除');
 }
+window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 登录层据此显示「面板组件」状态
 </script>
 <style>
 .login-mask{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:9999} /* 默认直接显示登录层（fail-safe）：即使旧内核下 JS 语法死亡，用户看到的也是登录框而非空白；登录成功后由 JS 置 display:none */
@@ -1559,6 +1560,7 @@ function delUser(u){
 .login-btn{width:100%;justify-content:center;margin-top:4px}
 .login-msg{font-size:13px;color:var(--danger);min-height:18px;margin-top:8px;text-align:center}
 .login-ver{font-size:11px;color:var(--text3);margin-top:10px;text-align:center}
+.login-diag{font-size:11px;color:var(--text3);margin-top:4px;text-align:center;line-height:1.6}
 .acct-list{display:flex;flex-direction:column;gap:8px}
 .acct-row{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg);border-radius:8px;transition:background .15s ease}
 .acct-row:hover{background:#EAECF0}
@@ -1578,6 +1580,7 @@ function delUser(u){
     <button class="btn btn-primary login-btn" id="login-btn">进入</button>
     <div class="login-msg" id="login-msg"></div>
     <div class="login-ver" id="login-ver"><!--XBOX_VER--></div>
+    <div class="login-diag" id="login-diag"></div>
   </div>
 </div>
 <script>
@@ -1597,6 +1600,25 @@ function delUser(u){
     try{ window.__xboxToken = window.localStorage.getItem('xbox_sid_token') || ''; }catch(e){}
   }
   loadToken();
+  function diag(){
+    var el = $('login-diag'); if(!el) return;
+    var parts = [];
+    parts.push('面板组件: ' + (window.__xboxMain ? '已加载' : '未加载'));
+    parts.push('窗口: ' + (window.innerWidth||'?') + 'x' + (window.innerHeight||'?'));
+    el.textContent = parts.join(' · ') + ' · 服务器: 检测中…';
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/api/auth/status', true);
+    xhr.onreadystatechange = function(){
+      if(xhr.readyState !== 4) return;
+      var t = el.textContent.replace(/ · 服务器: .*$/, '');
+      el.textContent = t + ' · 服务器: ' + (xhr.status === 200 ? '连接正常' : ('HTTP ' + xhr.status));
+    };
+    xhr.onerror = function(){
+      var t = el.textContent.replace(/ · 服务器: .*$/, '');
+      el.textContent = t + ' · 服务器: 无法连接';
+    };
+    try{ xhr.send(); }catch(e){ el.textContent += '（检测异常）'; }
+  }
   function bind(){
     var btn = $('login-btn'), pass = $('login-pass'), user = $('login-user'), msg = $('login-msg');
     if(!btn) return;
@@ -1639,8 +1661,8 @@ function delUser(u){
     if(pass && pass.addEventListener) pass.addEventListener('keydown', onKey);
     if(user && user.addEventListener) user.addEventListener('keydown', onKey);
   }
-  if(document.readyState === 'loading'){ if(document.addEventListener) document.addEventListener('DOMContentLoaded', bind); else window.attachEvent('onload', bind); }
-  else bind();
+  if(document.readyState === 'loading'){ if(document.addEventListener) document.addEventListener('DOMContentLoaded', function(){ bind(); diag(); }); else window.attachEvent('onload', function(){ bind(); diag(); }); }
+  else { bind(); diag(); }
 })();
 </script>
 </body>
