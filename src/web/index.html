@@ -1421,8 +1421,58 @@ function showLogin(configured){
   }
 }
 function hideLogin(){ document.getElementById('login-mask').style.display = 'none'; }
-// 注意：登录的点击/回车绑定与请求发送全部由页面尾部的 ES5 独立脚本负责（XMLHttpRequest，零现代语法），
-// 这里不再绑定，避免某些旧内核下 fetch/async 不可用时登录无反应；登录成功后由该脚本回调 enterApp()。
+// ---- 登录（主通道 fetch + 8 秒超时回退 XHR；无 fetch 时整体交给页面尾部 ES5 层）----
+function doLoginXHR(user, pass, msg, btn){
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/login', true);
+  xhr.setRequestHeader('Content-Type', 'application/json');
+  xhr.onreadystatechange = function(){
+    if(xhr.readyState !== 4) return;
+    if(btn) btn.disabled = false;
+    var j = null; try{ j = JSON.parse(xhr.responseText); }catch(e){}
+    if(xhr.status === 200 && j && j.ok){
+      saveAuthToken(j.sid || '');
+      currentUser = user || 'admin';
+      enterApp();
+    }else{
+      if(msg) msg.textContent = (j && j.error) || ('登录失败（HTTP ' + xhr.status + '）');
+    }
+  };
+  xhr.onerror = function(){ if(btn) btn.disabled = false; if(msg) msg.textContent = '网络错误，请检查连接后重试'; };
+  xhr.send(JSON.stringify({user: user, pass: pass}));
+}
+async function doLogin(){
+  const user = document.getElementById('login-user').value.trim();
+  const pass = document.getElementById('login-pass').value;
+  const msg = document.getElementById('login-msg');
+  if(!pass){ msg.textContent='请输入密码'; return; }
+  const btn = document.getElementById('login-btn');
+  if(btn) btn.disabled = true; // 防重复提交
+  try{
+    // fetch 主通道，8 秒无响应则回退 XHR（客户端可能只卡其中一条通道）
+    const j = await Promise.race([
+      api('/api/login', {method:'POST', body: JSON.stringify({user: user, pass: pass})}),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT')), 8000))
+    ]);
+    saveAuthToken(j.sid || '');
+    currentUser = user || 'admin';
+    enterApp();
+    if(btn) btn.disabled = false;
+  }catch(e){
+    doLoginXHR(user, pass, msg, btn); // 按钮状态由 XHR 回调管理
+  }
+}
+function bindLogin(){
+  if(typeof fetch !== 'function') return; // 无 fetch（极旧内核）：交给 ES5 XHR 层
+  const btn = document.getElementById('login-btn');
+  const pass = document.getElementById('login-pass');
+  const user = document.getElementById('login-user');
+  if(btn) btn.addEventListener('click', doLogin);
+  if(pass) pass.addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+  if(user) user.addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+}
+if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindLogin);
+else bindLogin();
 async function doLogout(){
   try{ await fetch('/api/logout', {method:'POST', cache:'no-store'}); }catch(e){}
   // 重置前端会话态并直接回到登录层，不依赖 location.reload()（避免 webview reload 不生效导致空白）
@@ -1581,6 +1631,7 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
     <div class="login-msg" id="login-msg"></div>
     <div class="login-ver" id="login-ver"><!--XBOX_VER--></div>
     <div class="login-diag" id="login-diag"></div>
+    <div class="login-diag" id="login-diag-net"></div>
   </div>
 </div>
 <script>
@@ -1601,23 +1652,32 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
   }
   loadToken();
   function diag(){
-    var el = $('login-diag'); if(!el) return;
-    var parts = [];
-    parts.push('面板组件: ' + (window.__xboxMain ? '已加载' : '未加载'));
-    parts.push('窗口: ' + (window.innerWidth||'?') + 'x' + (window.innerHeight||'?'));
-    el.textContent = parts.join(' · ') + ' · 服务器: 检测中…';
+    var el = $('login-diag'), netEl = $('login-diag-net');
+    if(el){
+      var parts = [];
+      parts.push('面板组件: ' + (window.__xboxMain ? '已加载' : '未加载'));
+      parts.push('窗口: ' + (window.innerWidth||'?') + 'x' + (window.innerHeight||'?'));
+      try{ parts.push('地址: ' + window.location.protocol + '//' + window.location.host); }catch(e){}
+      el.textContent = parts.join(' · ');
+    }
+    if(!netEl) return;
+    var results = {fetch: '检测中', xhr: '检测中'};
+    function render(){ netEl.textContent = '网络: fetch=' + results.fetch + ' · xhr=' + results.xhr; }
+    function finish(tag, ok, detail){ results[tag] = ok ? '正常' : detail; render(); }
+    render();
+    // 通道一：XHR
     var xhr = new XMLHttpRequest();
     xhr.open('GET', '/api/auth/status', true);
-    xhr.onreadystatechange = function(){
-      if(xhr.readyState !== 4) return;
-      var t = el.textContent.replace(/ · 服务器: .*$/, '');
-      el.textContent = t + ' · 服务器: ' + (xhr.status === 200 ? '连接正常' : ('HTTP ' + xhr.status));
-    };
-    xhr.onerror = function(){
-      var t = el.textContent.replace(/ · 服务器: .*$/, '');
-      el.textContent = t + ' · 服务器: 无法连接';
-    };
-    try{ xhr.send(); }catch(e){ el.textContent += '（检测异常）'; }
+    xhr.onreadystatechange = function(){ if(xhr.readyState !== 4) return; finish('xhr', xhr.status === 200, 'HTTP ' + xhr.status); };
+    xhr.onerror = function(){ finish('xhr', false, '无法连接'); };
+    try{ xhr.send(); }catch(e){ finish('xhr', false, '异常'); }
+    // 通道二：fetch（主脚本存活即有；与 XHR 独立探测，定位是哪条通道被客户端卡住）
+    if(window.fetch){
+      fetch('/api/auth/status', {cache:'no-store'}).then(function(r){ finish('fetch', r.ok, 'HTTP ' + r.status); })
+        .catch(function(){ finish('fetch', false, '无法连接'); });
+    }else{
+      finish('fetch', false, '不可用');
+    }
   }
   function bind(){
     var btn = $('login-btn'), pass = $('login-pass'), user = $('login-user'), msg = $('login-msg');
@@ -1661,8 +1721,8 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
     if(pass && pass.addEventListener) pass.addEventListener('keydown', onKey);
     if(user && user.addEventListener) user.addEventListener('keydown', onKey);
   }
-  if(document.readyState === 'loading'){ if(document.addEventListener) document.addEventListener('DOMContentLoaded', function(){ bind(); diag(); }); else window.attachEvent('onload', function(){ bind(); diag(); }); }
-  else { bind(); diag(); }
+  if(document.readyState === 'loading'){ if(document.addEventListener) document.addEventListener('DOMContentLoaded', function(){ if(!window.__xboxMain || typeof window.fetch !== 'function') bind(); diag(); }); else window.attachEvent('onload', function(){ if(!window.__xboxMain || typeof window.fetch !== 'function') bind(); diag(); }); }
+  else { if(!window.__xboxMain || typeof window.fetch !== 'function') bind(); diag(); }
 })();
 </script>
 </body>
