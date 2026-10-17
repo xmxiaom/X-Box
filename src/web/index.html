@@ -461,9 +461,14 @@ let cleanData = null;
 let ddnsData = null, ddnsIfaces = [];
 
 /* ---------- 工具 ---------- */
-async function api(path, opts = {}) {
+async function api(path, opts) {
+  // 兼容旧 webview（fnOS PC 客户端内核可能低于 Chromium 80）：不用对象展开/??/?.
   // cache:'no-store'：APP 内嵌 WebView 可能缓存 GET 响应，导致 /api/temps 等实时接口拿到旧值（手机端与网页端"不同步"）
-  const r = await fetch(path, {cache:'no-store', ...opts, headers: {'Content-Type': 'application/json', ...(opts.headers||{})}});
+  opts = opts || {};
+  const init = {cache:'no-store', method: opts.method || 'GET', headers: {'Content-Type': 'application/json'}};
+  if (opts.body) init.body = opts.body;
+  if (opts.headers) { for (const k in opts.headers) init.headers[k] = opts.headers[k]; }
+  const r = await fetch(path, init);
   // 非 2xx：先尝试解析后端 fail() 的具体错误信息（避免只显示"HTTP 500"这种无信息量的提示）
   if (!r.ok) {
     if (r.status === 401) {
@@ -482,7 +487,7 @@ function fmtKB(n){return fmtB(n*1024)}
 function baseDevName(dev){let b=String(dev||'').split('/').pop();if(/^(nvme|mmcblk)/.test(b))return b.replace(/p\d+$/,'');return b.replace(/\d+$/,'')}
 function fmtRate(bps){if(!bps||bps<=0)return '0 B/s';return fmtB(bps)+'/s'}
 function fmtUp(s){if(s==null)return'—';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+' 天 ':'')+h+' 小时 '+m+' 分'}
-function esc(s){return (s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function esc(s){return (s==null?'':s).toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function toast(msg, cls=''){const t=document.createElement('div');t.className='toast-item '+cls;t.textContent=msg;document.getElementById('toast').appendChild(t);setTimeout(()=>t.remove(),3600)}
 
 /* ---------- 通用弹窗 ---------- */
@@ -522,10 +527,10 @@ async function loadOverview(){
       ? ` · <span id="stat-cpu-temp" style="font-size:14px;color:${_tmp.cpuMax>=80?'var(--danger)':_tmp.cpuMax>=65?'var(--warning)':'var(--success)'}">🌡️ ${_tmp.cpuMax.toFixed(1)}°C</span>`
       : ' · <span id="stat-cpu-temp">🌡️ —</span>';
     document.getElementById('ov-stats').innerHTML = `
-      <div class="stat"><div class="s-icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></div><div><div class="s-v">${j.cpuCores||'?'} 核${cpuTempHtml}</div><div class="s-k">${esc(j.cpuModel||'CPU').slice(0,26)} · 负载 ${(j.load1??0).toFixed(2)}</div></div></div>
+      <div class="stat"><div class="s-icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></div><div><div class="s-v">${j.cpuCores||'?'} 核${cpuTempHtml}</div><div class="s-k">${esc(j.cpuModel||'CPU').slice(0,26)} · 负载 ${(j.load1!=null?j.load1:0).toFixed(2)}</div></div></div>
       <div class="stat"><div class="s-icon" style="background:var(--success-light);color:var(--success)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 9h16M9 13h6"/></svg></div><div style="flex:1"><div class="s-v">${fmtKB(memUsed)} <span style="font-size:12px;color:var(--text3);font-weight:400">/ ${fmtKB(j.memTotalKB)}</span></div><div class="s-k">内存 ${memPct}%</div><div class="bar"><i style="width:${memPct}%;background:var(--success)"></i></div></div></div>
       <div class="stat"><div class="s-icon" style="background:var(--warning-light);color:var(--warning)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 2v10l7 5"/></svg></div><div><div class="s-v">${fmtUp(j.uptimeSeconds)}</div><div class="s-k">已运行 · 内核 ${esc(j.kernel||'')}</div></div></div>
-      <div class="stat"><div class="s-icon" style="background:var(--purple-light);color:var(--purple)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg></div><div><div class="s-v">${j.listeningPorts??'—'} <span style="font-size:12px;color:var(--text3);font-weight:400">/ ${j.publicPorts??'—'} 对外</span></div><div class="s-k">监听端口 / 公网暴露</div></div></div>`;
+      <div class="stat"><div class="s-icon" style="background:var(--purple-light);color:var(--purple)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg></div><div><div class="s-v">${j.listeningPorts!=null?j.listeningPorts:'—'} <span style="font-size:12px;color:var(--text3);font-weight:400">/ ${j.publicPorts!=null?j.publicPorts:'—'} 对外</span></div><div class="s-k">监听端口 / 公网暴露</div></div></div>`;
     document.getElementById('ov-disks').innerHTML = (j.disks||[]).map(d=>{
       const used = d.totalKB - d.availKB, pct = d.totalKB>0 ? (used/d.totalKB*100).toFixed(1) : '0';
       const color = pct>90?'var(--danger)':pct>75?'var(--warning)':'var(--primary)';
@@ -1369,17 +1374,19 @@ async function enterApp(){
   loadAccounts();
 }
 async function boot(){
-  let authed = false, configured = false, user = '';
-  try{
-    const st = await api('/api/auth/status');
-    authed = !!st.authed; configured = !!st.configured; user = st.user || '';
-  }catch(e){ authed = false; } // status 白名单不应失败；失败按未登录处理，避免误显示后台
-  if(!authed){ showLogin(configured); return; }
-  currentUser = user;
-  enterApp();
+  // 登录层在 HTML/CSS 中默认可见（fail-safe）：JS 未跑起来时用户至少看到登录框而非空白。
+  // boot 只需判断：已登录 → 隐藏登录层进入面板；未登录 → 登录层本来就在，仅刷新标题文案。
+  let st = null;
+  try{ st = await api('/api/auth/status'); }catch(e){} // status 白名单接口不应失败；失败按未登录处理
+  if(st && st.authed){
+    currentUser = st.user || '';
+    enterApp(); // 内部会隐藏登录层
+    return;
+  }
+  showLogin(!!(st && st.configured));
 }
 boot();
-let loginFirstShown = false;
+let loginFocused = false;
 function showLogin(configured){
   const mask = document.getElementById('login-mask');
   const wasHidden = mask.style.display !== 'flex';
@@ -1392,11 +1399,11 @@ function showLogin(configured){
     document.getElementById('login-pass').value = '';
   }
   mask.style.display = 'flex';
-  // 仅在【页面首次】弹出登录层时自动聚焦账户栏；之后（如会话过期重新弹层）绝不抢焦点，
+  // 只在【页面首次】弹出登录层时自动聚焦账户栏；之后（如会话过期重新弹层）绝不抢焦点，
   // 避免用户在密码栏输入时焦点被反复弹回账户栏。
-  if(!loginFirstShown){
-    loginFirstShown = true;
-    setTimeout(()=>{ const el=document.getElementById('login-user'); if(el && document.activeElement !== el) el.focus(); }, 50);
+  if(!loginFocused){
+    loginFocused = true;
+    setTimeout(function(){ const el=document.getElementById('login-user'); if(el && document.activeElement !== el) el.focus(); }, 50);
   }
 }
 function hideLogin(){ document.getElementById('login-mask').style.display = 'none'; }
@@ -1405,12 +1412,14 @@ async function doLogin(){
   const pass = document.getElementById('login-pass').value;
   const msg = document.getElementById('login-msg');
   if(!pass){ msg.textContent='请输入密码'; return; }
+  const btn = document.getElementById('login-btn');
+  if(btn) btn.disabled = true; // 防重复提交
   try{
-    const r = await fetch('/api/login', {method:'POST', cache:'no-store', headers:{'Content-Type':'application/json'}, body: JSON.stringify({user, pass})});
-    const j = await r.json();
-    if(j.ok){ currentUser = user || 'admin'; enterApp(); }
-    else { msg.textContent = j.error || '登录失败'; }
-  }catch(e){ msg.textContent = '网络错误'; }
+    await api('/api/login', {method:'POST', body: JSON.stringify({user: user, pass: pass})});
+    currentUser = user || 'admin';
+    enterApp();
+  }catch(e){ msg.textContent = e.message || '登录失败，请重试'; }
+  if(btn) btn.disabled = false;
 }
 // 登录表单元素在脚本块之后才解析，必须等 DOM 就绪再绑定，否则 getElementById 返回 null、监听器失效（点击登录无反应）。
 function bindLogin(){
@@ -1431,6 +1440,7 @@ async function doLogout(){
   if(typeof procsRefreshTimer !== 'undefined' && procsRefreshTimer){ clearInterval(procsRefreshTimer); procsRefreshTimer = null; }
   document.querySelector('.app').classList.remove('show');
   currentUser = '';
+  loginFocused = false; // 登出后允许重新自动聚焦账户栏
   showLogin(true);
 }
 /* ---------- 账户管理（列表 + 模态表单，风格对齐 DDNS 服务商/记录编辑） ---------- */
@@ -1545,7 +1555,7 @@ function delUser(u){
 }
 </script>
 <style>
-.login-mask{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:9999} /* 不透明背景：登录前完全遮住后台面板 */
+.login-mask{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:9999} /* 默认直接显示登录层（fail-safe）：即使旧内核下 JS 语法死亡，用户看到的也是登录框而非空白；登录成功后由 JS 置 display:none */
 .login-card{background:#fff;border-radius:12px;padding:30px 28px;width:320px;box-shadow:0 10px 40px rgba(0,0,0,.2)}
 .login-title{font-size:18px;font-weight:600;margin-bottom:4px}
 .login-sub{font-size:13px;color:var(--text3);margin-bottom:18px}
