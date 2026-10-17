@@ -1417,9 +1417,17 @@ async function doLogin(){
     else { msg.textContent = j.error || '登录失败'; }
   }catch(e){ msg.textContent = '网络错误'; }
 }
-document.getElementById('login-btn').addEventListener('click', doLogin);
-document.getElementById('login-pass').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
-document.getElementById('login-user').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+// 登录表单元素在脚本块之后才解析，必须等 DOM 就绪再绑定，否则 getElementById 返回 null、监听器失效（点击登录无反应）。
+function bindLogin(){
+  const btn = document.getElementById('login-btn');
+  const pass = document.getElementById('login-pass');
+  const user = document.getElementById('login-user');
+  if(btn) btn.addEventListener('click', doLogin);
+  if(pass) pass.addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+  if(user) user.addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+}
+if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindLogin);
+else bindLogin();
 async function doLogout(){
   try{ await fetch('/api/logout', {method:'POST', cache:'no-store'}); }catch(e){}
   location.reload();
