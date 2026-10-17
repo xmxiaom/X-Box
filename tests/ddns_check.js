@@ -15,7 +15,7 @@ global.localStorage = { getItem: () => null, setItem() {} };
 global.fetch = async (url) => ({
   ok: true, status: 200,
   json: async () => (String(url).includes('/api/ddns')
-    ? { ok: true, ifaces: ['enp3s0', 'enp4s0', 'wlan0'], providers: [{ id: 1, name: '测试阿里', type: 'alidns', cred: { accessKeyId: 'x' } }], records: [], providersAvail: [], intervalSec: 300 }
+    ? { ok: true, ifaces: [{ name: 'enp3s0', ipv4: '192.168.1.10', ipv6: '2408:8207::10' }, { name: 'enp4s0', ipv4: '10.0.0.2', ipv6: '' }, { name: 'wlan0', ipv4: '', ipv6: 'fe80::abc' }], providers: [{ id: 1, name: '测试阿里', type: 'alidns', cred: { accessKeyId: 'x' } }], records: [], providersAvail: [], intervalSec: 300 }
     : { ok: true, version: '1.2.19', hostname: 'FNNAS', os: 'fnOS', cpuModel: 'x', cpuCores: 4, kernel: 'x', net: {}, fnosVersion: '1.2.0800', stats: [], disks: [] }),
 });
 const stub = `
@@ -33,10 +33,21 @@ eval(stub + s + ';global.__ddns={get data(){return ddnsData},set data(v){ddnsDat
   console.log('测试按钮渲染:', /testProvider\(1,this\)/.test(th) ? 'OK' : 'FAIL');
   console.log('按钮文案[测试]:', /<button[^>]*>测试<\/button>/.test(th) ? 'OK' : 'FAIL');
   D.data.records = [];
+  // 场景1：记录类型 A（默认），来源=网卡地址 → 下拉显示 IPv4
+  el('rf-src').value = 'interface';
+  el('rf-rt').value = 'A';
   D.openRecordForm(null);
   const conf = global.__lastConfirm || '';
+  const wrapHTML = el('rf-arg-wrap').innerHTML;
   console.log('record form 弹窗:', conf.length > 0 ? 'OK' : 'FAIL');
   console.log('record form 网卡容器:', /rf-arg-wrap/.test(conf) ? 'OK' : 'FAIL');
-  console.log('record form 含网卡下拉说明:', /rf-src/.test(conf) && /IP 来源/.test(conf) ? 'OK（网卡下拉由 rf-src 切换时动态渲染）' : 'FAIL');
+  console.log('record form rf-src 含 IP 来源:', /rf-src/.test(conf) ? 'OK' : 'FAIL');
+  console.log('网卡名下拉渲染(A):', /enp3s0/.test(wrapHTML) ? 'OK' : 'FAIL');
+  console.log('A 记录显示 IPv4:', /192\.168\.1\.10/.test(wrapHTML) ? 'OK' : 'FAIL');
+  // 场景2：记录类型 AAAA → 同一下拉显示 IPv6
+  el('rf-rt').value = 'AAAA';
+  D.openRecordForm(null);
+  const wrapHTML6 = el('rf-arg-wrap').innerHTML;
+  console.log('AAAA 记录显示 IPv6:', /2408:8207::10/.test(wrapHTML6) ? 'OK' : 'FAIL');
   console.log('SMOKE-DDNS OK');
 })().catch(e => { console.error('FAIL:', e.message); process.exit(1); });

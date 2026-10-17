@@ -1232,7 +1232,7 @@ function openRecordForm(id){
     try{ await api('/api/ddns/record/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存记录','good'); loadDDNS(); }catch(e){ toast(e.message,'err'); }
   }, id?'保存':'添加');
   const argLabel = {auto:'',web:'查询 URL（返回纯文本 IP）',interface:'网卡名（下拉选择）',custom:'固定 IP 地址',dns:'要解析的域名'};
-  // IP 来源切换时重建附加参数字段：网卡地址源渲染为下拉选择（物理网卡列表），其余为输入框
+  // IP 来源切换时重建附加参数字段：网卡地址源渲染为下拉选择（物理网卡列表 + 对应 IP），其余为输入框
   function renderArgField(){
     const v = document.getElementById('rf-src').value;
     const wrap = document.getElementById('rf-arg-wrap');
@@ -1241,7 +1241,12 @@ function openRecordForm(id){
     wrap.style.display='block';
     if(v==='interface'){
       const cur = (r&&r.ipSourceArg)||'';
-      const opts = (ddnsIfaces||[]).map(n=>`<option value="${esc(n)}" ${n===cur?'selected':''}>${esc(n)}</option>`).join('');
+      const rt = document.getElementById('rf-rt') ? document.getElementById('rf-rt').value : 'A';
+      const opts = (ddnsIfaces||[]).map(f=>{
+        const ip = (rt==='AAAA') ? f.ipv6 : f.ipv4;
+        const text = ip ? `${f.name}（${ip}）` : f.name;
+        return `<option value="${esc(f.name)}" ${f.name===cur?'selected':''}>${esc(text)}</option>`;
+      }).join('');
       wrap.innerHTML = `<label id="rf-arg-label">${label}</label><select id="rf-arg">${opts||'<option value="">（未检测到网卡）</option>'}</select>`;
     }else{
       const cur = (r&&r.ipSourceArg)||'';
@@ -1249,6 +1254,9 @@ function openRecordForm(id){
     }
   }
   document.getElementById('rf-src').addEventListener('change', renderArgField);
+  // 记录类型（A/AAAA）变化时，若当前来源是网卡地址，刷新下拉以显示对应版本的 IP
+  const rtEl = document.getElementById('rf-rt');
+  if(rtEl){ rtEl.addEventListener('change', ()=>{ if(document.getElementById('rf-src').value==='interface') renderArgField(); }); }
   renderArgField();
 }
 async function delRecord(id){

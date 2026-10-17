@@ -258,22 +258,28 @@ func (s *Server) handleDDNSList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// physicalIfaces 物理网卡名列表（供 DDNS「网卡地址」IP 来源下拉选择）：
+// ifaceInfo 网卡信息（供 DDNS「网卡地址」IP 来源下拉展示名称与对应 IP）。
+type ifaceInfo struct {
+	Name  string `json:"name"`
+	IPv4  string `json:"ipv4"`
+	IPv6  string `json:"ipv6"`
+}
+
+// physicalIfaces 物理网卡（含 IPv4/IPv6）列表（供 DDNS「网卡地址」IP 来源下拉选择）：
 // 排除 lo、docker/veth/br- 等虚拟网卡，仅保留可用于公网访问的真实网卡。
-func physicalIfaces() []string {
-	var out []string
-	entries, _ := os.ReadDir("/sys/class/net")
-	for _, e := range entries {
-		n := e.Name()
-		if n == "lo" || strings.HasPrefix(n, "docker") || strings.HasPrefix(n, "veth") ||
-			strings.HasPrefix(n, "br-") || strings.HasPrefix(n, "virbr") || strings.HasPrefix(n, "tun") ||
-			strings.HasPrefix(n, "tap") {
+func physicalIfaces() []ifaceInfo {
+	var out []ifaceInfo
+	for _, n := range listNICs() {
+		name := n.Name
+		if name == "lo" || strings.HasPrefix(name, "docker") || strings.HasPrefix(name, "veth") ||
+			strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "virbr") || strings.HasPrefix(name, "tun") ||
+			strings.HasPrefix(name, "tap") {
 			continue
 		}
-		out = append(out, n)
+		out = append(out, ifaceInfo{Name: name, IPv4: n.IPv4, IPv6: n.IPv6})
 	}
 	if len(out) == 0 {
-		out = append(out, "eth0")
+		out = append(out, ifaceInfo{Name: "eth0", IPv4: "", IPv6: ""})
 	}
 	return out
 }
