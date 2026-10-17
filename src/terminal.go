@@ -46,6 +46,14 @@ func (s *Server) handleTerminalInfo(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"cwd": cwd})
 }
 
+// handleTerminalClose POST /api/terminal/close：断开会话，工作目录复位 /root。
+func (s *Server) handleTerminalClose(w http.ResponseWriter, r *http.Request) {
+	termRT.mu.Lock()
+	termRT.cwd = "/root"
+	termRT.mu.Unlock()
+	ok(w, map[string]any{"cwd": "/root"})
+}
+
 // handleTerminalExec 执行一条命令，返回合并输出与退出码；支持 cd 维持会话目录。
 func (s *Server) handleTerminalExec(w http.ResponseWriter, r *http.Request) {
 	var req struct {

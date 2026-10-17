@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.42"
+	version = "1.2.43"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -87,12 +87,17 @@ func main() {
 	mux.HandleFunc("POST /api/ddns/sync", srv.handleDDNSSync)
 	mux.HandleFunc("GET /api/terminal/info", srv.handleTerminalInfo)
 	mux.HandleFunc("POST /api/terminal/exec", srv.handleTerminalExec)
+	mux.HandleFunc("POST /api/terminal/close", srv.handleTerminalClose)
 	mux.HandleFunc("GET /api/nvme-sleep", handleNVMeSleepList)
 	mux.HandleFunc("POST /api/nvme-sleep", handleNVMeSleepSet)
 	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
 	mux.HandleFunc("POST /api/update/download", handleUpdateDownload)
 	mux.HandleFunc("GET /api/update/dirs", handleUpdateDirs)
+	mux.HandleFunc("GET /api/update/status", handleUpdateStatus)
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
+	// 浏览器代理走顶级路径 /b（fnOS 中转只拦 /api/*，页面导航路径畅通）
+	mux.HandleFunc("GET /b", srv.handleBrowserProxy)
+	mux.HandleFunc("POST /b", srv.handleBrowserProxy)
 	mux.HandleFunc("GET /", srv.handleIndex)
 
 	handler := formBridge(tunnelBridge(mux))

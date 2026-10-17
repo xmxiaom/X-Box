@@ -93,7 +93,42 @@ def get_long(url, timeout=180):
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
 
-# 10) 更新下载：经 GitHub API 资产端点（穿透 objects.githubusercontent.com 不可达）
+# 11) 终端断开：close 复位工作目录到 /root
+st, body = get(tunnel({"m": "POST", "p": "/api/terminal/close", "b": "{}"}))
+j = json.loads(body) if body else {}
+check("终端close复位目录", st == 200 and j.get("ok") and j.get("cwd") == "/root", body[:80])
+
+# 12) 下载状态端点（异步下载任务查询）
+st, body = get(tunnel({"m": "GET", "p": "/api/update/status"}))
+j = json.loads(body) if body else {}
+check("下载状态端点", st == 200 and j.get("ok") and "running" in j and "done" in j, body[:80])
+
+# 13) 浏览器代理 /b：本地起迷你 HTTP 服务，验证 HTML 重写与透传
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+PAGE = b'<html><head><title>t</title></head><body><a href="/next">n</a><a href="javascript:void(0)">j</a><img src="pic.png"></body></html>'
+class BH(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/page':
+            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers(); self.wfile.write(PAGE)
+        elif self.path == '/pic.png':
+            self.send_response(200); self.send_header('Content-Type', 'image/png'); self.end_headers(); self.wfile.write(b'PNGDATA')
+        elif self.path.startswith('/echo'):
+            self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.end_headers(); self.wfile.write(('QUERY:' + self.path).encode())
+        else:
+            self.send_response(404); self.end_headers()
+    def log_message(self, *a): pass
+bh = HTTPServer(('127.0.0.1', 8898), BH)
+threading.Thread(target=bh.serve_forever, daemon=True).start()
+
+st, body = get("http://127.0.0.1:8899/b?u=" + urllib.parse.quote("http://127.0.0.1:8898/page", safe=""))
+check("浏览器代理HTML重写", st == 200 and 'href="/b?u=' in body and 'src="/b?u=' in body and 'javascript:void(0)' in body, body[:200])
+st, body = get("http://127.0.0.1:8899/b?u=" + urllib.parse.quote("http://127.0.0.1:8898/pic.png", safe=""))
+check("浏览器代理透传", st == 200 and body == "PNGDATA", body[:40])
+st, body = get("http://127.0.0.1:8899/b?u=" + urllib.parse.quote("http://127.0.0.1:8898/echo", safe="") + "&k=v")
+check("浏览器代理表单参数透传", st == 200 and 'QUERY:/echo?k=v' in body, body[:80])  # u 之外字段应透传给目标
+
+# 14) 更新下载：异步任务 + 轮询状态（经 GitHub API 资产端点）
 try:
     rel = json.load(urllib.request.urlopen(urllib.request.Request(
         "https://api.github.com/repos/xmxiaom/X-Box/releases/latest",
@@ -103,11 +138,21 @@ except Exception as e:
     rel, asset = {}, None
     print("（GitHub 不可达，跳过更新下载实测）", e)
 if asset:
-    st, body = get_long(tunnel({"m": "POST", "p": "/api/update/download",
-                                "b": json.dumps({"url": "https://api.github.com/repos/xmxiaom/X-Box/releases/assets/%d" % asset["id"], "name": "X-Box-test.fpk"})}))
+    st, body = get(tunnel({"m": "POST", "p": "/api/update/download",
+                           "b": json.dumps({"url": "https://api.github.com/repos/xmxiaom/X-Box/releases/assets/%d" % asset["id"], "name": "X-Box-test.fpk"})}))
     j = json.loads(body) if body else {}
-    check("更新下载(API资产端点)", st == 200 and j.get("ok") and j.get("bytes", 0) > 1000000, body[:120])
-    # SSRF 防护：非 GitHub 地址必须拒绝
+    check("更新下载启动异步任务", st == 200 and j.get("ok") and j.get("started"), body[:120])
+    # 轮询状态直到完成（最长 180s）
+    done, last = False, {}
+    for _ in range(120):
+        time.sleep(1.5)
+        st, body = get(tunnel({"m": "GET", "p": "/api/update/status"}))
+        last = json.loads(body) if body else {}
+        if last.get("done") and not last.get("running"):
+            done = True
+            break
+    check("更新下载轮询完成", done and not last.get("error") and last.get("bytes", 0) > 1000000, json.dumps(last)[:150])
+    # SSRF 防护：非 GitHub 地址必须拒绝（立即返回，不启动任务）
     st, body = get(tunnel({"m": "POST", "p": "/api/update/download", "b": json.dumps({"url": "https://evil.example.com/x.fpk", "name": "x.fpk"})}))
     check("下载SSRF防护", st == 400 and "仅支持" in body, body[:80])
     # 检查更新：发布时间本地化 + 下载 URL 走 API 端点（仅在本地版本低于远程最新版时填充）

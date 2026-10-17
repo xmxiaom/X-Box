@@ -355,7 +355,50 @@ func handleUpdateFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, clean)
 }
 
-// handleUpdateDownload POST /api/update/download {url,name,dir}：下载 fpk 到指定目录并校验。
+// ---- 异步下载任务（同一时间仅一个）----
+// 客户端传输通道有 8-10s 超时（fnOS 中转环境下必须短超时防挂死），而 fpk 下载
+// 常耗时数十秒以上——同步下载必然「HTTP 0/TIMEOUT」（v1.2.17 之后下载全挂的
+// 根因）。改为后台任务 + 轮询：POST 立即返回，GET /api/update/status 查进度。
+var (
+	dlMu    sync.Mutex
+	dlRun   bool
+	dlDone  bool
+	dlErr   string
+	dlPath  string
+	dlName  string
+	dlPW    *progressWriter // 下载进度计数器（运行中非 nil）
+)
+
+// progressWriter 下载字节数计数（读取需持 dlMu）。
+type progressWriter struct{ n int64 }
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	p.n += int64(len(b))
+	return len(b), nil
+}
+
+// handleUpdateStatus GET /api/update/status：查询后台下载任务进度/结果。
+func handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	dlMu.Lock()
+	defer dlMu.Unlock()
+	st := map[string]any{"running": dlRun, "done": dlDone, "bytes": int64(0), "path": "", "name": ""}
+	if dlPW != nil {
+		st["bytes"] = dlPW.n
+	}
+	if dlErr != "" {
+		st["error"] = dlErr
+	}
+	if dlPath != "" {
+		st["path"] = dlPath
+	}
+	if dlName != "" {
+		st["name"] = dlName
+	}
+	ok(w, st)
+}
+
+// handleUpdateDownload POST /api/update/download {url,name,dir}：校验后启动后台
+// 下载任务并立即返回（进度经 /api/update/status 轮询）。
 // dir 为空时用默认目录；自定义目录必须已存在且非系统敏感目录。
 func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -384,8 +427,8 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	dir := req.Dir
 	if dir != "" {
-		d, ok := safeDownloadDir(dir)
-		if !ok {
+		d, okd := safeDownloadDir(dir)
+		if !okd {
 			fail(w, 400, "保存目录无效（必须已存在且不能是系统目录）")
 			return
 		}
@@ -395,10 +438,29 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	dst := filepath.Join(dir, name)
 
+	dlMu.Lock()
+	if dlRun {
+		dlMu.Unlock()
+		fail(w, 409, "已有下载任务进行中，请稍候（可稍后刷新状态）")
+		return
+	}
+	dlRun, dlDone, dlErr, dlPath, dlName, dlPW = true, false, "", "", name, &progressWriter{}
+	dlMu.Unlock()
+	go runDownload(req.URL, isAPI, dst)
+	ok(w, map[string]any{"started": true, "message": "已开始后台下载 " + name + "（可关闭此页，下载在 NAS 上继续）"})
+}
+
+// runDownload 执行后台下载（结果写回全局状态）。
+func runDownload(rawURL string, isAPI bool, dst string) {
+	setFail := func(msg string) {
+		dlMu.Lock()
+		dlRun, dlDone, dlErr = false, true, msg
+		dlMu.Unlock()
+	}
 	client := &http.Client{Timeout: 10 * time.Minute}
-	httpReq, err := http.NewRequest("GET", req.URL, nil)
+	httpReq, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
-		fail(w, 500, "下载失败："+err.Error())
+		setFail("下载失败：" + err.Error())
 		return
 	}
 	if isAPI {
@@ -406,38 +468,38 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		fail(w, 500, "下载失败："+err.Error())
+		setFail("下载失败：" + err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		fail(w, 500, fmt.Sprintf("下载失败（HTTP %d）", resp.StatusCode))
+		setFail(fmt.Sprintf("下载失败（HTTP %d）", resp.StatusCode))
 		return
 	}
 	f, err := os.Create(dst)
 	if err != nil {
-		fail(w, 500, "无法创建文件："+err.Error())
+		setFail("无法创建文件：" + err.Error())
 		return
 	}
-	n, err := io.Copy(f, io.LimitReader(resp.Body, 512<<20)) // 512MB 上限
+	n, cerr := io.Copy(io.MultiWriter(f, dlPW), io.LimitReader(resp.Body, 512<<20)) // 512MB 上限
 	f.Close()
-	if err != nil || n < 1024 {
+	dlMu.Lock()
+	dlPath = dst
+	dlMu.Unlock()
+	if cerr != nil || n < 1024 {
 		_ = os.Remove(dst)
-		fail(w, 500, "下载不完整")
+		setFail("下载不完整")
 		return
 	}
 	// 校验：fpk 是 zip 或 gzip 容器（fnpack 产物为 gzip）
 	if !isFpkFile(dst) {
 		_ = os.Remove(dst)
-		fail(w, 500, "下载的文件不是有效的 fpk（非 zip/gzip 格式）")
+		setFail("下载的文件不是有效的 fpk（非 zip/gzip 格式）")
 		return
 	}
-	ok(w, map[string]any{
-		"message": "已下载到 " + dst,
-		"path":    dst,
-		"bytes":   n,
-		"hint":    "请到飞牛 应用中心 → 手动安装 选择该文件完成覆盖安装（数据与配置保留）",
-	})
+	dlMu.Lock()
+	dlRun, dlDone, dlErr = false, true, ""
+	dlMu.Unlock()
 }
 
 // isAllDigits 判断字符串是否全为数字（资产 ID 校验）。

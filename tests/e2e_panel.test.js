@@ -47,6 +47,8 @@ function makeDom(opts) {
     if (u.includes('/api/update/check')) return jsonRes({ ok: true, update: {} });
     if (u === '/api/terminal/info') return jsonRes({ ok: true, cwd: '/root' });
     if (u === '/api/terminal/exec') return jsonRes({ ok: true, output: '', exitCode: 0, cwd: '/root' });
+    if (u === '/api/terminal/close') return jsonRes({ ok: true, cwd: '/root' });
+    if (u === '/api/update/status') return jsonRes({ ok: true, running: false, done: false, bytes: 0, path: '', name: '' });
     if (u === '/api/ddns') return jsonRes({ ok: true, intervalSec: 300, providers: [{ id: 1, name: '测试服务商', type: 'aliyun', cred: {} }], providersAvail: [{ type: 'aliyun', name: '阿里云' }], ifaces: [], records: [{ id: 3, enabled: !opts.ddnsRecDisabled, domain: 'x.com', providerId: 1, recordType: 'A', ipSource: 'auto', ttl: 600, lastStatus: 'pending' }] });
     return jsonRes({ ok: true });
   };
@@ -125,13 +127,28 @@ function makeDom(opts) {
   {
     const { doc, win } = makeDom();
     await sleep(150);
-    await win.loadTerminal(); // 经 fetch 桩填充 termCwd + 渲染提示符（验证终端面板已就位）
+    await win.termConnect(); // 经 fetch 桩填充 termCwd + 渲染提示符（验证终端连接链路）
     check(doc.getElementById('term-prompt').textContent.indexOf('root@xbox') === 0, 'C: 终端提示符未渲染: ' + doc.getElementById('term-prompt').textContent);
+    check(doc.getElementById('term-input').disabled === false && doc.getElementById('term-btn-conn').disabled === true, 'C: 终端连接后未启用输入');
+    await win.termDisconnect(); // 断开：复位 UI + 调 close 接口
+    check(doc.getElementById('term-input').disabled === true && doc.getElementById('term-btn-disc').disabled === true, 'C: 终端断开后输入未禁用');
+    check(doc.getElementById('term-out').textContent.indexOf('未连接') === 0, 'C: 断开后未显示未连接提示');
     await win.loadDDNS(); // 自然填充 ddnsData
     win.openRecordForm(3);
     check(doc.getElementById('rf-enabled').checked === true, 'C: DDNS 已启用记录回显异常');
     win.openRecordForm(999); // 不存在的 id → 新建 → 默认勾选
     check(doc.getElementById('rf-enabled').checked === true, 'C: DDNS 新建记录启用框默认异常');
+  }
+  {
+    // 浏览器：goBrowser 应把地址编码进 /b 同源代理 URL（补协议 + encodeURIComponent）
+    const { doc, win } = makeDom();
+    await sleep(100);
+    doc.getElementById('browser-url').value = '192.168.1.1';
+    win.goBrowser();
+    check(doc.getElementById('browser-frame').getAttribute('src') === '/b?u=http%3A%2F%2F192.168.1.1', 'C: 浏览器未走 /b 代理: ' + doc.getElementById('browser-frame').getAttribute('src'));
+    doc.getElementById('browser-url').value = 'https://example.com/a?b=1';
+    win.goBrowser();
+    check(doc.getElementById('browser-frame').getAttribute('src') === '/b?u=' + encodeURIComponent('https://example.com/a?b=1'), 'C: 已带协议地址编码异常');
   }
   {
     // 停用回显：桩返回 enabled=false 的记录

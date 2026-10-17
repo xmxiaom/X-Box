@@ -401,7 +401,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 
       <!-- 浏览器 -->
       <div class="page" id="page-browser">
-        <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub">内嵌 iframe 直连（部分站点禁止内嵌；fnOS 远程客户端内可能受限，建议局域网直连或新窗口打开）</span><div class="spacer"></div></div>
+        <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub">经本机代理加载（可打开禁止内嵌与 HTTP 站点；动态脚本页面可能显示不全）</span><div class="spacer"></div></div>
         <div class="browser-bar">
           <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
           <button class="btn btn-primary btn-sm" onclick="goBrowser()">前往</button>
@@ -414,12 +414,12 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 
       <!-- 终端 -->
       <div class="page" id="page-terminal">
-        <div class="page-head"><h2>终端</h2><span class="sub" id="term-sub">命令执行控制台（保持 cd 会话目录；以 root 运行）</span><div class="spacer"></div><button class="btn btn-outline btn-sm" onclick="termClear()">清屏</button></div>
+        <div class="page-head"><h2>终端</h2><span class="sub" id="term-sub">命令执行控制台（保持 cd 会话目录；以 root 运行）</span><div class="spacer"></div><button class="btn btn-primary btn-sm" id="term-btn-conn" onclick="termConnect()">连接</button><button class="btn btn-outline btn-sm" id="term-btn-disc" onclick="termDisconnect()" disabled>断开</button><button class="btn btn-outline btn-sm" onclick="termClear()">清屏</button></div>
         <div class="term-warn">⚠️ 此终端以 <b>root</b> 身份在 NAS 上执行任意命令，仅经飞牛账号可访问。请谨慎操作。</div>
-        <div class="term-out" id="term-out"></div>
+        <div class="term-out" id="term-out">未连接 · 点击「连接」开始终端会话</div>
         <div class="term-input-row">
           <span class="term-prompt" id="term-prompt">root@xbox:~$</span>
-          <input type="text" id="term-input" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter') termExec()">
+          <input type="text" id="term-input" autocomplete="off" spellcheck="false" disabled onkeydown="if(event.key==='Enter') termExec()">
         </div>
       </div>
 
@@ -482,8 +482,9 @@ async function api(path, opts) {
   const url = apiTunnel(path, opts);
   // 通道回退只看「传输失败」（超时/网络错误，err.transport=true）；
   // 应用错误（服务端有响应：密码错误/参数错误等）直接抛出，绝不降级通道
+  // opts.timeoutMs：按调用覆盖传输超时（长耗时操作用，如终端 exec 35s）
   if(apiChannel === 'xhr'){
-    try{ return await xhrApi(url, 'GET', 10000); }
+    try{ return await xhrApi(url, 'GET', opts.timeoutMs || 10000); }
     catch(e){ if(e.transport) switchChannel('fetch'); else throw e; }
   }
   if(apiChannel === 'fetch'){
@@ -491,9 +492,9 @@ async function api(path, opts) {
     try{
       r = await Promise.race([
         fetch(url, {cache:'no-store'}),
-        new Promise((_, rej) => { const e = new Error('TIMEOUT'); e.transport = true; setTimeout(() => rej(e), 8000); })
+        new Promise((_, rej) => { const e = new Error('TIMEOUT'); e.transport = true; setTimeout(() => rej(e), opts.timeoutMs || 8000); })
       ]);
-    }catch(e){ e.transport = true; switchChannel('nav'); return navApi(path, opts); }
+    }catch(e){ e.transport = true; switchChannel('nav'); return navApi(path, opts, opts.timeoutMs); }
     if(!r.ok){
       let msg = '请求失败（HTTP ' + r.status + '）';
       try{ const j = await r.json(); if(j && j.error) msg = j.error; }catch(e){}
@@ -503,7 +504,7 @@ async function api(path, opts) {
     if(!j.ok) throw new Error(j.error || '请求失败');
     return j;
   }
-  return navApi(path, opts);
+  return navApi(path, opts, opts.timeoutMs);
 }
 // XHR 通道（ES2017 主脚本用）：10 秒超时；err.transport 标记传输失败（供通道回退判断）
 function xhrApi(url, method, timeoutMs){
@@ -612,7 +613,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, browser:()=>{}, terminal:loadTerminal, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, browser:()=>{}, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -1055,26 +1056,54 @@ async function downloadUpdate(url, name){
 async function doDownloadUpdate(url, name, dir, toPC){
   toPC = !!toPC;
   const btn = document.getElementById('btn-upd-dl');
-  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> '+(toPC?'下载并转存中…':'下载中…'); }
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 开始下载…'; }
   // 清除上次的失败块
   const oldErr = document.getElementById('upd-err'); if(oldErr) oldErr.remove();
   try{
-    const j = await api('/api/update/download',{method:'POST',body:JSON.stringify({url, name, dir})});
-    toast(j.message||'已下载','good');
-    const fileLink = j.path ? '/api/update/file?path='+encodeURIComponent(j.path) : '';
-    let extra = '';
-    if(toPC && fileLink){
-      // 同源 attachment：触发本机下载（浏览器/APP 保存到设备）
-      const a = document.createElement('a');
-      a.href = fileLink; a.download = name; document.body.appendChild(a); a.click(); a.remove();
-      extra = `<br>已触发转存到本机（如未开始，<a href="${esc(fileLink)}" style="color:var(--primary)">点此下载到电脑</a>）。`;
-    }
-    document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" style="margin-top:10px">📦 文件位置：${fileLink?`<a href="${esc(fileLink)}" class="mono" style="color:var(--primary)">${esc(j.path||'')}</a>`:`<span class="mono">${esc(j.path||'')}</span>`}<br>安装：飞牛 应用中心 → 手动安装 → 选择上述 fpk（覆盖安装，配置保留）${extra}</div>`);
+    // 异步任务：POST 立即返回，进度经 /api/update/status 轮询
+    //（NAS 下载 fpk 常超 10s，同步等待必被 8-10s 传输超时杀掉——v1.2.17 后下载全挂的根因）
+    await api('/api/update/download',{method:'POST',body:JSON.stringify({url, name, dir})});
   }catch(e){
-    // 失败原因持久显示（不再只靠一闪而过的 toast），带重试按钮
-    document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" id="upd-err" style="margin-top:10px;background:var(--danger-light);border-color:#FDCDC5;color:#7A1F0A">❌ 下载失败：${esc(e.message)}<br><span style="font-size:12px">常见原因：NAS 无法直达 github.com（检查 DNS/外网）、所选目录不存在或不可写、Release 资源尚未上传完成。可重试或改用「下载到电脑」（经 NAS 中转）。</span><br><button class="btn btn-outline btn-sm" style="margin-top:6px" onclick="downloadUpdate('${esc(url)}','${esc(name)}')">重试</button></div>`);
+    showDownloadError(url, name, e.message);
+    if(btn){ btn.disabled = false; btn.innerHTML = '⬇️ 下载更新（'+name+'）'; }
+    return;
+  }
+  pollDownload(url, name, toPC, 0);
+}
+// pollDownload 轮询后台下载状态；transFail 为连续传输失败计数（状态查询本身也可能超时）
+async function pollDownload(url, name, toPC, transFail){
+  const btn = document.getElementById('btn-upd-dl');
+  try{
+    const j = await api('/api/update/status');
+    if(j.running){
+      if(btn) btn.innerHTML = '<span class="spin"></span> 下载中… '+fmtB(j.bytes||0);
+      setTimeout(()=>pollDownload(url, name, toPC, 0), 1500);
+      return;
+    }
+    if(j.done && !j.error){
+      const fileLink = j.path ? '/api/update/file?path='+encodeURIComponent(j.path) : '';
+      let extra = '';
+      if(toPC && fileLink){
+        // 同源 attachment：触发本机下载（浏览器/APP 保存到设备）
+        const a = document.createElement('a');
+        a.href = fileLink; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+        extra = `<br>已触发转存到本机（如未开始，<a href="${esc(fileLink)}" style="color:var(--primary)">点此下载到电脑</a>）。`;
+      }
+      document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" style="margin-top:10px">📦 下载完成（${fmtB(j.bytes||0)}）。文件位置：${fileLink?`<a href="${esc(fileLink)}" class="mono" style="color:var(--primary)">${esc(j.path||'')}</a>`:`<span class="mono">${esc(j.path||'')}</span>`}<br>安装：飞牛 应用中心 → 手动安装 → 选择上述 fpk（覆盖安装，配置保留）${extra}</div>`);
+      toast('下载完成','good');
+    }else{
+      showDownloadError(url, name, j.error || '下载失败');
+    }
+  }catch(e){
+    // 状态查询传输失败：重试最多 5 次，避免网络抖动误报
+    if(transFail < 5){ setTimeout(()=>pollDownload(url, name, toPC, transFail+1), 2000); return; }
+    showDownloadError(url, name, '查询下载状态失败：'+(e.message||e));
   }
   if(btn){ btn.disabled = false; btn.innerHTML = '⬇️ 下载更新（'+name+'）'; }
+}
+function showDownloadError(url, name, msg){
+  // 失败原因持久显示（不再只靠一闪而过的 toast），带重试按钮
+  document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" id="upd-err" style="margin-top:10px;background:var(--danger-light);border-color:#FDCDC5;color:#7A1F0A">❌ 下载失败：${esc(msg)}<br><span style="font-size:12px">常见原因：NAS 无法直达 github.com（检查 DNS/外网）、所选目录不存在或不可写、Release 资源尚未上传完成。可重试或改用「下载到电脑」（经 NAS 中转）。</span><br><button class="btn btn-outline btn-sm" style="margin-top:6px" onclick="downloadUpdate('${esc(url)}','${esc(name)}')">重试</button></div>`);
 }
 
 /* ---------- 进程服务（风格对齐飞牛资源监控） ---------- */
@@ -1410,30 +1439,48 @@ async function pollDDNSSync(id){
   }
 }
 
-/* ---------- 浏览器（内嵌 iframe 直连） ---------- */
+/* ---------- 浏览器（经后端 /b 同源代理加载） ---------- */
 function goBrowser(){
   let u = (document.getElementById('browser-url').value||'').trim();
   if(!u) return;
   if(!/^https?:\/\//i.test(u)) u = 'http://'+u;
-  document.getElementById('browser-frame').src = u;
-  document.getElementById('browser-sub').textContent = u;
+  // 经服务端 /b 代理：同源响应绕过目标站 X-Frame-Options 与 https→http 混合内容拦截
+  document.getElementById('browser-frame').src = '/b?u='+encodeURIComponent(u);
+  document.getElementById('browser-sub').textContent = '经本机代理：'+u;
 }
 function browserOpenNew(){
   const u = document.getElementById('browser-frame').src;
   if(u) window.open(u, '_blank');
 }
 
-/* ---------- 终端（命令执行控制台） ---------- */
+/* ---------- 终端（命令执行控制台，显式连接/断开会话） ---------- */
 let termCwd = '';
-async function loadTerminal(){
+let termConnected = false;
+function termSetConn(on){
+  termConnected = on;
+  document.getElementById('term-btn-conn').disabled = on;
+  document.getElementById('term-btn-disc').disabled = !on;
+  document.getElementById('term-input').disabled = !on;
+  if(!on){
+    document.getElementById('term-out').textContent = '未连接 · 点击「连接」开始终端会话\n';
+    termCwd = '/root';
+    updateTermPrompt();
+  }
+}
+async function termConnect(){
   try{
     const j = await api('/api/terminal/info');
-    termCwd = j.cwd || '/';
+    termCwd = j.cwd || '/root';
     updateTermPrompt();
     const o = document.getElementById('term-out');
     o.textContent = '已连接终端 · 当前目录 '+termCwd+'\n';
     o.scrollTop = o.scrollHeight;
+    termSetConn(true);
   }catch(e){ toast(e.message, 'err'); }
+}
+async function termDisconnect(){
+  try{ await api('/api/terminal/close', {method:'POST', body:'{}'}); }catch(e){}
+  termSetConn(false);
 }
 function updateTermPrompt(){
   const base = termCwd === '/root' ? '~' : termCwd;
@@ -1445,13 +1492,16 @@ function termAppend(s){
   o.scrollTop = o.scrollHeight;
 }
 async function termExec(){
+  if(!termConnected) return;
   const inp = document.getElementById('term-input');
   const cmd = inp.value;
   if(cmd.trim() === ''){ termAppend('\n'); return; }
   termAppend(document.getElementById('term-prompt').textContent+' '+cmd+'\n');
   inp.value = '';
   try{
-    const j = await api('/api/terminal/exec', {method:'POST', body:JSON.stringify({cmd})});
+    // 客户端超时放宽到 35s：服务端命令上限 30s，避免长命令被 8-10s 传输超时误杀
+    //（telnet 等挂住型命令仍会在 30s 被服务端超时终止并回显提示）
+    const j = await api('/api/terminal/exec', {method:'POST', body:JSON.stringify({cmd}), timeoutMs:35000});
     termCwd = j.cwd || termCwd;
     updateTermPrompt();
     let out = j.output || '';
