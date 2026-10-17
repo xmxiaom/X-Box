@@ -1,0 +1,21 @@
+v1.2.49：页面脚本错误上报 + 复制诊断降级 + style 内 url() 动态改写
+
+复制失败（用户反馈）：面板常嵌在 fnOS 客户端的 iframe 内，浏览器不授予
+clipboard-write 权限，navigator.clipboard 与 document.execCommand 都会失败。
+改为：优先尝试系统剪贴板，失败则展示一只读文本框并自动 focus+select，
+提示按 Ctrl+C 带走（零权限依赖，任何嵌套环境可用）。复制内容同时包含
+页面脚本错误与全部代理请求记录。
+
+登录按钮等不渲染（用户反馈"能显示一部分，登录按钮不显示"）：
+- 新增页面脚本错误上报：注入脚本最先安装 window.onerror，经 postMessage 上报
+  父窗口，诊断面板顶部与 toast 展示"页面脚本错误：xxx（第 N 行）"。
+  页面 JS 崩溃（如跨源访问抛 SecurityError）会导致表单等后续渲染中断，
+  有了错误行号可直接定位，无需猜
+- 复制诊断信息时把脚本错误一并带出，便于反馈
+
+图片/地图解析继续增强：
+- style 属性内的 url() 动态改写：JS 设置背景图（element.style.background）时
+  走的是 style 属性，MutationObserver 的 attributeFilter 原先不含 style。
+  已加入 style 监听并对 url() 做代理化重写
+
+- 三层测试全绿

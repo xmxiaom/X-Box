@@ -675,6 +675,9 @@ func browserPatchScript(tu *url.URL) string {
 	hostLit := `"` + tu.Hostname() + `"`
 	originLit := `"` + tu.Scheme + "://" + tu.Host + `"`
 	s := `<script>(function(){try{` +
+		// 脚本错误上报（最先安装）：页面 JS 崩溃（如跨源访问抛 SecurityError 导致
+		// 登录表单等后续渲染中断）时，面板能直接看到错误位置
+		`window.onerror=function(m,s,l){try{parent.postMessage({__xbox:1,type:"jserr",url:location.href,msg:String(m).slice(0,200),line:l},"*");}catch(e){}return false;};` +
 		`var P="/b/",H=` + hostLit + `,O=` + originLit + `;` +
 		// px: 任意 URL → 代理路径（相对/非 http 原样）
 		`function px(u){try{if(typeof u!=="string")return u;var s=u.replace(/^\s+|\s+$/g,"");if(!s)return u;` +
@@ -717,13 +720,17 @@ func browserPatchScript(tu *url.URL) string {
 		`var ATTR=["href","src","action","poster","srcset","formaction","data-src","data-href"];` +
 		`function sx(v){var ps=String(v).split(","),o=[];for(var i=0;i<ps.length;i++){var t=ps[i].replace(/^\s+|\s+$/g,"");var sp=t.split(/\s+/);if(sp.length){sp[0]=px(sp[0]);o.push(sp.join(" "));}else{o.push(t);}}return o.join(",");}` +
 		`function fixEl(n){if(!n||n.nodeType!==1||!n.getAttribute)return;` +
+		// style 属性里的绝对 url() 也要改写（JS 设置的背景图/装饰图走这里）
+		`try{if(n.hasAttribute("style")){var sv=n.getAttribute("style");` +
+		`var s2=sv.replace(/url\(\s*(['"]?)([^)'"]+)\1\s*\)/g,function(m,q,u){return "url("+q+px(u)+q+")";});` +
+		`if(s2!==sv){n.setAttribute("style",s2);}}}catch(e){}` +
 		`for(var i=0;i<ATTR.length;i++){var a=ATTR[i];if(!n.hasAttribute(a))continue;var v=n.getAttribute(a);if(!v)continue;` +
 		`var nv=(a==="srcset")?sx(v):px(v);if(nv!==v){try{n.setAttribute(a,nv);}catch(e){}}}}` +
 		`function scan(root){if(!root||!root.querySelectorAll)return;try{var ns=root.querySelectorAll("a[href],img[src],script[src],link[href],form[action],iframe[src],frame[src],source[src],video[poster],area[href],input[formaction],button[formaction],embed[src],object[data],track[src]");` +
 		`for(var i=0;i<ns.length;i++){fixEl(ns[i]);}}catch(e){}}` +
 		`try{new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var m=ms[i];` +
 		`if(m.type==="attributes"){fixEl(m.target);}else if(m.addedNodes){for(var j=0;j<m.addedNodes.length;j++){fixEl(m.addedNodes[j]);scan(m.addedNodes[j]);}}}}` +
-		`).observe(document.documentElement||document,{childList:true,subtree:true,attributes:true,attributeFilter:ATTR});}catch(e){}` +
+		`).observe(document.documentElement||document,{childList:true,subtree:true,attributes:true,attributeFilter:ATTR.concat(["style"])});}catch(e){}` +
 		`try{scan(document);}catch(e){}` +
 		`document.addEventListener("DOMContentLoaded",function(){try{scan(document);}catch(e){}},false);` +
 		`window.addEventListener("load",function(){try{scan(document);}catch(e){}},false);` +
