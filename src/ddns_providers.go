@@ -1,6 +1,6 @@
 package main
 
-// DDNS 服务商实现：DuckDNS / 花生壳 / Cloudflare / NameCheap / NameSilo（简单协议）
+// DDNS 服务商实现：DuckDNS / 花生壳 / Cloudflare / NameCheap / NameSilo / DNSPod Token（简单协议）
 // 签名家（阿里云/腾讯云/华为云/百度云）见 ddns_signed.go。
 
 import (
@@ -34,6 +34,8 @@ func newDNSProvider(t string, cred map[string]string) (dnsProvider, error) {
 		return &aliDDNS{b}, nil
 	case "tencentcloud":
 		return &tcDDNS{b}, nil
+	case "dnspod":
+		return &dnspodDDNS{b}, nil
 	case "huaweicloud":
 		return &hwDDNS{b}, nil
 	case "baiducloud":
@@ -47,10 +49,141 @@ type providerBase struct{ cred map[string]string }
 
 func (p *providerBase) c(k string) string { return p.cred[k] }
 
+// ============ DNSPod Token（旧版 dnsapi.cn，login_token=id,token） ============
+
+type dnspodDDNS struct{ providerBase }
+
+func (d *dnspodDDNS) ensure(domain, sub, rt, ip string, ttl int) error {
+	id := d.c("id")
+	token := d.c("token")
+	if id == "" || token == "" {
+		return fmt.Errorf("缺少 Token ID / Token")
+	}
+	recs, err := d.describe(domain, sub, rt)
+	if err != nil {
+		return err
+	}
+	var recID string
+	for _, r := range recs {
+		if r.Value == ip {
+			return nil // 已是最新
+		}
+		recID = r.ID
+	}
+	if recID != "" {
+		return d.modify(id, token, recID, domain, sub, rt, ip, ttl)
+	}
+	return d.create(id, token, domain, sub, rt, ip, ttl)
+}
+
+type dnspodRecord struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+func (d *dnspodDDNS) describe(domain, sub, rt string) ([]dnspodRecord, error) {
+	body, err := d.post("Record.List", domain, sub, rt, "", 0)
+	if err != nil {
+		return nil, err
+	}
+	var j struct {
+		Status struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"status"`
+		Records []dnspodRecord `json:"records"`
+	}
+	if err := jsonUnmarshal(body, &j); err != nil {
+		return nil, fmt.Errorf("DNSPod 响应解析失败: %s", string(body))
+	}
+	if j.Status.Code != "1" {
+		return nil, fmt.Errorf("DNSPod 错误 %s: %s", j.Status.Code, j.Status.Message)
+	}
+	var out []dnspodRecord
+	for _, r := range j.Records {
+		if r.Name == sub && r.Type == rt {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (d *dnspodDDNS) create(id, token, domain, sub, rt, ip string, ttl int) error {
+	_, err := d.postWithCreds(id, token, "Record.Create", domain, sub, rt, ip, ttl)
+	return err
+}
+
+func (d *dnspodDDNS) modify(id, token, recID, domain, sub, rt, ip string, ttl int) error {
+	_, err := d.postWithCredsAndID(id, token, "Record.Modify", domain, sub, rt, ip, ttl, recID)
+	return err
+}
+
+func (d *dnspodDDNS) post(action, domain, sub, rt, ip string, ttl int) ([]byte, error) {
+	id := d.c("id")
+	token := d.c("token")
+	return d.postWithCreds(id, token, action, domain, sub, rt, ip, ttl)
+}
+
+func (d *dnspodDDNS) postWithCreds(id, token, action, domain, sub, rt, ip string, ttl int) ([]byte, error) {
+	return d.postWithCredsAndID(id, token, action, domain, sub, rt, ip, ttl, "")
+}
+
+func (d *dnspodDDNS) postWithCredsAndID(id, token, action, domain, sub, rt, ip string, ttl int, recID string) ([]byte, error) {
+	if id == "" || token == "" {
+		return nil, fmt.Errorf("缺少 Token ID / Token")
+	}
+	values := url.Values{}
+	values.Set("login_token", id+","+token)
+	values.Set("format", "json")
+	values.Set("domain", domain)
+	if sub != "" && sub != "@" {
+		values.Set("sub_domain", sub)
+	}
+	if rt != "" {
+		values.Set("record_type", rt)
+	}
+	if action == "Record.Create" || action == "Record.Modify" {
+		values.Set("record_line", "默认")
+		values.Set("value", ip)
+		if ttl > 0 {
+			values.Set("ttl", fmt.Sprintf("%d", ttl))
+		}
+	}
+	if recID != "" {
+		values.Set("record_id", recID)
+	}
+	req, _ := http.NewRequest(http.MethodPost, "https://dnsapi.cn/"+action, strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "X-Box/"+version+" (xiaom@fnos)")
+	resp, err := defaultHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := readAllLimit(resp.Body, 1<<20)
+	var j struct {
+		Status struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"status"`
+	}
+	_ = jsonUnmarshal(b, &j)
+	if j.Status.Code != "" && j.Status.Code != "1" {
+		return b, fmt.Errorf("DNSPod 错误 %s: %s", j.Status.Code, j.Status.Message)
+	}
+	if resp.StatusCode >= 300 {
+		return b, fmt.Errorf("DNSPod HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return b, nil
+}
+
 func availableProviders() []map[string]string {
 	return []map[string]string{
 		{"type": "alidns", "name": "阿里云解析"},
-		{"type": "tencentcloud", "name": "腾讯云 DNSPod"},
+		{"type": "tencentcloud", "name": "腾讯云"},
+		{"type": "dnspod", "name": "DNSPod"},
 		{"type": "huaweicloud", "name": "华为云"},
 		{"type": "cloudflare", "name": "Cloudflare"},
 		{"type": "baiducloud", "name": "百度云"},

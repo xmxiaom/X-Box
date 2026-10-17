@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -79,6 +80,34 @@ func testDNSProvider(t string, cred map[string]string) error {
 				return fmt.Errorf("凭据无效（%s：%s）", code, j.Response.Error.Message)
 			}
 			return nil
+		}
+		return nil
+
+	case "dnspod":
+		if err := credMissing(cred, "id", "token"); err != nil {
+			return err
+		}
+		values := url.Values{}
+		values.Set("login_token", cred["id"]+","+cred["token"])
+		values.Set("format", "json")
+		req, _ := http.NewRequest(http.MethodPost, "https://dnsapi.cn/Domain.List", strings.NewReader(values.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("User-Agent", "X-Box/"+version+" (xiaom@fnos)")
+		resp, err := defaultHTTPClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("无法连接 DNSPod API：%v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := readAllLimit(resp.Body, 1<<20)
+		var j struct {
+			Status struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"status"`
+		}
+		_ = jsonUnmarshal(body, &j)
+		if j.Status.Code != "" && j.Status.Code != "1" {
+			return fmt.Errorf("DNSPod 返回错误 %s：%s", j.Status.Code, j.Status.Message)
 		}
 		return nil
 
