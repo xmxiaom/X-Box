@@ -1,4 +1,4 @@
-# X-Box 隧道验证（WSL python3 运行）：python3 tests/tunnel_test.py
+# X-Box 隧道验证（无登录态，WSL python3 运行）：python3 tests/tunnel_test.py
 import base64, json, urllib.request, urllib.parse, subprocess, time, os, tempfile, sys
 
 BIN = "/mnt/e/软件/开发/WorkBuddy/飞牛应用/x-box/pkg/app/server/xbox-amd64"
@@ -28,46 +28,49 @@ def check(name, cond, detail=""):
     print(("PASS" if cond else "FAIL"), name, str(detail)[:120])
     if not cond: ok = False
 
-# 1) 隧道登录（GET /?__x= 承载 POST /api/login）
-st, body = get(tunnel({"m": "POST", "p": "/api/login", "b": json.dumps({"user": "admin", "pass": "admin"})}))
-j = json.loads(body) if body else {}
-check("隧道登录(返sid)", st == 200 and j.get("ok") and j.get("sid"), body)
-sid = j.get("sid", "")
-
-# 2) 隧道 GET overview（payload 带 sid）
-st, body = get(tunnel({"m": "GET", "p": "/api/overview", "sid": sid}))
-j = json.loads(body) if body else {}
-check("隧道GET(带sid)", st == 200 and j.get("ok") and j.get("version"), body)
-
-# 3) 隧道 POST adduser（带 sid）
-st, body = get(tunnel({"m": "POST", "p": "/api/auth/adduser", "b": json.dumps({"user": "bob", "pass": "pw"}), "sid": sid}))
-check("隧道POST业务(带sid)", st == 200 and json.loads(body).get("ok"), body)
-
-# 4) 隧道错误密码
-st, body = get(tunnel({"m": "POST", "p": "/api/login", "b": json.dumps({"user": "admin", "pass": "bad"})}))
-check("隧道错误密码", st == 401 and "账户或密码错误" in body, body)
-
-# 5) 无 sid 的隧道 GET → 401
+# 1) 隧道 GET overview（无登录态，无任何凭据）：应 200 + version
 st, body = get(tunnel({"m": "GET", "p": "/api/overview"}))
-check("隧道无sid=401", st == 401 and json.loads(body).get("needLogin"), body)
+j = json.loads(body) if body else {}
+check("隧道GET(无凭据)", st == 200 and j.get("ok") and j.get("version"), body)
 
-# 6) 无效隧道 → 回落 HTML
+# 2) 隧道 POST 业务接口（空载荷触发应用错误，验证传输与分发）
+st, body = get(tunnel({"m": "POST", "p": "/api/proxy/save", "b": json.dumps({})}))
+check("隧道POST业务", st in (200, 400) and ("ok" in body or "error" in body), body)
+
+# 3) 隧道 POST 带真实载荷（DDNS provider save，合法结构）
+st, body = get(tunnel({"m": "POST", "p": "/api/ddns/provider/save", "b": json.dumps({"name": "测试", "type": "aliyun", "cred": {}})}))
+check("隧道POST真实载荷", st in (200, 400) and ("ok" in body or "error" in body), body)
+
+# 4) 无效隧道 → 回落 HTML
 st, body = get("http://127.0.0.1:8899/?__x=@@@bad@@@")
 check("无效隧道回落HTML", st == 200 and "<html" in body, body[:40])
 
-# 7) 隧道指向非 /api → 回落 HTML
+# 5) 隧道指向非 /api → 回落 HTML
 st, body = get(tunnel({"m": "GET", "p": "/"}))
 check("非API路径回落HTML", st == 200 and "<html" in body, body[:40])
 
-# 8) 回归：直连 /api/login
-req = urllib.request.Request("http://127.0.0.1:8899/api/login", data=json.dumps({"user":"admin","pass":"admin"}).encode(), headers={"Content-Type":"application/json"})
-with urllib.request.urlopen(req, timeout=5) as r:
-    j = json.loads(r.read().decode())
-check("直连登录回归", j.get("ok") and j.get("sid"), "")
+# 6) 回归：直连 /api/overview（无凭据）
+st, body = get("http://127.0.0.1:8899/api/overview")
+check("直连GET回归", st == 200 and json.loads(body).get("ok"), body[:60])
 
-# 9) 中文载荷隧道（DDNS 保存场景）
-st, body = get(tunnel({"m": "POST", "p": "/api/ddns/provider/save", "b": json.dumps({"name": "中文名称", "type": "aliyun"}), "sid": sid}))
+# 7) 中文载荷
+st, body = get(tunnel({"m": "POST", "p": "/api/ddns/provider/save", "b": json.dumps({"name": "中文名称", "type": "aliyun"})}))
 check("中文载荷隧道", st in (200, 400) and ("ok" in body or "error" in body), body)
+
+# 8) 登录端点应已移除（404/405 均算已移除）
+try:
+    req = urllib.request.Request("http://127.0.0.1:8899/api/login", data=b"{}", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        st = r.status
+except urllib.error.HTTPError as e:
+    st = e.code
+check("登录端点已移除(404/405)", st in (404, 405), "status=%s" % st)
+
+# 9) 仅监听回环验证：ss 查监听地址必须是 127.0.0.1，不得是 0.0.0.0/*（含 IPv6）
+ss = subprocess.run(["ss", "-tln"], capture_output=True, text=True).stdout
+lines = [l for l in ss.splitlines() if ":8899" in l]
+listen_ok = bool(lines) and all(("127.0.0.1:8899" in l) for l in lines)
+check("仅监听127.0.0.1回环", listen_ok, " | ".join(lines))
 
 srv.kill(); os.remove(TMPBIN)
 print("TUNNEL", "ALL PASS" if ok else "HAS FAILURES")

@@ -10,9 +10,10 @@
 //   2. 只删普通文件：跳过符号链接、socket、设备、目录，绝不递归删目录树；
 //   3. 每个分类有最小文件年龄阈值，扫描与清理两阶段都各自复核。
 //
-// 注意：面板默认监听 :8899（所有接口，含 IPv6），以便通过 DDNS 域名从外部访问；已内置登录保护
-// （多账户 + 10 分钟空闲超时 + 防暴力破解）。对外开放仍意味着可达者经登录后可操作 NAS，
-// 请在路由器/光猫仅放行可信来源，并登录后及时修改默认账户密码。
+// 访问控制（面板暴露面）：面板仅监听 127.0.0.1:8899（本机回环，不绑定任何
+// 对外网卡）——局域网/公网无法直连面板；唯一入口是 fnOS 自身的远程访问体系
+// （fnos.net 域名/PC 客户端/手机 App，均需飞牛账号登录），由 fnOS 代验身份后
+// 从本机回环转发进来。请勿为了外网直连而修改此绑定。
 package main
 
 import (
@@ -35,10 +36,10 @@ import (
 var indexHTML []byte
 
 const (
-	version    = "1.2.37"
-	// 监听所有接口（含 IPv6）：允许通过 DDNS 域名（如 your-domain.example.com:8899）从外部访问面板。
-	// 已配合 auth.go 的登录保护（多账户 + 10 分钟空闲超时）；请仅在路由器/光猫放行可信来源。
-	listenAddr = ":8899"
+	version    = "1.2.38"
+	// 仅监听本机回环：面板不对局域网/公网暴露；外部访问只能经 fnOS 远程访问体系
+	// （需飞牛账号登录）由 fnOS 从本机回环转发进来。请勿改为 0.0.0.0/:port 对外暴露。
+	listenAddr = "127.0.0.1:8899"
 )
 
 type Server struct {
@@ -62,7 +63,6 @@ func main() {
 	// 初始化 DDNS、反向代理子系统（注册联动、后台同步）
 	initDDNS(dataDir)
 	initProxy(dataDir)
-	initAuth(dataDir)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/overview", srv.handleOverview)
@@ -91,25 +91,18 @@ func main() {
 	mux.HandleFunc("POST /api/update/download", handleUpdateDownload)
 	mux.HandleFunc("GET /api/update/dirs", handleUpdateDirs)
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
-	mux.HandleFunc("POST /api/login", srv.handleLogin)
-	mux.HandleFunc("POST /api/logout", srv.handleLogout)
-	mux.HandleFunc("GET /api/auth/status", srv.handleAuthStatus)
-	mux.HandleFunc("POST /api/auth/changepass", srv.handleAuthChangePass)
-	mux.HandleFunc("POST /api/auth/adduser", srv.handleAuthAddUser)
-	mux.HandleFunc("POST /api/auth/deluser", srv.handleAuthDelUser)
-	mux.HandleFunc("GET /api/auth/listusers", srv.handleAuthListUsers)
-	mux.HandleFunc("POST /api/auth/rename", srv.handleAuthRename)
 	mux.HandleFunc("GET /", srv.handleRoot)
 
-	log.Printf("X-Box v%s 启动，监听 %s（已启用登录保护，面板对外需登录）", version, listenAddr)
-	if err := http.ListenAndServe(listenAddr, formBridge(tunnelBridge(authMiddleware(mux)))); err != nil {
+	log.Printf("X-Box v%s 启动，监听 %s（仅本机回环，外部访问经 fnOS 远程访问体系）", version, listenAddr)
+	if err := http.ListenAndServe(listenAddr, formBridge(tunnelBridge(mux))); err != nil {
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
 }
 
 // tunnelBridge：fnOS 远程访问中转会拦截 /api/ 前缀（重定向到跨域门户，导致页面内
 // XHR 被 CORS 拦、fetch/iframe 挂起），而 / 路径畅通。前端把所有 API 请求编码进
-// /?__x=<base64url(JSON{m,p,b,sid})> 隧道参数，此处还原成真实请求再交给后续中间件。
+// /?__x=<base64url(JSON{m,p,b})> 隧道参数，此处还原成真实请求再交给 mux。
+// （面板已无登录态，sid 字段仅为兼容旧版前端而保留忽略。）
 func tunnelBridge(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -148,7 +141,7 @@ func tunnelBridge(next http.Handler) http.Handler {
 // formBridge 表单桥接：fnOS 客户端 iframe 内 fetch/XHR 子资源请求不可用，
 // 前端改走「隐藏 iframe 导航通道」——POST 经表单提交，载荷放在 _body 字段。
 // 此处把 application/x-www-form-urlencoded 的 _body 还原成 JSON 请求体，
-// 下游 handler 零改动；GET 通道则由 checkSession 的 ?sid= 查询参数鉴权。
+// 下游 handler 零改动。
 func formBridge(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {

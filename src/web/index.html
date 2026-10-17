@@ -21,8 +21,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 ::-webkit-scrollbar-thumb{background:#C9CDD4;border-radius:4px}
 
 /* ===== 布局骨架 ===== */
-.app{display:none;flex-direction:column;height:100vh;height:100dvh} /* 未登录前隐藏主面板，避免登录前看到后台 */
-.app.show{display:flex}
+.app{display:flex;flex-direction:column;height:100vh;height:100dvh} /* 无登录态：面板直接渲染（访问控制由 127.0.0.1 回环绑定 + fnOS 远程访问体系承担） */
 .topbar{height:52px;background:var(--card);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;flex-shrink:0}
 .topbar img.logo{width:28px;height:28px;border-radius:7px;display:block}
 .topbar .title{font-size:16px;font-weight:600}
@@ -36,7 +35,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .menu-item svg{width:17px;height:17px;flex-shrink:0}
 .menu-item:hover{background:var(--bg);color:var(--text1)}
 .menu-item.active{background:var(--primary-light);color:var(--primary);font-weight:500}
-.content{flex:1;overflow-y:auto;padding:20px 24px}
+.content{flex:1;overflow-y:auto;padding:20px 24px 44px} /* 底部 44px 留给常驻诊断栏 */
 .page{display:none}
 .page.active{display:block}
 .page-head{display:flex;align-items:center;margin-bottom:16px}
@@ -429,13 +428,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           <h3>🔄 检查更新 <span class="h-action"><span class="badge badge-blue" id="upd-latest-badge"></span></span></h3>
           <div id="upd-body"></div>
         </div>
-        <div class="card" style="margin-top:14px">
-          <h3>🔐 账户管理 <span class="h-action"><button class="btn btn-primary btn-sm" onclick="openAddUser()">+ 新增账户</button></span></h3>
-          <div class="acct-list" id="acct-list"></div>
-          <div class="acct-footer">
-            <button class="btn btn-outline btn-sm" onclick="doLogout()">退出登录</button>
-          </div>
-        </div>
       </div>
 
     </div>
@@ -505,7 +497,6 @@ function xhrApi(url, method, timeoutMs){
         if(xhr.status === 200){
           let j = null; try{ j = JSON.parse(xhr.responseText); }catch(e){}
           if(j && j.ok) resolve(j);
-          else if(j && j.needLogin){ clearAuthToken(); showLogin(true); reject(new Error(j.error || '登录已过期')); }
           else reject(new Error((j && j.error) || '请求失败')); // 应用错误（有响应）
         }else{
           let msg = 'HTTP ' + xhr.status;
@@ -519,13 +510,12 @@ function xhrApi(url, method, timeoutMs){
     }catch(e){ e.transport = true; reject(e); }
   });
 }
-// ---- 隧道编解码（ES5 安全，主脚本与 ES5 登录层共用，挂 window）----
+// ---- 隧道编解码（ES5 安全，挂 window；面板无登录态，仅承载方法/路径/载荷）----
 function tunnelB64(s){ return btoa(unescape(encodeURIComponent(s))).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_'); }
 window.tunnelB64 = tunnelB64;
 function apiTunnel(path, opts){
   opts = opts || {};
   const payload = {m: opts.method || 'GET', p: path, b: opts.body || ''};
-  if(window.__xboxToken) payload.sid = window.__xboxToken; // iframe/XHR-GET 无法带请求头，token 走隧道
   return '/?__x=' + encodeURIComponent(tunnelB64(JSON.stringify(payload)));
 }
 window.apiTunnel = apiTunnel;
@@ -556,7 +546,6 @@ function navApi(path, opts, timeoutMs){
         const text = (frame.contentDocument && frame.contentDocument.body) ? frame.contentDocument.body.textContent : '';
         const j = JSON.parse(text);
         if(j && j.ok){ resolve(j); }
-        else if(j && j.needLogin){ clearAuthToken(); showLogin(true); reject(new Error(j.error || '登录已过期')); }
         else { reject(new Error((j && j.error) || '请求失败')); } // 有响应：应用错误
       }catch(e){ reject(new Error('响应解析失败')); } // 有加载但非 JSON：应用错误（通道本身通）
       cleanup();
@@ -985,7 +974,6 @@ async function checkUpdate(){
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = '检查更新'; }
   }
-  loadAccounts();
 }
 function renderUpdate(u){
   document.getElementById('upd-current').textContent = u.current||'—';
@@ -1457,271 +1445,22 @@ async function delProxy(id){
   });
 }
 
-/* ---------- 启动 ---------- */
-let currentUser = '';
+/* ---------- 启动（无登录态：探测通道后直接进入面板） ---------- */
 let appEntered = false, appRefreshTimer = null;
-// ---- Bearer Token 存取（iframe 第三方 Cookie 拦截时的鉴权通道；localStorage 不可用时退化为内存态）----
-window.__xboxToken = '';
-function loadAuthToken(){
-  try{ window.__xboxToken = window.localStorage.getItem('xbox_sid_token') || ''; }catch(e){}
-}
-function saveAuthToken(t){
-  window.__xboxToken = t || '';
-  try{ if(t) window.localStorage.setItem('xbox_sid_token', t); else window.localStorage.removeItem('xbox_sid_token'); }catch(e){}
-}
-function clearAuthToken(){ saveAuthToken(''); }
-loadAuthToken();
-// 登录成功后进入主面板：直接在当前页面显示后台并加载数据，不依赖 location.reload()。
-// 飞牛原生应用 webview 中 location.reload() 可能不生效，会导致登录层被 hideLogin 隐藏后后台未显示 → 一片空白。
 async function enterApp(){
-  if(!currentUser && window.__loginUser) currentUser = window.__loginUser; // 承接 ES5 登录层传入的账户名
-  document.getElementById('login-mask').style.display = 'none';
-  document.querySelector('.app').classList.add('show');
-  if(appEntered) return;            // 防止重复初始化（boot 已登录 与 doLogin 成功 都会走到这里）
+  if(appEntered) return;
   appEntered = true;
   try{ const j = await api('/api/overview'); document.getElementById('ver').textContent = 'v'+j.version; }catch(e){}
   loadOverview(); loadPorts(); loadProcs();
   startTempLoop();
   if(!appRefreshTimer) appRefreshTimer = setInterval(loadOverview, 30000);
-  loadAccounts();
 }
-async function boot(){
-  // 登录层在 HTML/CSS 中默认可见（fail-safe）：JS 未跑起来时用户至少看到登录框而非空白。
-  // boot 只需判断：已登录 → 隐藏登录层进入面板；未登录 → 登录层本来就在，仅刷新标题文案。
-  let st = null;
-  try{ st = await api('/api/auth/status'); }catch(e){} // status 白名单接口不应失败；失败按未登录处理
-  if(st && st.authed){
-    currentUser = st.user || '';
-    enterApp(); // 内部会隐藏登录层
-    return;
-  }
-  showLogin(!!(st && st.configured));
-}
-// 通道预探测：都不通（'none'）时直接展示登录框（HTML 默认标题），不再反复重试干等
-detectChannel().then(function(ch){
-  if(ch === 'none'){ window.__noChannel = true; return; }
-  boot();
-});
-let loginFocused = false;
-function showLogin(configured){
-  const mask = document.getElementById('login-mask');
-  const wasHidden = mask.style.display !== 'flex';
-  document.getElementById('login-title').textContent = configured ? 'X-Box 登录' : '设置管理员账户';
-  document.getElementById('login-sub').textContent = configured ? '请输入账户和密码' : '首次使用，请设置管理员账户和密码';
-  // 仅在登录层从隐藏变为显示时清空输入框；已显示时不再清空，避免轮询/超时把正在输入的账户密码抹掉
-  if(wasHidden){
-    document.getElementById('login-msg').textContent = '';
-    document.getElementById('login-user').value = '';
-    document.getElementById('login-pass').value = '';
-  }
-  mask.style.display = 'flex';
-  // 只在【页面首次】弹出登录层时自动聚焦账户栏；之后（如会话过期重新弹层）绝不抢焦点，
-  // 避免用户在密码栏输入时焦点被反复弹回账户栏。
-  if(!loginFocused){
-    loginFocused = true;
-    setTimeout(function(){ const el=document.getElementById('login-user'); if(el && document.activeElement !== el) el.focus(); }, 50);
-  }
-}
-function hideLogin(){ document.getElementById('login-mask').style.display = 'none'; }
-async function doLogin(){
-  const user = document.getElementById('login-user').value.trim();
-  const pass = document.getElementById('login-pass').value;
-  const msg = document.getElementById('login-msg');
-  if(!pass){ msg.textContent='请输入密码'; return; }
-  const btn = document.getElementById('login-btn');
-  if(btn) btn.disabled = true; // 防重复提交
-  // 启动时探测无可用通道：点击时快速重探一次（有界），通则继续，不通立即报错不干等
-  if(window.__noChannel){
-    const ch = await detectChannel();
-    if(ch === 'none'){
-      msg.textContent = '网络不通：页面能显示但请求无法到达服务器，请查看登录页诊断行';
-      if(btn) btn.disabled = false;
-      return;
-    }
-    window.__noChannel = false;
-  }
-  try{
-    // api() 内部已含三通道回退（XHR → fetch → 导航 iframe），全部走 / 隧道
-    const j = await api('/api/login', {method:'POST', body: JSON.stringify({user: user, pass: pass})});
-    saveAuthToken(j.sid || '');
-    currentUser = user || 'admin';
-    enterApp();
-  }catch(e){
-    msg.textContent = e.message || '登录失败，请重试';
-  }
-  if(btn) btn.disabled = false;
-}
-function bindLogin(){
-  const btn = document.getElementById('login-btn');
-  const pass = document.getElementById('login-pass');
-  const user = document.getElementById('login-user');
-  if(btn) btn.addEventListener('click', doLogin);
-  if(pass) pass.addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
-  if(user) user.addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
-}
-if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindLogin);
-else bindLogin();
-async function doLogout(){
-  try{ await api('/api/logout', {method:'POST'}); }catch(e){}
-  // 重置前端会话态并直接回到登录层，不依赖 location.reload()（避免 webview reload 不生效导致空白）
-  appEntered = false;
-  if(appRefreshTimer){ clearInterval(appRefreshTimer); appRefreshTimer = null; }
-  if(typeof procsRefreshTimer !== 'undefined' && procsRefreshTimer){ clearInterval(procsRefreshTimer); procsRefreshTimer = null; }
-  document.querySelector('.app').classList.remove('show');
-  currentUser = '';
-  clearAuthToken(); // 同时清除本地 token
-  loginFocused = false; // 登出后允许重新自动聚焦账户栏
-  showLogin(true);
-}
-/* ---------- 账户管理（列表 + 模态表单，风格对齐 DDNS 服务商/记录编辑） ---------- */
-// 列出全部账户并渲染：每行提供「改密 / 改名 / 删除」（删除仅限非当前登录账户）。
-// 用 createElement + 闭包绑定用户名，避免用户名特殊字符破坏内联 onclick 注入。
-async function loadAccounts(){
-  const box = document.getElementById('acct-list');
-  if(!box) return;
-  box.innerHTML = '';
-  let users = [];
-  try{
-    const j = await api('/api/auth/listusers', {method:'GET'});
-    users = j.users || [];
-  }catch(e){
-    box.innerHTML = '<div class="acct-row"><span class="acct-avatar">!</span><span class="u">加载失败：'+esc(e.message)+'</span></div>';
-    return;
-  }
-  if(users.length === 0){
-    box.innerHTML = '<div class="acct-row"><span class="acct-avatar">·</span><span class="u" style="color:var(--text3)">暂无账户</span></div>';
-    return;
-  }
-  for(const u of users){
-    const row = document.createElement('div');
-    row.className = 'acct-row';
-    const avatar = document.createElement('span');
-    avatar.className = 'acct-avatar';
-    avatar.textContent = (u.user||'?').charAt(0).toUpperCase();
-    row.appendChild(avatar);
-    const name = document.createElement('span');
-    name.className = 'u';
-    name.textContent = u.user;
-    row.appendChild(name);
-    if(u.current){
-      const badge = document.createElement('span');
-      badge.className = 'badge badge-green';
-      badge.textContent = '当前登录';
-      row.appendChild(badge);
-    }
-    const acts = document.createElement('span');
-    acts.className = 'acct-actions';
-    const bPass = document.createElement('button');
-    bPass.className = 'btn btn-text btn-sm';
-    bPass.textContent = '改密';
-    bPass.onclick = () => openChangePass(u.user);
-    acts.appendChild(bPass);
-    const bRename = document.createElement('button');
-    bRename.className = 'btn btn-text btn-sm';
-    bRename.textContent = '改名';
-    bRename.onclick = () => openRename(u.user);
-    acts.appendChild(bRename);
-    if(!u.current){
-      const bDel = document.createElement('button');
-      bDel.className = 'btn btn-text btn-sm acct-del';
-      bDel.textContent = '删除';
-      bDel.onclick = () => delUser(u.user);
-      acts.appendChild(bDel);
-    }
-    row.appendChild(acts);
-    box.appendChild(row);
-  }
-}
-// 新增账户：模态表单（用户名 + 密码）。
-function openAddUser(){
-  const body = `
-    <div class="form-row"><label>用户名</label><input type="text" id="au-user" placeholder="登录用户名" autocomplete="off"></div>
-    <div class="form-row"><label>密码</label><input type="password" id="au-pass" placeholder="登录密码" autocomplete="new-password"></div>`;
-  confirmDialog('新增账户', body, async ()=>{
-    const u = document.getElementById('au-user').value.trim(), p = document.getElementById('au-pass').value;
-    if(!u||!p){ toast('请填写用户名和密码','err'); return; }
-    try{
-      await api('/api/auth/adduser',{method:'POST',body:JSON.stringify({user:u,pass:p})});
-      toast('账户已新增','good'); loadAccounts();
-    }catch(e){ toast(e.message,'err'); }
-  }, '新增');
-}
-// 修改指定账户密码：模态表单，由已登录者操作（免原密码）。
-function openChangePass(user){
-  const body = `
-    <div class="form-row"><label>账户</label><input type="text" value="${esc(user)}" disabled></div>
-    <div class="form-row"><label>新密码</label><input type="password" id="ap-new" placeholder="输入新密码" autocomplete="new-password"></div>`;
-  confirmDialog('修改密码', body, async ()=>{
-    const np = document.getElementById('ap-new').value;
-    if(!np.trim()){ toast('密码不能为空','err'); return; }
-    try{
-      await api('/api/auth/changepass',{method:'POST',body:JSON.stringify({target:user,new:np})});
-      toast('账户「'+user+'」密码已修改','good');
-    }catch(e){ toast(e.message,'err'); }
-  }, '保存');
-}
-// 重命名账户：模态表单；后端同步更新该账户会话，改名后无需重新登录。
-function openRename(user){
-  const body = `
-    <div class="form-row"><label>新账户名</label><input type="text" id="ar-new" value="${esc(user)}" placeholder="输入新名称" autocomplete="off"></div>
-    <div class="form-row"><label style="font-weight:400;color:var(--text3)">改名后该账户的登录会话自动延续，无需重新登录。</label></div>`;
-  confirmDialog('重命名账户', body, async ()=>{
-    const nn = document.getElementById('ar-new').value.trim();
-    if(!nn){ toast('账户名不能为空','err'); return; }
-    try{
-      await api('/api/auth/rename',{method:'POST',body:JSON.stringify({old:user,new:nn})});
-      toast('已改名为「'+nn+'」','good'); loadAccounts();
-    }catch(e){ toast(e.message,'err'); }
-  }, '保存');
-}
-// 删除账户：模态确认（删除仅限非当前登录账户）。
-function delUser(u){
-  confirmDialog('删除账户','删除后该账户将无法登录，确认删除「'+esc(u)+'」？', async ()=>{
-    try{
-      await api('/api/auth/deluser',{method:'POST',body:JSON.stringify({user:u})});
-      toast('已删除','good'); loadAccounts();
-    }catch(e){ toast(e.message,'err'); }
-  }, '删除');
-}
-window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 登录层据此显示「面板组件」状态
+detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe），随后直接进入面板
+window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：诊断栏据此显示「面板组件」状态
 </script>
 <style>
-.login-mask{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:9999} /* 默认直接显示登录层（fail-safe）：即使旧内核下 JS 语法死亡，用户看到的也是登录框而非空白；登录成功后由 JS 置 display:none */
-.login-card{background:#fff;border-radius:12px;padding:30px 28px;width:320px;box-shadow:0 10px 40px rgba(0,0,0,.2)}
-.login-title{font-size:18px;font-weight:600;margin-bottom:4px}
-.login-sub{font-size:13px;color:var(--text3);margin-bottom:18px}
-.login-input{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:16px;margin-bottom:10px;box-sizing:border-box} /* 16px 防止 iOS 聚焦放大导致键盘弹起时整页位移卡顿 */
-@media (max-height:560px),(max-width:480px){
-  .login-mask{align-items:flex-start;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 0;transition:transform .15s ease,opacity .15s ease}
-  .login-card{margin:auto 0;transition:transform .15s ease;max-width:calc(100vw - 28px)}
-}
-.login-btn{width:100%;justify-content:center;margin-top:4px}
-.login-msg{font-size:13px;color:var(--danger);min-height:18px;margin-top:8px;text-align:center}
-.login-ver{font-size:11px;color:var(--text3);margin-top:10px;text-align:center}
-.login-diag{font-size:11px;color:var(--text3);margin-top:4px;text-align:center;line-height:1.6}
-.acct-list{display:flex;flex-direction:column;gap:8px}
-.acct-row{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg);border-radius:8px;transition:background .15s ease}
-.acct-row:hover{background:#EAECF0}
-.acct-avatar{width:32px;height:32px;border-radius:50%;background:var(--primary-light);color:var(--primary);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:14px;flex-shrink:0}
-.acct-row .u{flex:1;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.acct-actions{display:flex;gap:2px;flex-shrink:0}
-.acct-del{color:var(--danger)}
-.acct-del:hover{background:var(--danger-light)}
-.acct-footer{display:flex;justify-content:flex-end;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.diag-bar{position:fixed;left:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;font-size:11px;line-height:1.6;color:var(--text3);background:var(--card);border-top:1px solid var(--border);z-index:50;pointer-events:none}
 </style>
-<div id="login-mask" class="login-mask">
-  <div class="login-card">
-    <div class="login-title" id="login-title">X-Box 登录</div>
-    <div class="login-sub" id="login-sub">请输入账户和密码</div>
-    <input type="text" id="login-user" class="login-input" placeholder="账户" autocomplete="username">
-    <input type="password" id="login-pass" class="login-input" placeholder="密码" autocomplete="current-password">
-    <button class="btn btn-primary login-btn" id="login-btn">进入</button>
-    <div class="login-msg" id="login-msg"></div>
-    <div class="login-ver" id="login-ver"><!--XBOX_VER--></div>
-    <div class="login-diag" id="login-diag"></div>
-    <div class="login-diag" id="login-diag-net"></div>
-  </div>
-</div>
 <script>
 /* ===== 登录通道（ES5 + XMLHttpRequest 独立层）=====
  * 不依赖 fetch / async / let / const / 箭头函数 / 模板字符串等任何 ES6+ 特性，
@@ -1731,25 +1470,15 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
 (function(){
   function $(id){ return document.getElementById(id); }
   // 隧道编解码兜底：主脚本（ES2017）已定义 window.apiTunnel；若主脚本死亡（旧内核解析失败），
-  // 本 ES5 层自行补齐，保证登录通道在任何内核下都走 / 隧道（fnOS 中转拦截 /api/ 直连）。
+  // 本 ES5 层自行补齐，保证诊断探测在任何内核下都走 / 隧道（fnOS 中转拦截 /api/ 直连）。
   if(!window.apiTunnel){
-    window.tunnelB64 = function(s){ return btoa(unescape(encodeURIComponent(s))).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_'); };
+    window.tunnelB64 = function(str){ return btoa(unescape(encodeURIComponent(str))).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_'); };
     window.apiTunnel = function(path, opts){
       opts = opts || {};
       var payload = {m: opts.method || 'GET', p: path, b: opts.body || ''};
-      if(window.__xboxToken) payload.sid = window.__xboxToken;
       return '/?__x=' + encodeURIComponent(window.tunnelB64(JSON.stringify(payload)));
     };
   }
-  // token 存取（ES5）：localStorage 不可用（隐私模式/被禁）时退化为页面内存态
-  function saveToken(t){
-    window.__xboxToken = t || '';
-    try{ if(t) window.localStorage.setItem('xbox_sid_token', t); else window.localStorage.removeItem('xbox_sid_token'); }catch(e){}
-  }
-  function loadToken(){
-    try{ window.__xboxToken = window.localStorage.getItem('xbox_sid_token') || ''; }catch(e){}
-  }
-  loadToken();
   function diag(){
     var el = $('login-diag'), netEl = $('login-diag-net');
     if(el){
@@ -1770,7 +1499,8 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
     function probeXHR(tag, url){
       results[tag] = '检测中'; render();
       var settled = false;
-      var xhr = new XMLHttpRequest();
+      var xhr;
+      try{ xhr = new XMLHttpRequest(); }catch(e){ settled = true; finish(tag, false, '不可用'); return; }
       xhr.timeout = 5000;
       xhr.open('GET', url, true);
       xhr.onreadystatechange = function(){
@@ -1812,57 +1542,11 @@ window.__xboxMain = true; // 主脚本（ES2017）完整执行的标记：ES5 �
         .catch(function(){ if(fetchDone) return; fetchDone = true; clearTimeout(fetchTimer); finish('fetch', false, '无法连接'); });
     }
   }
-  function bind(){
-    var btn = $('login-btn'), pass = $('login-pass'), user = $('login-user'), msg = $('login-msg');
-    if(!btn) return;
-    var busy = false;
-    function doLogin(){
-      if(busy) return;
-      var u = user ? String(user.value).replace(/^\s+|\s+$/g, '') : '';
-      var p = pass ? String(pass.value) : '';
-      if(!p){ if(msg) msg.textContent = '请输入密码'; return; }
-      busy = true; btn.disabled = true;
-      if(msg) msg.textContent = '';
-      // 登录也走 / 隧道（GET + __x 参数承载 {m:POST, p:/api/login, b:{...}}），后端还原
-      var xhr = new XMLHttpRequest();
-      xhr.timeout = 10000;
-      xhr.open('GET', window.apiTunnel('/api/login', {method:'POST', body: JSON.stringify({user: u, pass: p})}), true);
-      xhr.onreadystatechange = function(){
-        if(xhr.readyState !== 4) return;
-        busy = false; btn.disabled = false;
-        var j = null;
-        try{ j = JSON.parse(xhr.responseText); }catch(e){}
-        if(xhr.status === 200 && j && j.ok){
-          saveToken(j.sid || ''); // 持久化 token（隧道 payload 携带，iframe/XHR-GET 无法带请求头）
-          if(typeof window.enterApp === 'function'){
-            window.__loginUser = (u || 'admin'); // 主脚本 currentUser 为 let 声明不挂 window，经此桥传
-            window.enterApp();
-          }else{
-            window.location.reload(); // 主脚本不可用：靠服务端已登录会话重新进入
-          }
-        }else{
-          if(msg) msg.textContent = (j && j.error) || ('登录失败（HTTP ' + xhr.status + '）');
-        }
-      };
-      xhr.ontimeout = function(){
-        busy = false; btn.disabled = false;
-        if(msg) msg.textContent = '登录请求超时，请查看诊断行';
-      };
-      xhr.onerror = function(){
-        busy = false; btn.disabled = false;
-        if(msg) msg.textContent = '网络错误，请检查连接后重试';
-      };
-      xhr.send();
-    }
-    function onKey(e){ var k = e.key || ''; if(k === 'Enter' || e.keyCode === 13) doLogin(); }
-    if(btn.addEventListener) btn.addEventListener('click', doLogin); else btn.onclick = doLogin;
-    if(pass && pass.addEventListener) pass.addEventListener('keydown', onKey);
-    if(user && user.addEventListener) user.addEventListener('keydown', onKey);
-  }
-  // 主脚本活着 → 由它负责登录绑定（api() 三通道）；仅当主脚本死亡时本层兜底绑定
-  if(document.readyState === 'loading'){ if(document.addEventListener) document.addEventListener('DOMContentLoaded', function(){ if(!window.__xboxMain) bind(); diag(); }); else window.attachEvent('onload', function(){ if(!window.__xboxMain) bind(); diag(); }); }
-  else { if(!window.__xboxMain) bind(); diag(); }
+  // 诊断栏常驻：通道状态一目了然（排障用）
+  if(document.readyState === 'loading'){ if(document.addEventListener) document.addEventListener('DOMContentLoaded', diag); else window.attachEvent('onload', diag); }
+  else diag();
 })();
 </script>
+<div class="diag-bar"><span id="login-diag"></span><span id="login-diag-net"></span></div>
 </body>
 </html>

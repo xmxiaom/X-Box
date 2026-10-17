@@ -14,7 +14,7 @@
 | DDNS 服务 | 9 家服务商（阿里云/腾讯云/华为云/百度云/Cloudflare/DuckDNS/Oray/Namecheap/NameSilo），解析记录 + IP 来源（公网查询/自定义 URL/网卡/固定 IP/DNS 解析） |
 | 反向代理 | 多域名站点转发（通配符/路径前缀/去前缀），可联动 DDNS 自动建记录 |
 | 掉盘修复 | NVMe 盘状态枚举与掉线标注；**按盘自选**禁止/恢复 D3cold 深睡（`d3cold_allowed=0`，只禁深睡、保留浅层省电），udev 规则持久化，重启后依旧生效 |
-| 系统设置 | 账户管理（账户列表/改名/改密/新增/删除账户/退出登录）；检查 GitHub Release 新版本（版本对比 + 更新说明），一键下载新版本 fpk 到本地并引导覆盖安装 |
+| 系统设置 | 检查 GitHub Release 新版本（版本对比 + 更新说明），一键下载新版本 fpk 到本地并引导覆盖安装 |
 
 ## 安全设计（清理硬约束）
 
@@ -24,21 +24,11 @@
 4. **扫描时效**：清理只接受 30 分钟内的扫描结果，过期须重新扫描；
 5. journal 类固定保留最近 500MB（按 mtime 降序累计）。
 
-## 账户与登录（安全）
-
-面板需登录后方可使用，认证子系统（`auth.go`）提供：
-
-- **多账户**：支持多个登录账户；出厂默认账户 `admin` / 密码 `admin`，首次启动自动创建（可用环境变量 `XBOX_PASS` 预设初始密码），**登录后请立即修改默认密码并按需新增账户**。
-- **会话策略**：会话 Cookie `xbox_sid`（HttpOnly + SameSite=Lax）；空闲 10 分钟失效，绝对有效期 24 小时，任意操作即续期。
-- **防暴力破解**：每 IP / 每账户连续失败 5 次锁定 5 分钟，阻断口令爆破。
-- **密码存储**：PBKDF2-HMAC-SHA256（60000 迭代 + 每账户随机盐），仅存哈希、绝不存明文；凭据文件权限 `0600`。
-- **账户管理**：「系统设置 → 账户管理」以模态表单方式列出全部账户，支持重命名账户、修改任意账户密码、新增/删除账户、退出登录。
-
 ## 架构
 
 ```
 src/
-  main.go            路由注册/启动/版本常量（manifest 版本自动同步源）
+  main.go            路由注册/启动/版本常量（manifest 版本自动同步源）/隧道与表单桥接中间件
   overview.go        仪表盘数据（CPU/内存/磁盘/端口/网络）
   net.go             网卡/网关/DNS/速率（ip route 优先，/proc 回退）
   temps.go           CPU/硬盘温度（hwmon realpath 对齐 + smartctl + drivetemp）
@@ -50,7 +40,6 @@ src/
   ddns_core.go       DDNS 记录引擎
   ddns_providers.go  9 家服务商 API 实现
   proxy.go           反向代理（nginx/caddy 风格 hosts 匹配）
-  auth.go            账户/登录/会话/防爆破（PBKDF2 密码哈希）
   nvme_sleep.go      掉盘修复（d3cold_allowed + udev 持久化）
   web/index.html     内嵌 Web UI（单文件，零构建）
 pkg/                 fpk 打包目录（manifest / cmd 脚本 / 图标资源）
@@ -65,6 +54,7 @@ selfcheck.sh         46 项自检
 bash build.sh      # 交叉编译 amd64/arm64 → fnpack 打包 → X-Box.fpk
 bash selfcheck.sh  # 46 项自检（结构/JSON/二进制/图标一致性/fpk/安全约束）
 node tests/smoke_test.js   # 前端冒烟测试（Node 22+，无浏览器依赖）
+node tests/e2e_panel.test.js # 端到端：无登录直开面板/三通道回退/隧道编解码/语法地板
 ```
 
 依赖：Go 1.22+（`CGO_ENABLED=0` 交叉编译）、fnpack 1.2.3。
@@ -73,9 +63,9 @@ node tests/smoke_test.js   # 前端冒烟测试（Node 22+，无浏览器依赖�
 
 飞牛应用中心 → 手动安装 → 选择 `X-Box.fpk`（run-as root）。安装后从桌面图标进入，服务端口 8899。
 
-**网络暴露说明**：从 v1.2.25 起，面板默认监听 `:8899`（**所有接口，含 IPv6**），以便通过 DDNS 域名（如 `your-domain.example.com:8899`）从局域网/公网经登录后访问；同时内置强制登录保护（见下「账户与登录」）。`fnOS` 桌面窗口（iframe）与手机 APP 仍照常在本机/系统网关加载。
+**访问控制（无登录态）**：面板仅监听 `127.0.0.1:8899`（本机回环），**不对局域网/公网暴露**——外部无法直连面板。唯一入口是 fnOS 自身的远程访问体系（`<app>.<user>.fnos.net` 域名 / PC 客户端 / 手机 App，均需飞牛账号登录），由 fnOS 代验身份后从本机回环转发进来。因此面板不再需要登录态：fnOS 账号即访问控制。请勿为了外网直连而把 `listenAddr` 改成 `:8899` 或其他通配地址。
 
-⚠️ 对外开放意味着**可达者经登录后即可操作 NAS**：请登录后第一时间修改默认账户密码，并仅在路由器/光猫放行可信来源（固定 IP 或 VPN），切勿对全网裸奔。若仅需本机使用，可改回 `src/main.go` 的 `listenAddr = "127.0.0.1:8899"` 重新构建。
+**关于 fnOS 客户端的 API 隧道**：fnOS 远程访问中转会拦截 `/api/` 前缀（重定向到跨域门户，导致页面内 XHR/fetch 请求挂起），而 `/` 路径畅通。本应用的全部 API 请求因此编码进 `/?__x=<base64url(JSON)>` 隧道参数，由服务端 `tunnelBridge` 中间件还原分发；无效隧道自动回落页面。直连 `http://<NAS IP>:8899` 的浏览器访问同样支持（隧道对直连透明）。
 
 ## 已知兼容性说明
 
