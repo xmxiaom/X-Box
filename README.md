@@ -1,6 +1,6 @@
-# X-Box — 飞牛 fnOS 系统清理与安全体检工具箱
+# X-Box — 飞牛 fnOS 系统管理工具箱
 
-单 Go 二进制 + 内嵌 Web UI（**纯 Go 标准库，零第三方依赖**），以 fnOS 原生应用（fpk）形式安装运行，内置 amd64 / arm64 双架构。
+单 Go 二进制 + 内嵌 Web UI（**纯 Go 标准库，零第三方依赖**），以 fnOS 原生应用（fpk）形式安装运行，内置 amd64 / arm64 双架构。系统清理、安全体检、DDNS、内网浏览器与 root 终端，一个面板全搞定。
 
 ## 功能
 
@@ -12,9 +12,10 @@
 | 进程与服务 | 全进程 CPU 3s 实时刷新（搜索/排序）、systemd 服务、飞牛应用、Docker 容器一览，支持结束进程 |
 | 开机自启 | systemd 服务/定时器、rc.local、cron @reboot、init.d、fnOS 应用启动项扫描 |
 | DDNS 服务 | 9 家服务商（阿里云/腾讯云/华为云/百度云/Cloudflare/DuckDNS/Oray/Namecheap/NameSilo），解析记录 + IP 来源（公网查询/自定义 URL/网卡/固定 IP/DNS 解析） |
-| 反向代理 | 多域名站点转发（通配符/路径前缀/去前缀），可联动 DDNS 自动建记录 |
+| 浏览器 | 内网网页代理浏览（`/b/{scheme}/{host}/…` 路径式同源代理 + `<base>` 注入 + 全量 URL 重写 + JS 运行时接管）：远程域名下也能打开路由器管理页等内网站点，支持多标签页、Ctrl+滚轮缩放、链接一律在面板内新标签打开；Cookie 按站点隔离，登录表单可用 |
+| 终端 | 命令执行控制台（root 身份，`sh -c`，cd 会话目录保持，单命令 60s 超时，长任务建议 `nohup … &` 后台）；显式「连接/断开」控制 |
 | 掉盘修复 | NVMe 盘状态枚举与掉线标注；**按盘自选**禁止/恢复 D3cold 深睡（`d3cold_allowed=0`，只禁深睡、保留浅层省电），udev 规则持久化，重启后依旧生效 |
-| 系统设置 | 检查 GitHub Release 新版本（版本对比 + 更新说明），一键下载新版本 fpk 到本地并引导覆盖安装 |
+| 系统设置 | 检查 GitHub Release 新版本（版本对比 + 更新说明），后台异步下载新版本 fpk（带进度轮询）到 NAS 本地并引导覆盖安装 |
 
 ## 安全设计（清理硬约束）
 
@@ -39,11 +40,13 @@ src/
   autostart.go       开机启动项
   ddns_core.go       DDNS 记录引擎
   ddns_providers.go  9 家服务商 API 实现
-  proxy.go           反向代理（nginx/caddy 风格 hosts 匹配）
+  browser.go         内网网页代理（路径式同源代理 + 全量 URL 重写 + JS 运行时接管）
+  terminal.go        终端命令执行控制台（cd 会话/互斥/超时）
+  updater.go         版本检查与后台异步下载（进度轮询）
   nvme_sleep.go      掉盘修复（d3cold_allowed + udev 持久化）
   web/index.html     内嵌 Web UI（单文件，零构建）
 pkg/                 fpk 打包目录（manifest / cmd 脚本 / 图标资源）
-tests/               冒烟测试（Node DOM 桩）+ mock server（视觉验证）
+tests/               三层测试：真实二进制隧道测试（Python/WSL）+ 面板端到端 + 渲染冒烟
 build.sh             交叉编译 + fnpack 打包（自动同步 manifest 版本）
 selfcheck.sh         46 项自检
 ```
@@ -53,8 +56,9 @@ selfcheck.sh         46 项自检
 ```bash
 bash build.sh      # 交叉编译 amd64/arm64 → fnpack 打包 → X-Box.fpk
 bash selfcheck.sh  # 46 项自检（结构/JSON/二进制/图标一致性/fpk/安全约束）
-node tests/smoke_test.js   # 前端冒烟测试（Node 22+，无浏览器依赖）
-node tests/e2e_panel.test.js # 端到端：无登录直开面板/三通道回退/隧道编解码/语法地板
+python3 tests/tunnel_test.py       # 真实 linux 二进制：API 隧道/终端/浏览器代理/异步下载（建议 WSL）
+node tests/e2e_panel.test.js       # 端到端：无登录直开面板/三通道回退/隧道编解码/语法地板
+node tests/smoke_test.js           # 前端渲染冒烟测试（边界数据）
 ```
 
 依赖：Go 1.22+（`CGO_ENABLED=0` 交叉编译）、fnpack 1.2.3。
@@ -69,6 +73,8 @@ node tests/e2e_panel.test.js # 端到端：无登录直开面板/三通道回退
 
 ## 已知兼容性说明
 
+- 浏览器代理为轻量级实现：绝大多数站点（含路由器管理页、GBK 老页面、需登录的表单）可用；极少数重度依赖浏览器扩展能力或 WebSocket 长连接的页面可能显示不全，此时建议在目标设备上直接访问
+- 终端为命令执行控制台（无 PTY）：交互式全屏程序（vim/htop 等）不可用，长任务用 `nohup … &` 后台运行
 - 部分国产公方案 NVMe（PCI ID `1d89:ef25` 等）存在 D3cold 唤不醒缺陷，空闲约 1 小时后掉盘；「掉盘修复」页可对指定盘禁用 D3cold 规避
 - 硬盘温度依赖 hwmon/smartctl/drivetemp，传感器或工具缺失时显示「—」并可在悬浮提示查看原因
 
