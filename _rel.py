@@ -27,11 +27,21 @@ def http(method, url, tok, data=None, headers=None, raw=False):
         b = e.read()
         return e.code, (b if raw else (json.loads(b) if b else None))
 
-def upload_asset(tok, upload_url, name, path):
+def upload_asset(tok, upload_url, name, path, rel_id):
     base = upload_url.split("{", 1)[0]
     url = f"{base}?name={name}"
     size = __import__("os").path.getsize(path)
-    # 用 curl 上传（urllib 在 6MB 资产上频繁被 RST）：15 次重试，上次实测第 5 次成功
+    def asset_ok():
+        # 上传「失败」可能是误报（响应写回失败但服务端已入库）：核对已存在资产
+        code, assets = http("GET", f"https://api.github.com/repos/{REPO}/releases/{rel_id}/assets", tok)
+        for a in assets or []:
+            if a["name"] == name and a["size"] == size and a.get("state") == "uploaded":
+                return True
+        return False
+    if asset_ok():
+        print(f"资产已存在且完整: {name} ({size} bytes)")
+        return True
+    # 用 curl 上传（urllib 在 6MB 资产上频繁被 RST）：重试若干次，每次失败后核对是否实际已传完
     cmd = ["curl", "--retry", "15", "--retry-delay", "5", "--retry-all-errors",
            "--connect-timeout", "30", "--max-time", "1800", "-sS",
            "-X", "POST", "-H", f"Authorization: Bearer {tok}",
@@ -45,6 +55,9 @@ def upload_asset(tok, upload_url, name, path):
             print(f"上传成功: {name} ({size} bytes)")
             return True
         print(f"上传返回 {code!r} (第{attempt}次): {r.stderr.strip()[:200]}")
+        if asset_ok():
+            print(f"重试前核对：资产实际已上传完整 ({size} bytes)")
+            return True
         time.sleep(5 * attempt)
     return False
 
@@ -73,7 +86,7 @@ def main():
             http("DELETE", f"https://api.github.com/repos/{REPO}/releases/assets/{a['id']}", tok)
             print(f"已删除旧资产: {a['name']}")
     name = fpk.replace("\\", "/").split("/")[-1]
-    if not upload_asset(tok, upload_url, name, fpk):
+    if not upload_asset(tok, upload_url, name, fpk, rel_id):
         print("资产上传失败"); sys.exit(1)
     print("DONE")
 
