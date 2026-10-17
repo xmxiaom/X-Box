@@ -118,6 +118,7 @@ PAGE = (b'<html><head><base href="http://old.example/"><title>t</title>'
         b'<img srcset="http://' + H.encode() + b'/s1.png 1x, /s2.png 2x">'
         b'<form action="http://' + H.encode() + b'/login" method="post"></form>'
         b'<a href="javascript:void(0)">j</a><a href="#top">h</a>'
+        b'<div>location.host</div>'                              # HTML 文本不是 JS，绝不能改写
         b'</body></html>')
 JS = b'var a=location.hostname;var b=window.location.origin;var c=location.port;'
 class BH(BaseHTTPRequestHandler):
@@ -166,6 +167,8 @@ check("浏览器代理协议相对重写", 'src="/b/http/' + H + '/proto.png"' i
 check("浏览器代理srcset重写", '/b/http/' + H + '/s1.png 1x' in body, body[:300])
 check("浏览器代理表单action重写", 'action="/b/http/' + H + '/login"' in body, body[:300])
 check("浏览器代理保留非URL协议", 'javascript:void(0)' in body and 'href="#top"' in body, body[:300])
+# HTML 可见文本不是 JS 代码，其中的 location.host 不能被改写
+check("浏览器代理HTML文本不改写", '<div>location.host</div>' in body, body[:300])
 check("浏览器代理CSS url()重写", 'url("/b/http/' + H + '/pic.png")' in body or "url('/b/http/" + H + "/pic.png')" in body, body[:300])
 check("浏览器代理meta refresh重写", 'url="/b/http/' + H + '/next"' in body or "url='/b/http/" + H + "/next'" in body, body[:300])
 # 页面 JS 拿 location.hostname/host/origin/port 拼绝对 URL：必须替换为**面板**值，

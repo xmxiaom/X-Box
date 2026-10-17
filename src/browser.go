@@ -446,6 +446,7 @@ var (
 	browserReRefresh   = regexp.MustCompile(`(?i)<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>`)
 	browserReRefreshU  = regexp.MustCompile(`(?i)(url\s*=\s*)(['"]?)([^'">;]+)`)
 	browserReJSHost    = regexp.MustCompile(`(?i)\b(location|document\.location|window\.location|top\.location|self\.location|parent\.location)\s*\.\s*(hostname|host|origin|protocol|port)\b`)
+	browserReScriptBlk = regexp.MustCompile(`(?is)(<script\b[^>]*>)(.*?)(</script>)`)
 	browserReDocDomain = regexp.MustCompile(`(?i)\bdocument\s*\.\s*domain\s*=\s*["'][^"']*["']`)
 	browserReTopLoc    = regexp.MustCompile(`(?i)\btop\s*\.\s*location\b`)
 	// 页面 JS 的 location 赋值（location=/location.href=/top.location=/self.location=…）
@@ -723,6 +724,20 @@ func browserRewriteJS(js string, panelScheme, panelHost string) string {
 	return browserDefusePageJS(js)
 }
 
+// browserRewriteScriptBlocks 只对 <script>…</script> 块内部做 JS 改写。
+// 不能对整个 HTML 文本跑 JS 改写：属性值/可见文本里的 "location.host" 会被
+// 破坏，且字符串掩码按 JS 语法扫描 HTML 会失准、误替换产生 SyntaxError
+// （实测 www.baidu.com 报 3 处 "Unexpected string"）。
+func browserRewriteScriptBlocks(doc, panelScheme, panelHost string) string {
+	return browserReScriptBlk.ReplaceAllStringFunc(doc, func(m string) string {
+		sub := browserReScriptBlk.FindStringSubmatch(m)
+		if sub == nil || sub[2] == "" {
+			return m
+		}
+		return sub[1] + browserRewriteJS(sub[2], panelScheme, panelHost) + sub[3]
+	})
+}
+
 // browserDefusePageJS 中和老页面两类"必崩"写法（光猫/路由器页面极常见）：
 //  1. document.domain = "192.168.1.1" —— 老跨 frame 技巧，现代 Chrome 直接抛
 //     "Failed to set document.domain"，整个 <script> 块中断，登录表单等后续
@@ -792,7 +807,7 @@ func browserRewriteHTML(doc string, tu *url.URL, panelScheme, panelHost string) 
 	doc = browserReAttr.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteAttr(m, tu) })
 	doc = browserRewriteCSS(doc, tu) // <style> 块与 style 属性内的绝对 url()
 	doc = browserReRefresh.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteRefreshValue(m, tu) })
-	doc = browserRewriteJS(doc, panelScheme, panelHost) // 内联 <script> 与事件属性里的 location.host/hostname 等
+	doc = browserRewriteScriptBlocks(doc, panelScheme, panelHost) // JS 改写只作用于 <script> 块内部
 	doc = browserReBase.ReplaceAllString(doc, "")
 	doc = browserReCSPMeta.ReplaceAllString(doc, "")
 	inject := `<base href="` + html.EscapeString(browserURLPath(tu)) + `">` + browserPatchScript(tu)
