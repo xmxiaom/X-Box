@@ -140,15 +140,22 @@ function makeDom(opts) {
     check(doc.getElementById('rf-enabled').checked === true, 'C: DDNS 新建记录启用框默认异常');
   }
   {
-    // 浏览器：goBrowser 应把地址编码进 /b 同源代理 URL（补协议 + encodeURIComponent）
+    // 浏览器：goBrowser 应生成路径式 /b/{scheme}/{host}{path} 代理 URL；多标签增删切换
     const { doc, win } = makeDom();
     await sleep(100);
     doc.getElementById('browser-url').value = '192.168.1.1';
     win.goBrowser();
-    check(doc.getElementById('browser-frame').getAttribute('src') === '/b?u=http%3A%2F%2F192.168.1.1', 'C: 浏览器未走 /b 代理: ' + doc.getElementById('browser-frame').getAttribute('src'));
+    let fr = doc.querySelector('.browser-frame-item');
+    check(fr && fr.getAttribute('src') === '/b/http/192.168.1.1/', 'C: 浏览器未走路径式 /b 代理: ' + (fr && fr.getAttribute('src')));
+    check(doc.querySelectorAll('.browser-tab').length === 1, 'C: 标签数异常');
     doc.getElementById('browser-url').value = 'https://example.com/a?b=1';
     win.goBrowser();
-    check(doc.getElementById('browser-frame').getAttribute('src') === '/b?u=' + encodeURIComponent('https://example.com/a?b=1'), 'C: 已带协议地址编码异常');
+    fr = doc.querySelectorAll('.browser-frame-item')[0];
+    check(fr.getAttribute('src') === '/b/https/example.com/a?b=1', 'C: 已带协议地址生成异常');
+    win.browserNewTab('');
+    check(doc.querySelectorAll('.browser-tab').length === 2 && doc.querySelectorAll('.browser-frame-item').length === 2, 'C: 新建标签失败');
+    win.browserCloseTab(0);
+    check(doc.querySelectorAll('.browser-tab').length === 1 && doc.querySelectorAll('.browser-frame-item').length === 1, 'C: 关闭标签失败');
   }
   {
     // 停用回显：桩返回 enabled=false 的记录

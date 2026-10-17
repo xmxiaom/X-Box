@@ -1,26 +1,29 @@
 package main
 
-// 浏览器模块：同源网页代理（轻量级内嵌浏览）。
+// 浏览器模块：同源网页代理（路径式 + <base> 注入）。
 //
-// 为什么端点是顶级路径 /b 而不是 /api/*：fnOS 远程客户端 iframe 环境下，
-// 中转只拦 /api/*（挂起/跨域重定向），普通页面导航路径畅通（隧道通道即依赖
-// 此特性）。面板内 iframe 直接以页面导航方式加载 /b?u=<目标网址>。
+// 端点形态：/b/{scheme}/{host}/{path}?{query}，如
+//   /b/http/192.168.1.1/            → http://192.168.1.1/
+//   /b/https/example.com/a/b.html   → https://example.com/a/b.html
 //
-// 同源代理解决两类直连 iframe 必挂的问题：
-//   1. 目标站点 X-Frame-Options / CSP frame-ancestors 禁止内嵌；
-//   2. 面板经远程域名是 https，直连 http 站点（如 192.168.1.1 路由器）被
-//      混合内容策略拦截。
+// 为什么是路径式 + base 而不是 /b?u=<url> + 属性重写：面板内 iframe 的文档
+// URL 在 /b/{scheme}/{host}/ 之下，注入 <base href="当前代理路径"> 后，浏览器
+// 对**一切相对 URL**——包括 JS 动态发起的 fetch/XHR、location 跳转、动态创建
+// 的 img/script——都按 base 解析回代理路径。零 JS 改写即可让路由器管理页
+// （192.168.1.1 等）这类大量使用相对路径 CGI 的页面正常工作（?u= 方案只重写
+// 静态属性，JS 动态请求全部 404，是"页面显示不正常"的根因）。
 //
-// 实现要点：
-//   - 服务端转发 GET/POST，跟随重定向，30s 超时，读取上限保护；
-//   - HTML：重写 a[href]/form[action]/src/poster/srcset 为 /b?u=<绝对地址>，
-//     后续导航与子资源都经本代理；非 HTML/CSS 按原 Content-Type 流式透传；
-//   - CSS：重写 url(...) 与 @import（相对地址按该 CSS 自身 URL 解析）；
-//   - 剥离 X-Frame-Options / CSP 等阻碍内嵌的响应头；不转发 Cookie。
+// 其余设计：
+//   - Cookie 双向透传（每请求独立 cookiejar 支持重定向链内种下的会话；回写给
+//     浏览器的 Cookie 默认作用域限 /b/{scheme}/{host}/ 子树，天然按站点隔离），
+//     路由器等需登录的站点可用；
+//   - 保留响应原始 Content-Type（含 charset，GBK/GB2312 老页面不乱码）；
+//   - 剥离响应头 X-Frame-Options / CSP 与 HTML 内 CSP meta（解除内嵌限制）；
+//   - 非 HTML 一律流式透传（CSS 相对 url() 按 CSS 自身的代理 URL 解析，天然正确）；
+//   - 顶级路径 /b（fnOS 远程中转只拦 /api/*，页面导航路径畅通）。
 //
-// 局限（轻量级定位，有意不做）：页面 JS 动态加载的资源与 fetch/XHR 不经代理；
-// meta refresh 不改写；不维护目标站点会话（需登录的站点请用「新窗口打开」
-// 直连或系统浏览器）。
+// 局限（轻量级定位，有意不做）：页面内写死绝对 http:// 的资源引用不经代理；
+// 不改写 meta refresh。
 //
 // 安全模型：与终端模块一致——面板本身仅 fnOS 账号体系可达（127.0.0.1 +
 // 局域网私网 IPv4 + fnOS 远程访问），代理不做额外鉴权/白名单：它是用户主动
@@ -30,6 +33,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -37,58 +41,55 @@ import (
 	"time"
 )
 
-var browserClient = &http.Client{
-	Timeout: 30 * time.Second,
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 8 {
-			return http.ErrUseLastResponse
-		}
-		return nil
-	},
-}
-
 const (
-	browserMaxRewrite = 8 << 20  // HTML/CSS 重写读取上限 8MB（超出截断透传）
-	browserMaxStream  = 64 << 20 // 其他内容透传上限 64MB
+	browserMaxHTML   = 8 << 20  // HTML 注入 base 的读取上限 8MB
+	browserMaxStream = 64 << 20 // 其他内容透传上限 64MB
 )
 
-// handleBrowserProxy GET/POST /b?u=<目标网址>：同源网页代理。
-// u 之外的查询参数透传给目标（支持 GET 表单：/b?u=X&k=v → 目标 /?k=v）。
+// handleBrowserRoot GET /b（无子路径）：提示用法。
+func (s *Server) handleBrowserRoot(w http.ResponseWriter, r *http.Request) {
+	fail(w, 400, "用法：/b/http/<主机>/<路径> 或 /b/https/<主机>/<路径>")
+}
+
+// handleBrowserProxy GET/POST /b/{scheme}/{host}/{path}?{query}：同源网页代理。
 func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	raw := strings.TrimSpace(q.Get("u"))
-	if raw == "" {
-		fail(w, 400, "缺少网址参数 u")
+	raw := r.URL.RequestURI() // 保留原始编码（含查询串）
+	rest := strings.TrimPrefix(raw, "/b/")
+	parts := strings.SplitN(rest, "/", 3)
+	scheme := parts[0]
+	if scheme != "http" && scheme != "https" {
+		fail(w, 400, "仅支持 http/https 代理（/b/http/<主机>/... 或 /b/https/<主机>/...）")
 		return
 	}
-	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
-		raw = "http://" + raw // 允许省略协议（与面板地址栏行为一致）
-	}
-	target, err := url.Parse(raw)
-	if err != nil || target.Host == "" {
-		fail(w, 400, "网址格式错误")
+	if len(parts) < 2 || parts[1] == "" {
+		fail(w, 400, "缺少目标主机")
 		return
 	}
-	// GET 表单字段透传（u 之外的查询参数拼到目标 URL）
-	tgt := *target
-	if len(q) > 1 {
-		tq := tgt.Query()
-		for k, vs := range q {
-			if k == "u" {
-				continue
-			}
-			for _, v := range vs {
-				tq.Add(k, v)
-			}
-		}
-		tgt.RawQuery = tq.Encode()
+	host := parts[1]
+	sub := "/"
+	if len(parts) == 3 && parts[2] != "" {
+		sub += parts[2]
 	}
+	target := scheme + "://" + host + sub
 
 	var body io.Reader
 	if r.Method == http.MethodPost && r.Body != nil {
 		body = r.Body // POST 表单体原样转发（登录等场景）
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, tgt.String(), body)
+	// 每请求独立 cookiejar：重定向链内（如登录 302）种下的会话 Cookie 会随
+	// 后续跳转请求自动携带；完成后回写给浏览器。
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Jar:     jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 8 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
 		fail(w, 502, "构造请求失败")
 		return
@@ -98,7 +99,11 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	if ct := r.Header.Get("Content-Type"); ct != "" && r.Method == http.MethodPost {
 		req.Header.Set("Content-Type", ct)
 	}
-	resp, err := browserClient.Do(req)
+	// 入向 Cookie 透传（浏览器按 /b/{host} 子树自动携带，天然按站点隔离）
+	if ck := r.Header.Get("Cookie"); ck != "" {
+		req.Header.Set("Cookie", ck)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		fail(w, 502, "访问失败："+err.Error())
 		return
@@ -109,153 +114,76 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	for _, h := range []string{"X-Frame-Options", "Content-Security-Policy", "Content-Security-Policy-Report-Only"} {
 		resp.Header.Del(h)
 	}
+	// 出向 Cookie 回写（jar 只存 name=value；不加属性 → 浏览器默认作用域为
+	// 当前代理路径目录 /b/{scheme}/{host}/，即只在该站点的代理请求中回传）
+	finalURL := resp.Request.URL
+	for _, c := range jar.Cookies(finalURL) {
+		w.Header().Add("Set-Cookie", c.Name+"="+c.Value)
+	}
 
 	ct := resp.Header.Get("Content-Type")
-	finalURL := resp.Request.URL // 重定向后的最终地址（相对链接解析基准）
-
 	if strings.Contains(ct, "text/html") || strings.Contains(ct, "application/xhtml") {
-		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxRewrite))
+		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxHTML))
 		if rerr != nil {
 			fail(w, 502, "读取响应失败："+rerr.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(browserRewriteHTML(string(data), finalURL))
+		w.Header().Set("Content-Type", browserHTMLCT(ct)) // 保留原 charset（GBK 等不乱码）
+		_, _ = w.Write(browserInjectBase(string(data), finalURL))
 		return
 	}
-	if strings.Contains(ct, "text/css") {
-		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxRewrite))
-		if rerr != nil {
-			fail(w, 502, "读取响应失败："+rerr.Error())
-			return
-		}
+	// 其余类型：流式透传（CSS 相对 url() 按 CSS 自身代理 URL 解析，天然正确）
+	if ct != "" {
 		w.Header().Set("Content-Type", ct)
-		_, _ = w.Write([]byte(browserRewriteCSS(string(data), finalURL)))
-		return
 	}
-	// 其余类型：流式透传（图片/JS/JSON 等）
-	w.Header().Set("Content-Type", ct)
 	if resp.ContentLength >= 0 && resp.ContentLength <= browserMaxStream {
 		w.Header().Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
 	}
 	_, _ = io.Copy(w, io.LimitReader(resp.Body, browserMaxStream))
 }
 
-// browserProxyURL 把 ref（相对或绝对）解析为经本代理的 URL；不应代理的
-// （javascript:/data:/mailto:/tel:/blob:/about:/纯锚点/非 http(s) 目标）返回 false。
-func browserProxyURL(base *url.URL, ref string) (string, bool) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return "", false
+// browserHTMLCT 保留原始 charset：原 Content-Type 已含 charset 原样返回；
+// 缺失时仅补 text/html（不强制 utf-8，交由页面 meta/浏览器探测）。
+func browserHTMLCT(ct string) string {
+	if strings.Contains(strings.ToLower(ct), "charset") {
+		return ct
 	}
-	low := strings.ToLower(ref)
-	for _, p := range []string{"javascript:", "data:", "mailto:", "tel:", "blob:", "about:", "#"} {
-		if strings.HasPrefix(low, p) {
-			return "", false
-		}
-	}
-	u, err := url.Parse(ref)
-	if err != nil {
-		return "", false
-	}
-	abs := base.ResolveReference(u)
-	if abs.Scheme != "http" && abs.Scheme != "https" || abs.Host == "" {
-		return "", false
-	}
-	return "/b?u=" + url.QueryEscape(abs.String()), true
+	return "text/html"
 }
 
-// HTML 属性重写：prefix + 引号值（三种引号形态捕获其一）。
 var (
-	browserReHref  = regexp.MustCompile(`(?i)(<a\b[^>]*?\bhref\s*=\s*)("([^"]*)"|'([^']*)'|([^\s">]+))`)
-	browserReForm  = regexp.MustCompile(`(?i)(<form\b[^>]*?\baction\s*=\s*)("([^"]*)"|'([^']*)'|([^\s">]+))`)
-	browserReSrc   = regexp.MustCompile(`(?i)(\b(?:src|poster)\s*=\s*)("([^"]*)"|'([^']*)'|([^\s">]+))`)
-	browserReSrcst = regexp.MustCompile(`(?i)(\bsrcset\s*=\s*)("([^"]*)"|'([^']*)'|([^\s">]+))`)
-	browserReCSSU  = regexp.MustCompile(`(?i)url\(\s*('([^']*)'|"([^"]*)"|([^)'"]+))\s*\)`)
-	browserReImp   = regexp.MustCompile(`(?i)@import\s+("([^"]*)"|'([^']*)')`)
+	browserReBase    = regexp.MustCompile(`(?i)<base\b[^>]*>`)
+	browserReHead    = regexp.MustCompile(`(?i)<head[^>]*>`)
+	browserReHTMLTag = regexp.MustCompile(`(?i)<html[^>]*>`)
+	browserReCSPMeta = regexp.MustCompile(`(?i)<meta[^>]+http-equiv\s*=\s*("content-security-policy"|'content-security-policy'|content-security-policy)[^>]*>`)
 )
 
-// browserAttrVal 取属性值（捕获组 3/4/5 之一）。
-func browserAttrVal(sub []string) string {
-	for _, g := range []int{3, 4, 5} {
-		if sub[g] != "" {
-			return sub[g]
-		}
+// browserURLPath 代理路径形态的 URL（/b/{scheme}/{host}{path}?{query}）。
+func browserURLPath(u *url.URL) string {
+	p := u.EscapedPath()
+	if p == "" || !strings.HasPrefix(p, "/") {
+		p = "/" + p
 	}
-	return ""
+	if u.RawQuery != "" {
+		p += "?" + u.RawQuery
+	}
+	return "/b/" + u.Scheme + "/" + u.Host + p
 }
 
-// browserRewriteAttr 按正则重写属性值（统一改为双引号包裹的代理 URL）。
-func browserRewriteAttr(doc string, re *regexp.Regexp, base *url.URL) string {
-	return re.ReplaceAllStringFunc(doc, func(m string) string {
-		sub := re.FindStringSubmatch(m)
-		pv, ok2 := browserProxyURL(base, html.UnescapeString(browserAttrVal(sub)))
-		if !ok2 {
-			return m
-		}
-		return sub[1] + `"` + pv + `"`
-	})
-}
-
-// browserRewriteSrcset 重写 srcset（逗号分隔多候选，仅替换每段的 URL 部分）。
-func browserRewriteSrcset(doc string, re *regexp.Regexp, base *url.URL) string {
-	return re.ReplaceAllStringFunc(doc, func(m string) string {
-		sub := re.FindStringSubmatch(m)
-		val := html.UnescapeString(browserAttrVal(sub))
-		parts := strings.Split(val, ",")
-		out := make([]string, 0, len(parts))
-		for _, p := range parts {
-			fields := strings.Fields(strings.TrimSpace(p))
-			if len(fields) == 0 {
-				continue
-			}
-			if pv, ok2 := browserProxyURL(base, fields[0]); ok2 {
-				fields[0] = pv
-			}
-			out = append(out, strings.Join(fields, " "))
-		}
-		if len(out) == 0 {
-			return m
-		}
-		return sub[1] + `"` + html.EscapeString(strings.Join(out, ", ")) + `"`
-	})
-}
-
-// browserRewriteCSS 重写 CSS 中的 url(...) 与 @import（相对地址按该 CSS 自身 URL 解析）。
-func browserRewriteCSS(css string, base *url.URL) string {
-	css = browserReCSSU.ReplaceAllStringFunc(css, func(m string) string {
-		sub := browserReCSSU.FindStringSubmatch(m)
-		val := sub[2]
-		if val == "" {
-			val = sub[3]
-		}
-		if val == "" {
-			val = sub[4]
-		}
-		if pv, ok2 := browserProxyURL(base, val); ok2 {
-			return `url("` + pv + `")`
-		}
-		return m
-	})
-	css = browserReImp.ReplaceAllStringFunc(css, func(m string) string {
-		sub := browserReImp.FindStringSubmatch(m)
-		val := sub[2]
-		if val == "" {
-			val = sub[3]
-		}
-		if pv, ok2 := browserProxyURL(base, val); ok2 {
-			return `@import "` + pv + `"`
-		}
-		return m
-	})
-	return css
-}
-
-// browserRewriteHTML 重写 HTML 文档中的导航与资源引用。
-func browserRewriteHTML(doc string, base *url.URL) []byte {
-	doc = browserRewriteAttr(doc, browserReHref, base)  // 链接 → 代理（保持站内浏览）
-	doc = browserRewriteAttr(doc, browserReForm, base)  // 表单 → 代理（GET 字段/POST 体均透传）
-	doc = browserRewriteSrcset(doc, browserReSrcst, base)
-	doc = browserRewriteAttr(doc, browserReSrc, base) // 图片/脚本/iframe 等资源 → 代理（规避混合内容）
-	return []byte(doc)
+// browserInjectBase 去掉原有 <base> 与 CSP meta，注入指向当前代理路径的
+// <base>（注入点：<head> 后 > <html> 后 > 文档最前）。base 值为 ASCII，任何
+// 字符集下注入均安全。
+func browserInjectBase(doc string, finalURL *url.URL) []byte {
+	doc = browserReBase.ReplaceAllString(doc, "")
+	doc = browserReCSPMeta.ReplaceAllString(doc, "")
+	tag := `<base href="` + html.EscapeString(browserURLPath(finalURL)) + `">`
+	if m := browserReHead.FindStringIndex(doc); m != nil {
+		pos := m[1]
+		return []byte(doc[:pos] + tag + doc[pos:])
+	}
+	if m := browserReHTMLTag.FindStringIndex(doc); m != nil {
+		pos := m[1]
+		return []byte(doc[:pos] + tag + doc[pos:])
+	}
+	return []byte(tag + doc)
 }

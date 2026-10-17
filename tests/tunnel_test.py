@@ -103,30 +103,44 @@ st, body = get(tunnel({"m": "GET", "p": "/api/update/status"}))
 j = json.loads(body) if body else {}
 check("下载状态端点", st == 200 and j.get("ok") and "running" in j and "done" in j, body[:80])
 
-# 13) 浏览器代理 /b：本地起迷你 HTTP 服务，验证 HTML 重写与透传
+# 13) 浏览器代理 /b/{scheme}/{host}/{path}：本地起迷你 HTTP 服务，
+#     验证 base 注入（旧 base 剥除）、透传、查询参数透传、Cookie 双向
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-PAGE = b'<html><head><title>t</title></head><body><a href="/next">n</a><a href="javascript:void(0)">j</a><img src="pic.png"></body></html>'
+PAGE = b'<html><head><base href="http://old.example/"><title>t</title></head><body><a href="/next">n</a><img src="pic.png"></body></html>'
 class BH(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/page':
-            self.send_response(200); self.send_header('Content-Type', 'text/html'); self.end_headers(); self.wfile.write(PAGE)
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('Set-Cookie', 'sid=abc123; Path=/')
+            self.end_headers(); self.wfile.write(PAGE)
         elif self.path == '/pic.png':
             self.send_response(200); self.send_header('Content-Type', 'image/png'); self.end_headers(); self.wfile.write(b'PNGDATA')
         elif self.path.startswith('/echo'):
             self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.end_headers(); self.wfile.write(('QUERY:' + self.path).encode())
+        elif self.path.startswith('/ck'):
+            self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.end_headers()
+            self.wfile.write(('COOKIE:' + (self.headers.get('Cookie') or '')).encode())
         else:
             self.send_response(404); self.end_headers()
     def log_message(self, *a): pass
 bh = HTTPServer(('127.0.0.1', 8898), BH)
 threading.Thread(target=bh.serve_forever, daemon=True).start()
 
-st, body = get("http://127.0.0.1:8899/b?u=" + urllib.parse.quote("http://127.0.0.1:8898/page", safe=""))
-check("浏览器代理HTML重写", st == 200 and 'href="/b?u=' in body and 'src="/b?u=' in body and 'javascript:void(0)' in body, body[:200])
-st, body = get("http://127.0.0.1:8899/b?u=" + urllib.parse.quote("http://127.0.0.1:8898/pic.png", safe=""))
+st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:8898/page")
+check("浏览器代理base注入", st == 200 and '<base href="/b/http/127.0.0.1:8898/page">' in body and 'old.example' not in body, body[:200])
+st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:8898/pic.png")
 check("浏览器代理透传", st == 200 and body == "PNGDATA", body[:40])
-st, body = get("http://127.0.0.1:8899/b?u=" + urllib.parse.quote("http://127.0.0.1:8898/echo", safe="") + "&k=v")
-check("浏览器代理表单参数透传", st == 200 and 'QUERY:/echo?k=v' in body, body[:80])  # u 之外字段应透传给目标
+st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:8898/echo?k=v")
+check("浏览器代理查询参数透传", st == 200 and 'QUERY:/echo?k=v' in body, body[:80])
+# Cookie：代理响应回写 Set-Cookie；浏览器携带的 Cookie 透传给目标
+r1 = urllib.request.urlopen("http://127.0.0.1:8899/b/http/127.0.0.1:8898/page", timeout=5)
+sc = r1.headers.get("Set-Cookie") or ""
+r1.close()
+check("浏览器代理Cookie回写", "sid=abc123" in sc, sc)
+st, body = get(urllib.request.Request("http://127.0.0.1:8899/b/http/127.0.0.1:8898/ck", headers={"Cookie": sc}))
+check("浏览器代理Cookie透传", st == 200 and "COOKIE:sid=abc123" in body, body[:80])
 
 # 14) 更新下载：异步任务 + 轮询状态（经 GitHub API 资产端点）
 try:

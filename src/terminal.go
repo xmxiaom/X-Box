@@ -1,8 +1,9 @@
 package main
 
 // 终端模块：命令执行控制台。保持 cd 会话目录，单会话串行执行（互斥锁），
-// 30s 超时保护。纯标准库，无 PTY（fnOS 远程客户端 iframe 内 WebSocket 受限，
-// 且项目零依赖），兼容现有 API 隧道（POST 经 formBridge / 隧道分发）。
+// 60s 超时保护（长任务用 nohup ... >/log 2>&1 & 转后台）。纯标准库，无 PTY
+// （fnOS 远程客户端 iframe 内 WebSocket 受限，且项目零依赖），兼容现有 API
+// 隧道（POST 经 formBridge / 隧道分发）。
 //
 // 注意：此终端以运行 X-Box 的权限（fnOS 上为 root）执行任意命令；面板访问面
 // 由 fnOS 账号体系兜底，与 X-Box「无登录态、依赖 fnOS 远程访问」的安全模型一致。
@@ -102,10 +103,13 @@ func (s *Server) handleTerminalExec(w http.ResponseWriter, r *http.Request) {
 
 	termRT.mu.Lock()
 	dir := termRT.cwd
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	ecmd := exec.CommandContext(ctx, "sh", "-c", cmd)
 	ecmd.Dir = dir
+	// 补全 PATH：fnOS 应用运行环境的 PATH 可能不全，缺 /usr/sbin 等会导致
+	// ping/ip/iptables 等常用网络工具 "not found"，表现为"对外连接能力不足"
+	ecmd.Env = append(os.Environ(), "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	var out strings.Builder
 	ecmd.Stdout = &out
 	ecmd.Stderr = &out
@@ -115,7 +119,7 @@ func (s *Server) handleTerminalExec(w http.ResponseWriter, r *http.Request) {
 	termRT.mu.Unlock()
 
 	if ctx.Err() == context.DeadlineExceeded {
-		ok(w, map[string]any{"output": out.String() + "\n[命令超时（30s），已被终止]\n", "exitCode": -1, "cwd": cwd})
+		ok(w, map[string]any{"output": out.String() + "\n[命令超时（60s），已被终止]\n[提示：长耗时任务请转后台执行，如  nohup wget -O /tmp/x.fpk <URL> >/tmp/x.log 2>&1 &  （输出重定向后 sh 立即返回，任务在 NAS 上继续）]\n", "exitCode": -1, "cwd": cwd})
 		return
 	}
 	if runErr != nil {

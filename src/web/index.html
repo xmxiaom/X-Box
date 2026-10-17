@@ -399,22 +399,21 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         </div>
       </div>
 
-      <!-- 浏览器 -->
+      <!-- 浏览器（多标签 · 经后端 /b 同源代理加载） -->
       <div class="page" id="page-browser">
-        <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub">经本机代理加载（可打开禁止内嵌与 HTTP 站点；动态脚本页面可能显示不全）</span><div class="spacer"></div></div>
+        <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub">经本机代理加载（Ctrl+滚轮缩放；链接/弹窗均在框架内打开）</span><div class="spacer"></div></div>
         <div class="browser-bar">
           <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
           <button class="btn btn-primary btn-sm" onclick="goBrowser()">前往</button>
-          <button class="btn btn-outline btn-sm" onclick="browserOpenNew()">新窗口打开</button>
+          <button class="btn btn-outline btn-sm" onclick="browserNewTab('')">＋ 新标签页</button>
         </div>
-        <div class="browser-frame-wrap">
-          <iframe id="browser-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals" referrerpolicy="no-referrer"></iframe>
-        </div>
+        <div class="browser-tabs" id="browser-tabs"></div>
+        <div class="browser-frame-wrap" id="browser-frames"></div>
       </div>
 
       <!-- 终端 -->
       <div class="page" id="page-terminal">
-        <div class="page-head"><h2>终端</h2><span class="sub" id="term-sub">命令执行控制台（保持 cd 会话目录；以 root 运行）</span><div class="spacer"></div><button class="btn btn-primary btn-sm" id="term-btn-conn" onclick="termConnect()">连接</button><button class="btn btn-outline btn-sm" id="term-btn-disc" onclick="termDisconnect()" disabled>断开</button><button class="btn btn-outline btn-sm" onclick="termClear()">清屏</button></div>
+        <div class="page-head"><h2>终端</h2><span class="sub" id="term-sub">命令执行控制台（保持 cd 会话目录；以 root 运行；单命令上限 60s，长任务用 nohup 任务 >/tmp/x.log 2>&1 &amp; 转后台）</span><div class="spacer"></div><button class="btn btn-primary btn-sm" id="term-btn-conn" onclick="termConnect()">连接</button><button class="btn btn-outline btn-sm" id="term-btn-disc" onclick="termDisconnect()" disabled>断开</button><button class="btn btn-outline btn-sm" onclick="termClear()">清屏</button></div>
         <div class="term-warn">⚠️ 此终端以 <b>root</b> 身份在 NAS 上执行任意命令，仅经飞牛账号可访问。请谨慎操作。</div>
         <div class="term-out" id="term-out">未连接 · 点击「连接」开始终端会话</div>
         <div class="term-input-row">
@@ -613,7 +612,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, browser:()=>{}, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -1439,18 +1438,102 @@ async function pollDDNSSync(id){
   }
 }
 
-/* ---------- 浏览器（经后端 /b 同源代理加载） ---------- */
+/* ---------- 浏览器（多标签 · 经后端 /b 同源代理加载） ---------- */
+let browserTabs = [];   // {id, frame, url(代理地址), raw(原始地址), title}
+let browserActive = -1; // 活动标签下标
+let browserSeq = 0;
+let browserZoom = 1;    // 缩放随标签切换保留（同一页面内导航后重新应用）
+function browserInit(){
+  if(browserTabs.length) return;
+  browserNewTab('');
+}
+function browserNewTab(url){
+  if(browserTabs.length >= 10){ toast('最多 10 个标签页','err'); return null; }
+  const f = document.createElement('iframe');
+  f.className = 'browser-frame-item';
+  // 不给 allow-popups：target=_blank / window.open 一律不得弹到外部浏览器
+  f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals');
+  f.setAttribute('referrerpolicy', 'no-referrer');
+  document.getElementById('browser-frames').appendChild(f);
+  const t = {id: ++browserSeq, frame: f, url: url||'', raw: url||'', title: '新标签页'};
+  browserTabs.push(t);
+  f.addEventListener('load', function(){ browserOnFrameLoad(t); });
+  browserSetActive(browserTabs.length-1);
+  browserRenderTabs();
+  if(!url) document.getElementById('browser-url').focus();
+  return t;
+}
+function browserSetActive(i){
+  if(i < 0 || i >= browserTabs.length) return;
+  browserActive = i;
+  browserTabs.forEach(function(t, k){ t.frame.className = 'browser-frame-item' + (k === i ? ' on' : ''); });
+  const t = browserTabs[i];
+  document.getElementById('browser-url').value = t.raw;
+  browserSetSub(t.raw ? '经本机代理：'+t.raw : '');
+  browserRenderTabs();
+}
+function browserCloseTab(i){
+  const t = browserTabs[i];
+  if(!t) return;
+  try{ t.frame.remove(); }catch(e){}
+  browserTabs.splice(i, 1);
+  if(!browserTabs.length){ browserNewTab(''); return; }
+  browserSetActive(browserActive >= browserTabs.length ? browserTabs.length-1 : (browserActive > i ? browserActive-1 : (browserActive === i ? i : browserActive)));
+}
+function browserRenderTabs(){
+  const box = document.getElementById('browser-tabs');
+  let h = '';
+  browserTabs.forEach(function(t, k){
+    h += '<span class="browser-tab'+(k === browserActive ? ' on' : '')+'" onclick="browserSetActive('+k+')" title="'+esc(t.raw||'新标签页')+'">'+esc(t.title)+'<b class="bx" onclick="event.stopPropagation();browserCloseTab('+k+')">×</b></span>';
+  });
+  box.innerHTML = h;
+}
+function browserSetSub(s){ document.getElementById('browser-sub').textContent = s || '经本机代理加载（Ctrl+滚轮缩放；链接/弹窗均在框架内打开）'; }
+// 每次框架加载后：刷新标签标题 + 绑定缩放与链接拦截（同源代理，可直接操作 contentDocument）
+function browserOnFrameLoad(t){
+  let doc; try{ doc = t.frame.contentDocument; }catch(e){ return; }
+  if(!doc) return;
+  try{ const ti = (doc.title||'').trim(); if(ti) t.title = ti.slice(0, 20); }catch(e){}
+  browserRenderTabs();
+  if(doc.__zb) { browserApplyZoom(doc); return; }
+  doc.__zb = true;
+  // Ctrl+滚轮缩放（preventDefault 阻止浏览器整页缩放，仅缩放代理页面内容）
+  doc.addEventListener('wheel', function(e){
+    if(!e.ctrlKey) return;
+    e.preventDefault();
+    browserZoom = Math.min(3, Math.max(0.3, Math.round((browserZoom + (e.deltaY < 0 ? 0.1 : -0.1))*10)/10));
+    browserApplyZoom(doc);
+  }, false);
+  doc.addEventListener('keydown', function(e){
+    if(e.ctrlKey && (e.key === '0' || e.key === 'D0')){ browserZoom = 1; browserApplyZoom(doc); }
+  });
+  // 链接/表单 target=_blank|_top 一律改为框架内打开（fnOS 客户端会弹到外部浏览器）
+  doc.addEventListener('click', function(e){
+    let n = e.target;
+    while(n && n.nodeType === 1 && n.tagName !== 'A' && n.tagName !== 'FORM' && n !== doc.documentElement) n = n.parentNode;
+    if(n && n.nodeType === 1 && (n.tagName === 'A' || n.tagName === 'FORM') && n.target && n.target !== '_self'){ n.target = '_self'; }
+  }, true);
+  try{ doc.defaultView.open = function(u){ try{ doc.defaultView.location.href = String(u); }catch(e){} return null; }; }catch(e){}
+  browserApplyZoom(doc);
+}
+function browserApplyZoom(doc){
+  try{ if(doc && doc.body) doc.body.style.zoom = browserZoom; }catch(e){}
+}
 function goBrowser(){
   let u = (document.getElementById('browser-url').value||'').trim();
   if(!u) return;
   if(!/^https?:\/\//i.test(u)) u = 'http://'+u;
-  // 经服务端 /b 代理：同源响应绕过目标站 X-Frame-Options 与 https→http 混合内容拦截
-  document.getElementById('browser-frame').src = '/b?u='+encodeURIComponent(u);
-  document.getElementById('browser-sub').textContent = '经本机代理：'+u;
-}
-function browserOpenNew(){
-  const u = document.getElementById('browser-frame').src;
-  if(u) window.open(u, '_blank');
+  const m = u.match(/^(https?):\/\/([^\/?#]+)([^#]*)/);
+  if(!m){ toast('网址格式错误','err'); return; }
+  // 路径式同源代理：/b/{scheme}/{host}{path}——配合服务端注入 <base>，
+  // 页面内一切相对 URL（含 JS 动态 fetch/XHR/跳转）都自动回到代理
+  const src = '/b/'+m[1]+'/'+m[2]+(m[3]||'/');
+  let t = browserTabs[browserActive];
+  if(!t) t = browserNewTab('');
+  t.url = src; t.raw = u; t.title = m[2];
+  t.frame.src = src;
+  browserRenderTabs();
+  browserSetSub('经本机代理：'+u);
 }
 
 /* ---------- 终端（命令执行控制台，显式连接/断开会话） ---------- */
@@ -1499,9 +1582,9 @@ async function termExec(){
   termAppend(document.getElementById('term-prompt').textContent+' '+cmd+'\n');
   inp.value = '';
   try{
-    // 客户端超时放宽到 35s：服务端命令上限 30s，避免长命令被 8-10s 传输超时误杀
-    //（telnet 等挂住型命令仍会在 30s 被服务端超时终止并回显提示）
-    const j = await api('/api/terminal/exec', {method:'POST', body:JSON.stringify({cmd}), timeoutMs:35000});
+    // 客户端超时放宽到 65s：服务端命令上限 60s，避免长命令被 8-10s 传输超时误杀
+    //（挂住型命令仍会被服务端超时终止并回显提示；更长的任务用 nohup ... & 转后台）
+    const j = await api('/api/terminal/exec', {method:'POST', body:JSON.stringify({cmd}), timeoutMs:65000});
     termCwd = j.cwd || termCwd;
     updateTermPrompt();
     let out = j.output || '';
@@ -1525,10 +1608,16 @@ async function enterApp(){
 detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe），随后直接进入面板
 </script>
 <style>
-.browser-bar{display:flex;gap:8px;margin-bottom:12px;flex-shrink:0}
+.browser-bar{display:flex;gap:8px;margin-bottom:10px;flex-shrink:0}
 .browser-bar input{flex:1}
+.browser-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;flex-shrink:0}
+.browser-tab{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;color:var(--text2);cursor:pointer;max-width:180px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;background:var(--card)}
+.browser-tab.on{border-color:var(--primary);color:var(--primary);font-weight:600}
+.browser-tab .bx{cursor:pointer;color:var(--text3);font-weight:400;padding:0 2px}
+.browser-tab .bx:hover{color:var(--danger)}
 .browser-frame-wrap{flex:1;min-height:0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;background:#fff}
-#browser-frame{width:100%;height:100%;border:none;display:block}
+.browser-frame-item{width:100%;height:100%;border:none;display:none;background:#fff}
+.browser-frame-item.on{display:block}
 .term-warn{background:var(--warning-light);color:var(--warning);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px;flex-shrink:0}
 .term-warn b{color:var(--danger)}
 .term-out{flex:1;min-height:0;overflow-y:auto;background:#0E1116;color:#E6E6E6;border-radius:var(--radius);padding:12px 14px;font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-all}
