@@ -1,5 +1,5 @@
 # X-Box 隧道验证（无登录态，WSL python3 运行）：python3 tests/tunnel_test.py
-import base64, json, urllib.request, urllib.parse, subprocess, time, os, tempfile, sys
+import base64, json, urllib.request, urllib.parse, subprocess, time, os, tempfile, sys, re
 
 BIN = "/mnt/e/软件/开发/WorkBuddy/飞牛应用/x-box/pkg/app/server/xbox-amd64"
 TMPBIN = "/tmp/xbox_tun_test"
@@ -111,8 +111,10 @@ H = "127.0.0.1:8898"
 PAGE = (b'<html><head><base href="http://old.example/"><title>t</title>'
         b'<style>body{background:url(http://' + H.encode() + b'/pic.png)}</style>'
         b'<meta http-equiv="refresh" content="3;url=http://' + H.encode() + b'/next">'
+        b'<meta http-equiv="refresh" content="0; URL=cgi-bin/luci/">'  # 无引号相对：不能补引号
         b'<script>var h=location.hostname;</script></head><body>'
         b'<a href="/rel">r</a>'                                   # 相对：交给 base
+        b'<link rel="stylesheet" href="/root.css">'               # 根相对：必须拼目标站点根
         b'<a href="http://' + H.encode() + b'/abs">a</a>'         # 绝对：必须重写
         b'<img src="//' + H.encode() + b'/proto.png">'            # 协议相对：必须重写
         b'<img srcset="http://' + H.encode() + b'/s1.png 1x, /s2.png 2x">'
@@ -184,17 +186,27 @@ threading.Thread(target=bh.serve_forever, daemon=True).start()
 
 B = "http://127.0.0.1:8899/b/http/" + H
 st, body = get(B + "/page")
-check("浏览器代理base注入", st == 200 and '<base href="/b/http/' + H + '/page">' in body and 'old.example' not in body, body[:200])
+# 重写后的 URL 带版本段（/b/v1254/...）：改版后自动弃用浏览器里的旧改写结果。
+# 前缀随版本变化，所以从注入的 <base> 里取，避免每版都改测试。
+mp = re.search(r'<base href="(/b/[^/"]*/)http/', body)
+PRE = mp.group(1) if mp else "/b/"
+BP = PRE + "http/" + H
+check("浏览器代理base注入", st == 200 and ('<base href="' + BP + '/page">') in body and 'old.example' not in body, body[:200])
 check("浏览器代理运行时脚本注入", "__xbox" in body and "MutationObserver" in body, body[:120])
-check("浏览器代理绝对URL重写", 'href="/b/http/' + H + '/abs"' in body, body[:300])
-check("浏览器代理协议相对重写", 'src="/b/http/' + H + '/proto.png"' in body, body[:300])
-check("浏览器代理srcset重写", '/b/http/' + H + '/s1.png 1x' in body, body[:300])
-check("浏览器代理表单action重写", 'action="/b/http/' + H + '/login"' in body, body[:300])
+check("浏览器代理绝对URL重写", 'href="' + BP + '/abs"' in body, body[:300])
+check("浏览器代理协议相对重写", 'src="' + BP + '/proto.png"' in body, body[:300])
+check("浏览器代理根相对URL重写", 'href="' + BP + '/root.css"' in body, body[:300])
+check("浏览器代理srcset重写", BP + '/s1.png 1x' in body, body[:300])
+check("浏览器代理表单action重写", 'action="' + BP + '/login"' in body, body[:300])
 check("浏览器代理保留非URL协议", 'javascript:void(0)' in body and 'href="#top"' in body, body[:300])
 # HTML 可见文本不是 JS 代码，其中的 location.host 不能被改写
 check("浏览器代理HTML文本不改写", '<div>location.host</div>' in body, body[:300])
-check("浏览器代理CSS url()重写", 'url("/b/http/' + H + '/pic.png")' in body or "url('/b/http/" + H + "/pic.png')" in body, body[:300])
-check("浏览器代理meta refresh重写", 'url="/b/http/' + H + '/next"' in body or "url='/b/http/" + H + "/next'" in body, body[:300])
+check("浏览器代理CSS url()重写", 'url("' + BP + '/pic.png")' in body or "url('" + BP + "/pic.png')" in body, body[:300])
+check("浏览器代理meta refresh重写", 'url=' + BP + '/next' in body, body[:300])
+# meta content 自带的引号不能再补一层（否则 content="0; URL="x"" → 解析成刷新到
+# 空地址 → 无限刷新自己，实测 192.168.1.50 的 LuCI 首页就卡在这里）
+check("浏览器代理meta refresh不加引号", 'content="0; URL=cgi-bin/luci/"' in body
+      and 'URL="cgi-bin' not in body, body[:400])
 # 页面 JS 拿 location.hostname/host/origin/port 拼绝对 URL：必须替换为**面板**值，
 # 让拼出的 URL 落到面板根下再由孤儿兜底回代理（v1.2.47 替换为真实目标值反而引导
 # JS 拼出 http://192.168.1.1/... 直连 → https 面板下混合内容被拦 → 页面空白）
@@ -237,7 +249,7 @@ st, body = get(B + "/v.js")
 check("浏览器代理变量同名赋值不改写", st == 200
       and 'location=window.location' in body and 'boot(location.href)' in body, body[:220])
 st, body = get(B + "/style.css")
-check("浏览器代理CSS文件重写", st == 200 and '/b/http/' + H + '/pic.png' in body, body[:120])
+check("浏览器代理CSS文件重写", st == 200 and BP + '/pic.png' in body, body[:120])
 st, body = get(B + "/pic.png")
 check("浏览器代理透传", st == 200 and body == "PNGDATA", body[:40])
 st, body = get(B + "/echo?k=v")
@@ -252,12 +264,12 @@ try:
     rr.close()
 except urllib.error.HTTPError as e:
     loc, code = e.headers.get("Location") or "", e.code
-check("浏览器代理跳转Location重写", code == 302 and loc == "/b/http/" + H + "/next", "%s %s" % (code, loc))
+check("浏览器代理跳转Location重写", code == 302 and loc == BP + "/next", "%s %s" % (code, loc))
 # Cookie：回写带站点隔离 Path；入向透传给目标
 r1 = urllib.request.urlopen(B + "/page", timeout=5)
 sc = r1.headers.get("Set-Cookie") or ""
 r1.close()
-check("浏览器代理Cookie回写", "sid=abc123" in sc and "Path=/b/http/" + H + "/" in sc, sc)
+check("浏览器代理Cookie回写", "sid=abc123" in sc and ("Path=" + BP + "/") in sc, sc)
 st, body = get(urllib.request.Request(B + "/ck", headers={"Cookie": "sid=abc123"}))
 check("浏览器代理Cookie透传", st == 200 and "COOKIE:sid=abc123" in body, body[:80])
 # 304 必须原样返回：不得重写、不得写入注入脚本（v1.2.53 修复：此前给 304 写了
@@ -282,7 +294,7 @@ try:
     txt = _gz.decompress(raw).decode("utf-8", "replace")
 except Exception:
     txt = raw.decode("utf-8", "replace")
-check("浏览器代理文本gzip回传", enc == "gzip" and '<base href="/b/http/' + H + '/page">' in txt and len(raw) < len(txt), enc)
+check("浏览器代理文本gzip回传", enc == "gzip" and ('<base href="' + BP + '/page">') in txt and len(raw) < len(txt), enc)
 # 缓存头透传（二次访问命中浏览器缓存 / 条件请求 304）
 rq2 = urllib.request.urlopen(B + "/page", timeout=5)
 cc = rq2.headers.get("Cache-Control") or ""; et = rq2.headers.get("ETag") or ""; rq2.close()
@@ -295,7 +307,14 @@ try:
     rr.close()
 except urllib.error.HTTPError as e:
     oloc, ocode = e.headers.get("Location") or "", e.code
-check("孤儿路径兜底回代理", ocode == 307 and oloc == "/b/http/" + H + "/cgi-bin/x?a=1", "%s %s" % (ocode, oloc))
+check("孤儿路径兜底回代理", ocode == 307 and oloc == BP + "/cgi-bin/x?a=1", "%s %s" % (ocode, oloc))
+# 代理面板自身必须拒绝：/b/https/面板域名/... 会打回面板 → 面板 307 回 /b/...
+# 形成每秒几十条的自环（实测百度地图 worker_wasm 请求）
+st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:8899/")
+check("浏览器代理拒绝代理自身", st == 400 and "面板自身" in body, "%s %s" % (st, body[:80]))
+# 旧路径（不带版本段）与任意版本段都要能正常服务（面板里写死的 /b/... 仍可用）
+st, body = get("http://127.0.0.1:8899/b/v9999/http/" + H + "/page")
+check("浏览器代理版本段兼容", st == 200 and ('<base href="' + BP + '/page">') in body, body[:100])
 # 响应源码快照：诊断"200 但页面空白"时直接看目标返回了什么
 st, body = get(tunnel({"m": "GET", "p": "/api/browser/snap?target=" + urllib.parse.quote("http://" + H + "/page", safe="")}))
 j = json.loads(body) if body else {}

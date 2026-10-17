@@ -1543,8 +1543,9 @@ function browserToProxy(u){
   return '/b/'+m[1]+'/'+m[2]+(m[3]||'/');
 }
 // 代理路径 → 原始 URL（地址栏/标签标题显示真实地址，便于核对）
+// 路径里可能带版本段（/b/v1254/https/host/...），用于升级后自动弃用旧缓存
 function browserFromProxy(src){
-  const m = String(src||'').match(/\/b\/(https?)\/([^\/?#]+)([^#]*)/);
+  const m = String(src||'').match(/\/b\/(?:v\d+\/)?(https?)\/([^\/?#]+)([^#]*)/);
   if(!m) return '';
   return m[1]+'://'+m[2]+(m[3]||'/');
 }

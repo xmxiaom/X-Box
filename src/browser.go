@@ -176,7 +176,7 @@ func (s *Server) handleBrowserRoot(w http.ResponseWriter, r *http.Request) {
 // handleBrowserProxy GET/POST /b/{scheme}/{host}/{path}?{query}：同源网页代理。
 func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.RequestURI() // 保留原始编码（含查询串）
-	rest := strings.TrimPrefix(raw, "/b/")
+	rest := browserStripVerSeg(strings.TrimPrefix(raw, "/b/"))
 	parts := strings.SplitN(rest, "/", 3)
 	scheme := parts[0]
 	if scheme != "http" && scheme != "https" {
@@ -188,6 +188,13 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := parts[1]
+	// 禁止代理面板自身：/b/https/面板域名/... 会打回面板 → 面板 307 回 /b/...
+	// —— 实测每秒几十条 307 的自环（worker_wasm_ncq5j1.js），并污染 lastSite，
+	// 连带把别的站点的孤儿路径也带偏。
+	if browserIsPanelHost(host, r) {
+		fail(w, 400, "不能通过代理访问面板自身（会造成自环）")
+		return
+	}
 	sub := "/"
 	if len(parts) == 3 && parts[2] != "" {
 		sub += parts[2]
@@ -305,7 +312,7 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	// 出向 Cookie 回写：显式 Path 限本站点代理子树（浏览器默认"当前请求目录"
 	// 在无子路径时会抬到 /b/，导致跨站点串 cookie）
-	cookiePath := "; Path=/b/" + scheme + "/" + host + "/"
+	cookiePath := "; Path=" + browserPathPrefix() + scheme + "/" + host + "/"
 	for _, c := range jar.Cookies(tu) {
 		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePath)
 	}
@@ -480,14 +487,43 @@ var (
 	browserReLocAssign = regexp.MustCompile(`(?i)(^|[^.\w$])(?:(?:document|window|top|self|parent)\s*\.\s*location(?:\s*\.\s*href)?|location\s*\.\s*href)\s*=\s*([^=\s])`)
 )
 
-// browserUnProxy 把面板形态的 URL（含 /b/{scheme}/{host}/...）还原为目标 URL，
+// browserVerSeg 代理路径的版本段（/b/v1254/{scheme}/{host}/...）。
+// 为什么必须有：改写结果随版本变化，而目标站的静态资源常带
+// Cache-Control: max-age=31536000, immutable —— 路径不变的话，升级后浏览器
+// 仍然用旧版本改写出来的那份（v1.2.54 修复了百度大包的语法错误，用户却还在
+// 报同样的行号，就是命中了旧缓存）。把版本写进路径 = 每次升级自动弃用旧缓存。
+func browserVerSeg() string { return "v" + strings.ReplaceAll(version, ".", "") }
+
+// browserPathPrefix 代理路径前缀，如 "/b/v1254/"。
+func browserPathPrefix() string { return "/b/" + browserVerSeg() + "/" }
+
+// browserStripVerSeg 去掉路径里的版本段（"v1254/https/host/x" → "https/host/x"），
+// 供解析入口统一使用；不带版本段的旧路径原样返回（兼容面板里写死的 /b/...）。
+func browserStripVerSeg(rest string) string {
+	i := strings.IndexByte(rest, '/')
+	if i > 1 && rest[0] == 'v' {
+		digits := true
+		for k := 1; k < i; k++ {
+			if rest[k] < '0' || rest[k] > '9' {
+				digits = false
+				break
+			}
+		}
+		if digits {
+			return rest[i+1:]
+		}
+	}
+	return rest
+}
+
+// browserUnProxy 把面板形态的 URL（含 /b/{ver}/{scheme}/{host}/...）还原为目标 URL，
 // 用于 Referer 转发（目标站防盗链校验需要真实来源）。非代理 URL 原样返回。
 func browserUnProxy(s string) string {
 	i := strings.Index(s, "/b/")
 	if i < 0 {
 		return s
 	}
-	rest := s[i+3:]
+	rest := browserStripVerSeg(s[i+3:])
 	j := strings.Index(rest, "/")
 	if j < 0 {
 		return s
@@ -500,6 +536,33 @@ func browserUnProxy(s string) string {
 	return scheme + "://" + strings.TrimPrefix(tail, "/")
 }
 
+// browserIsPanelHost 目标主机是否就是面板自己（含反代/远程访问 Host）。
+// 用于拦住"代理面板自身"的自环：面板对未知路径会 307 回 /b/...，套一层代理
+// 就变成无限重定向（实测百度地图页每秒钟几十条 307）。
+func browserIsPanelHost(host string, r *http.Request) bool {
+	norm := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if i := strings.LastIndex(s, ":"); i > 0 {
+			port := s[i+1:]
+			if port == "80" || port == "443" {
+				s = s[:i]
+			}
+		}
+		return s
+	}
+	h := norm(host)
+	for _, cand := range []string{r.Host, r.Header.Get("X-Forwarded-Host"), r.Header.Get("Host")} {
+		if cand == "" {
+			continue
+		}
+		c := norm(strings.Split(cand, ",")[0])
+		if c != "" && h == c {
+			return true
+		}
+	}
+	return false
+}
+
 // browserURLPath 代理路径形态的 URL（/b/{scheme}/{host}{path}?{query}）。
 func browserURLPath(u *url.URL) string {
 	p := u.EscapedPath()
@@ -509,10 +572,14 @@ func browserURLPath(u *url.URL) string {
 	if u.RawQuery != "" {
 		p += "?" + u.RawQuery
 	}
-	return "/b/" + u.Scheme + "/" + u.Host + p
+	return browserPathPrefix() + u.Scheme + "/" + u.Host + p
 }
 
-// browserProxyURL 把绝对/协议相对 URL 转成代理路径；相对 URL 与非 http(s) 原样返回。
+// browserProxyURL 把绝对/协议相对/根相对 URL 转成代理路径；非 http(s)、
+// 相对路径原样返回。
+// 根相对（"/wolfman/x.css"）必须在这里就改写：它不经过 <base>（以 "/" 开头的
+// URL 一律从站点根解析），落到面板根下只能靠孤儿重定向兜底，而孤儿重定向依赖
+// "最近访问的站点"，多站点/自代理时会把路径指错（百度地图的 CSS 就是这么丢的）。
 func browserProxyURL(s string, cur *url.URL) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -526,6 +593,8 @@ func browserProxyURL(s string, cur *url.URL) string {
 	}
 	if strings.HasPrefix(s, "//") { // 协议相对
 		s = cur.Scheme + ":" + s
+	} else if strings.HasPrefix(s, "/") && cur.Host != "" { // 根相对
+		return browserPathPrefix() + cur.Scheme + "/" + cur.Host + s
 	}
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
@@ -597,7 +666,10 @@ func browserRewriteCSS(css string, tu *url.URL) string {
 	})
 }
 
-// browserRewriteRefreshValue 重写 Refresh 头里的 url=。
+// browserRewriteRefreshValue 重写 Refresh 头/meta 里的 url=。
+// 引号只在原文有引号时才补：meta 的 content 本身已被一层引号包着，
+// 再补一层会变成 content="0; URL="cgi-bin/luci/"" —— 浏览器解析成"0 秒刷新到
+// 空地址"，于是无限刷新自己（实测 192.168.1.50 的 LuCI 首页循环卡死）。
 func browserRewriteRefreshValue(v string, tu *url.URL) string {
 	return browserReRefreshU.ReplaceAllStringFunc(v, func(m string) string {
 		sub := browserReRefreshU.FindStringSubmatch(m)
@@ -607,7 +679,7 @@ func browserRewriteRefreshValue(v string, tu *url.URL) string {
 		q := sub[2]
 		nv := browserProxyURL(sub[3], tu)
 		if q == "" {
-			q = "\""
+			return sub[1] + nv
 		}
 		return sub[1] + q + nv + q
 	})
@@ -1035,7 +1107,7 @@ func (s *Server) handleOrphan(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "未找到")
 		return
 	}
-	dest := "/b/" + strings.Replace(site, "://", "/", 1) + r.URL.RequestURI()
+	dest := browserPathPrefix() + strings.Replace(site, "://", "/", 1) + r.URL.RequestURI()
 	http.Redirect(w, r, dest, http.StatusTemporaryRedirect)
 }
 
@@ -1070,15 +1142,18 @@ func browserPatchScript(tu *url.URL) string {
 		// 脚本错误上报（最先安装）：页面 JS 崩溃（如跨源访问抛 SecurityError 导致
 		// 登录表单等后续渲染中断）时，面板能直接看到错误位置
 		`window.onerror=function(m,s,l){try{parent.postMessage({__xbox:1,type:"jserr",url:location.href,msg:String(m).slice(0,200),line:l,src:String(s||"")},"*");}catch(e){}return false;};` +
-		`var P="/b/",H=` + hostLit + `,O=` + originLit + `;` +
+		`var P="` + browserPathPrefix() + `",H=` + hostLit + `,O=` + originLit + `;` +
 		// px: 任意 URL → 代理路径（相对/非 http 原样）
 		`function px(u){try{if(typeof u!=="string")return u;var s=u.replace(/^\s+|\s+$/g,"");if(!s)return u;` +
 		`var l=s.toLowerCase();if(l.indexOf("javascript:")===0||l.indexOf("data:")===0||l.indexOf("mailto:")===0||l.indexOf("#")===0)return u;` +
+		// 根相对（"/res/x.js"）：<base> 管不到，必须显式拼上目标站点根，
+		// 否则落到面板根下 → 孤儿重定向 → 站点错位（百度地图 CSS/Worker 全丢）
+		`if(s.charAt(0)==="/"&&s.charAt(1)!=="/"){var g=/^(https?):\/\/([\s\S]+)$/.exec(O);if(g)return P+g[1]+"/"+g[2]+s;}` +
 		`if(s.indexOf("//")===0)s=location.protocol+s;` +
 		`var m=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!m)return u;` +
 		`return P+m[1]+"/"+m[2]+((m[3]&&m[3].charAt(0)==="/")?m[3]:"/"+(m[3]||""));}catch(e){return u;}}` +
 		// un: 代理路径 → 原始绝对 URL
-		`function un(p){try{var m=/^\/b\/(https?)\/([^\/]+)([\s\S]*)$/.exec(String(p));if(m)return m[1]+"://"+m[2]+(m[3]||"/");}catch(e){}return String(p);}` +
+		`function un(p){try{var m=/^\/b\/(?:v\d+\/)?(https?)\/([^\/]+)([\s\S]*)$/.exec(String(p));if(m)return m[1]+"://"+m[2]+(m[3]||"/");}catch(e){}return String(p);}` +
 		// norm: 任意形式（相对/代理路径/绝对/面板绝对）→ 原始目标绝对 URL（供宿主新标签用）
 		`function norm(u){var s=String(u==null?"":u).replace(/^\s+|\s+$/g,"");if(!s)return "";` +
 		`var i=s.indexOf("/b/");if(i>=0)return un(s.substring(i));` +
@@ -1101,6 +1176,10 @@ func browserPatchScript(tu *url.URL) string {
 		// window.open / showModalDialog → 交由宿主新建标签
 		`window.open=function(u){msg("newtab",u);return null;};` +
 		`try{window.showModalDialog=function(u){msg("newtab",u);return null;};}catch(e){}` +
+		// Worker：新建时把脚本地址改写为代理路径。new Worker("/res/newui/x.js")
+		// 是根相对，不改写会落到面板根下（百度地图的 wasm worker 就这么丢的）。
+		`try{var OW=window.Worker;if(OW){var NW=function(u,o){return new OW(px(u),o);};` +
+		`NW.prototype=OW.prototype;window.Worker=NW;}}catch(e){}` +
 		// 原型级 setter 拦截：地图瓦片/懒加载图片大量使用 new Image()、
 		// createElement('img') 且**不插入 DOM**（MutationObserver 观察不到），
 		// 只能通过原型上的 src/href setter 兜住，否则这类资源直连目标必然失败。
