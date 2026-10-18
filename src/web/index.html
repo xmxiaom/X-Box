@@ -493,7 +493,21 @@ let ddnsData = null, ddnsIfaces = [];
  * fetch/iframe 挂起），而 / 路径畅通（诊断实测）。全部 API 请求编码进
  * /?__x=<base64url(JSON{m,p,b,sid})> 隧道参数，由服务端 tunnelBridge 还原。
  * 通道：XHR（实测畅通）→ fetch → 导航 iframe，逐一超时回退。 */
+// api：所有调用方的统一入口。传输类错误（HTTP 0/5xx/解析失败/超时——多为
+// 网关忙或同步占 IO 的瞬时窗口）延迟 1.2s 自动重试一次；应用错误（4xx）直接抛。
 async function api(path, opts) {
+  try{
+    return await apiOnce(path, opts);
+  }catch(e){
+    if(e && e.transport){
+      await new Promise(r => setTimeout(r, 1200));
+      return await apiOnce(path, opts);
+    }
+    throw e;
+  }
+}
+
+async function apiOnce(path, opts) {
   opts = opts || {};
   const url = apiTunnel(path, opts);
   // 通道回退只看「传输失败」（超时/网络错误，err.transport=true）；
@@ -516,7 +530,8 @@ async function api(path, opts) {
       try{ const j = await r.json(); if(j && j.error) msg = j.error; }catch(e){}
       throw new Error(msg); // 服务端有响应：应用错误
     }
-    const j = await r.json();
+    let j;
+    try{ j = await r.json(); }catch(e){ const er = new Error('响应解析失败（网关可能正忙）'); er.transport = true; throw er; }
     if(!j.ok) throw new Error(j.error || '请求失败');
     return j;
   }
@@ -534,6 +549,7 @@ function xhrApi(url, method, timeoutMs){
         if(xhr.status === 200){
           let j = null; try{ j = JSON.parse(xhr.responseText); }catch(e){}
           if(j && j.ok) resolve(j);
+          else if(j === null && !xhr.responseText){ const er = new Error('响应解析失败（网关可能正忙）'); er.transport = true; reject(er); }
           else reject(new Error((j && j.error) || '请求失败')); // 应用错误（有响应）
         }else if(xhr.status === 0 || xhr.status >= 500){
           let msg = 'HTTP ' + xhr.status;
@@ -589,7 +605,7 @@ function navApi(path, opts, timeoutMs){
         const j = JSON.parse(text);
         if(j && j.ok){ resolve(j); }
         else { reject(new Error((j && j.error) || '请求失败')); } // 有响应：应用错误
-      }catch(e){ reject(new Error('响应解析失败')); } // 有加载但非 JSON：应用错误（通道本身通）
+      }catch(e){ const er = new Error('响应解析失败（网关可能正忙）'); er.transport = true; reject(er); } // HTML 错误页/截断 → 传输层，允许重试
       cleanup();
     };
     frame.onerror = () => { if(done) return; done = true; clearTimeout(timer); const e = new Error('网络错误'); e.transport = true; reject(e); cleanup(); };
