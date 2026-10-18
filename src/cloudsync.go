@@ -48,7 +48,8 @@ type SyncState struct {
 	LastErr  string    `json:"lastErr"`
 	Files    int       `json:"files"`    // 上次同步复制的文件数
 	Bytes    int64     `json:"bytes"`    // 上次同步复制的字节
-	Deleted  int       `json:"deleted"`  // 上次删除的文件数
+	Deleted  int       `json:"deleted"`  // 上次删除的文件/空目录数
+	Dirs     int       `json:"dirs"`     // 上次创建的目录数
 	Scanned  int       `json:"scanned"`  // 上次扫描的文件数
 	Total    int       `json:"total"`    // 本轮待处理文件数
 	Done     int       `json:"done"`     // 已处理数（运行中实时更新）
@@ -134,6 +135,7 @@ type srcEntry struct {
 	rel   string
 	size  int64
 	mtime time.Time
+	isDir bool
 }
 
 // scanSource 收集源端文件清单（相对路径）。onProg 每 500 项回调一次（可为 nil）。
@@ -161,6 +163,8 @@ func scanSource(root string, excludes []string, onProg func(int)) ([]srcEntry, e
 			return nil // 跳过符号链接，避免指到挂载点之外
 		}
 		if info.IsDir() {
+			// 目录也收集：空文件夹也要能同步过去
+			out = append(out, srcEntry{rel: rel, size: 0, mtime: info.ModTime(), isDir: true})
 			return nil
 		}
 		if !info.Mode().IsRegular() {
@@ -317,6 +321,9 @@ func saveSyncIndex(id string, idx map[string]syncIdxEnt) {
 
 // indexUnchanged 判断相对上次索引是否未变（2 秒容差，与目标端比对一致）。
 func indexUnchanged(e syncIdxEnt, f srcEntry) bool {
+	if f.isDir {
+		return true // 目录：只比对"目标是否存在"，mtime 不参与（会随内容变化）
+	}
 	if e.Size != f.size {
 		return false
 	}
@@ -375,6 +382,17 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	var doneBytes int64
 	for i, f := range pending {
 		dst := filepath.Join(task.Target, f.rel)
+		if f.isDir {
+			// 目录：不存在则创建（含 mtime 不比对的语义，见 indexUnchanged）
+			if _, serr := os.Stat(dst); serr != nil {
+				if merr := os.MkdirAll(dst, 0o755); merr == nil {
+					st.Dirs++
+				}
+			}
+			done := i + 1
+			setSyncState(task.ID, func(x *SyncState) { x.Done = done })
+			continue
+		}
 		if sameFileInfo(f, dst) {
 			doneBytes += f.size
 			done := i + 1
@@ -404,40 +422,62 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	}
 
 	// 镜像删除（带安全阀）：
-	//   1. 首轮（索引为空，即上次同步结果未知）绝不删除——远程挂载是按需枚举，
-	//      首扫可能只看到网盘的一小部分，此时做镜像会把目标端文件误删光；
-	//   2. 单轮删除数超过 max(100, 已复制数×2) 时立即中止并保留剩余文件，
-	//      挂载端枚举异常（部分内容缺失）时宁可漏删也不误删。
+	//   1. 首轮（索引为空）绝不删除——远程挂载按需枚举，首扫可能只看到网盘
+	//      的一小部分，此时镜像会把目标端文件误删光；
+	//   2. 删除项（文件+空目录）超过 max(100, 已复制数×2) 立即中止；
+	//   3. 目录按深度降序删除，只有空目录才会真正被移除。
 	if task.Mirror && len(idx) > 0 {
 		delLimit := st.Files * 2
 		if delLimit < 100 {
 			delLimit = 100
 		}
 		aborted := false
-		_ = filepath.Walk(task.Target, func(p string, info os.FileInfo, werr error) error {
+		del := func(p, rel string) {
 			if aborted {
-				return errors.New("del-limit")
+				return
 			}
-			if werr != nil || info.IsDir() || p == task.Target {
-				return nil
-			}
-			rel, rerr := filepath.Rel(task.Target, p)
-			if rerr != nil || srcSet[rel] {
-				return nil
-			}
-			if syncExcluded(rel, info.Name(), excludes) {
-				return nil
+			if srcSet[rel] || syncExcluded(rel, filepath.Base(rel), excludes) {
+				return
 			}
 			if err := os.Remove(p); err == nil {
 				st.Deleted++
 				if st.Deleted > delLimit {
 					aborted = true
 					st.LastErr = fmt.Sprintf("镜像删除中止：本轮删除数(%d)异常超过上限(%d)，已保留剩余文件。若确需删除请再次同步", st.Deleted, delLimit)
-					return errors.New("del-limit")
 				}
+			}
+		}
+		// 文件
+		_ = filepath.Walk(task.Target, func(p string, info os.FileInfo, werr error) error {
+			if werr != nil || info.IsDir() || p == task.Target {
+				return nil
+			}
+			rel, rerr := filepath.Rel(task.Target, p)
+			if rerr != nil {
+				return nil
+			}
+			del(p, rel)
+			return nil
+		})
+		// 空目录（深度降序：子目录先于父目录尝试）
+		var dirs []string
+		_ = filepath.Walk(task.Target, func(p string, info os.FileInfo, werr error) error {
+			if werr == nil && info.IsDir() && p != task.Target {
+				dirs = append(dirs, p)
 			}
 			return nil
 		})
+		sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+		for _, d := range dirs {
+			if aborted {
+				break
+			}
+			rel, rerr := filepath.Rel(task.Target, d)
+			if rerr != nil {
+				continue
+			}
+			del(d, rel)
+		}
 	}
 
 	saveSyncIndex(task.ID, newIdx)
