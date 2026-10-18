@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.62"
+	version = "1.2.63"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -95,6 +95,11 @@ func main() {
 	mux.HandleFunc("GET /api/update/dirs", handleUpdateDirs)
 	mux.HandleFunc("GET /api/update/status", handleUpdateStatus)
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
+	// 通道探测端点：登录态由 fnOS 网关校验，这里只回报已认证，
+	// 让前端不需要靠 404 判定链路可用
+	mux.HandleFunc("GET /api/auth/status", func(w http.ResponseWriter, r *http.Request) {
+		ok(w, map[string]any{"authed": true})
+	})
 	mux.HandleFunc("GET /api/browser/log", handleBrowserLog)
 	mux.HandleFunc("GET /api/browser/snap", handleBrowserSnap)
 	// 浏览器代理走顶级路径 /b（fnOS 中转只拦 /api/*，页面导航路径畅通）
@@ -288,7 +293,8 @@ func ok(w http.ResponseWriter, v any) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	// 网关可能以 /app/<appname> 或 /app/<appname>/index.html 形式转发
+	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
 		http.NotFound(w, r)
 		return
 	}
@@ -297,6 +303,10 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	page := bytes.Replace(indexHTML, []byte("<!--XBOX_VER-->"), []byte("v"+version), 1)
 	// 网关模式下前端需要知道前缀，才能拼出网关能识别的绝对路径
 	page = bytes.Replace(page, []byte("__XBOX_BASE__"), []byte(appBase), 1)
+	// 注入 <base>：无论网关以 /app/X-Box 还是 /app/X-Box/index.html 转发，
+	// 页面里的相对请求都会落到应用根目录下
+	baseTag := []byte(`<base href="` + appBase + `/">`)
+	page = bytes.Replace(page, []byte("<head>"), append([]byte("<head>"), baseTag...), 1)
 	_, _ = w.Write(page)
 }
 

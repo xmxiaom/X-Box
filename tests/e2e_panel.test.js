@@ -115,7 +115,8 @@ function makeDom(opts) {
     await sleep(100);
     check(typeof win.apiTunnel === 'function' && typeof win.tunnelB64 === 'function', 'T: 隧道函数缺失');
     const tun = win.apiTunnel('/api/clean', { method: 'POST', body: '{"cats":["tmp"]}' });
-    check(tun.indexOf('/?__x=') === 0, 'T: apiTunnel 输出格式错误');
+    // 必须是相对形式：网关模式下才能继承 /app/<appname>/ 前缀（绝对路径会跑出网关）
+    check(tun.indexOf('?__x=') === 0 && tun.indexOf('//') < 0, 'T: apiTunnel 输出格式错误');
     const tp = JSON.parse(b64d(decodeURIComponent(tun.slice(tun.indexOf('=') + 1))));
     check(tp.m === 'POST' && tp.p === '/api/clean' && tp.b === '{"cats":["tmp"]}' && tp.sid === undefined, 'T: 隧道 payload 错误（不应有 sid）: ' + JSON.stringify(tp));
     const tun2 = win.apiTunnel('/api/ddns/record/save', { method: 'POST', body: JSON.stringify({ name: '中文域名' }) });

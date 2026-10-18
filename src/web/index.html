@@ -543,7 +543,8 @@ window.tunnelB64 = tunnelB64;
 function apiTunnel(path, opts){
   opts = opts || {};
   const payload = {m: opts.method || 'GET', p: path, b: opts.body || ''};
-  return '/?__x=' + encodeURIComponent(tunnelB64(JSON.stringify(payload)));
+  // 相对路径：网关模式下自动继承 /app/<appname>/ 前缀，绝对路径会跑出网关
+  return '?__x=' + encodeURIComponent(tunnelB64(JSON.stringify(payload)));
 }
 window.apiTunnel = apiTunnel;
 // ---- 导航通道（隐藏 iframe.src 打隧道 URL）----
