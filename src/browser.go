@@ -41,10 +41,12 @@ import (
 	"crypto/tls"
 	"html"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -316,7 +318,13 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 		browserFail(w, target, err)
 		return
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+	// UA 透传客户端真实值：部分设备（光猫等）按 UA 返回不同界面，硬编码 Linux UA
+	// 会让它给出缺帧/404 的降级页面。
+	if ua := r.Header.Get("User-Agent"); ua != "" {
+		req.Header.Set("User-Agent", ua)
+	} else {
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	}
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	if ct := r.Header.Get("Content-Type"); ct != "" && r.Method == http.MethodPost {
@@ -381,6 +389,9 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 	cookiePath := "; Path=" + browserPathPrefix() + scheme + "/" + host + "/"
 	if direct {
 		cookiePath = "; Path=/"
+	}
+	if os.Getenv("XBOX_DEBUG_COOKIE") == "1" {
+		log.Printf("[cookie] %s respSet=%d jarHit=%d", target, len(resp.Cookies()), len(jar.Cookies(tu)))
 	}
 	for _, c := range jar.Cookies(tu) {
 		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePath)
