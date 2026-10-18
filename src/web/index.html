@@ -641,6 +641,15 @@ document.getElementById('menu').addEventListener('click', e => {
   (loaders[page]||(()=>{}))();
 });
 
+function syncPollTick(){
+  const pg = document.getElementById('page-sync');
+  if(pg && pg.classList.contains('active')) {
+    loadSyncTasks(); // 末尾会再次设置 syncTimer，形成轮询链
+    return;
+  }
+  syncTimer = setTimeout(syncPollTick, 1500); // 已切到其他页：挂着等，切回即恢复
+}
+
 /* ---------- 网盘同步（远程挂载 → 本地，类 Cloud Sync 单向同步） ---------- */
 let syncCache = [], syncTimer = null;
 async function loadSyncTasks(){
@@ -696,7 +705,8 @@ async function loadSyncTasks(){
           '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="syncDelete(\'' + esc(t.id) + '\')">删除</button>' +
         '</div></div>';
     }).join('') || '<div class="empty">还没有同步任务，点右上角「添加同步任务」</div>');
-    if(syncCache.some(t => t.state && t.state.running)){ setTimeout(loadSyncTasks, 1000); } // 同步中每秒刷新，完成即显示结果
+    if(syncTimer) clearTimeout(syncTimer);
+    syncTimer = setTimeout(syncPollTick, 1500);
   }catch(e){ toast(e.message,'err'); }
 }
 function openSyncForm(id){
