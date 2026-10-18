@@ -63,7 +63,7 @@ var syncStore struct {
 	busy  map[string]bool
 }
 
-const syncMaxFiles = 200000 // 单次扫描上限，防首次全量拖死
+const syncMaxFiles = 800000 // 单次扫描上限：百度网盘等挂载常见几十万文件
 
 func syncTasksPath() string {
 	dir := os.Getenv("XBOX_DATA")
@@ -164,7 +164,7 @@ func scanSource(root string, excludes []string) ([]srcEntry, error) {
 		}
 		out = append(out, srcEntry{rel: rel, size: info.Size(), mtime: info.ModTime()})
 		if len(out) > syncMaxFiles {
-			return errors.New("文件数超过上限（" + fmt.Sprint(syncMaxFiles) + "），已中止扫描")
+			return errors.New("源目录文件数超过上限（" + fmt.Sprint(syncMaxFiles) + "）。请在「排除规则」里排除不需要的子目录，或减少挂载范围")
 		}
 		return nil
 	})
