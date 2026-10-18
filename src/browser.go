@@ -60,7 +60,7 @@ type browserLogItem struct {
 	Target  string `json:"target"`
 	Status  int    `json:"status"`
 	Bytes   int64  `json:"bytes"`
-	CType   string `json:"ctype,omitempty"`  // 响应 Content-Type（定位"空白是否因类型/编码"）
+	CType   string `json:"ctype,omitempty"`   // 响应 Content-Type（定位"空白是否因类型/编码"）
 	Snippet string `json:"snippet,omitempty"` // 文本响应开头 200 字节（定位页面实际内容）
 	Err     string `json:"err,omitempty"`
 }
@@ -153,19 +153,19 @@ const (
 	browserMaxText   = 8 << 20  // 需文本重写（HTML/CSS/JS）的读取上限 8MB
 	browserMaxStream = 64 << 20 // 其他内容流式透传上限 64MB
 	browserTimeout   = 30 * time.Second
-	browserGzipMin   = 1024     // 文本类响应超过该体积才压缩回传
+	browserGzipMin   = 1024 // 文本类响应超过该体积才压缩回传
 )
 
 // browserTransport 包级共享：连接复用（keep-alive）对代理性能是决定性的——
 // 页面往往有几十个资源，每个都新建 TCP/TLS 连接会让点击链接明显变慢。
 // 内网设备普遍自签证书，故跳过校验（与浏览器"继续访问"等价）。
 var browserTransport = &http.Transport{
-	TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
-	Proxy:             nil,
-	ForceAttemptHTTP2: true,
-	MaxIdleConns:      64,
+	TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+	Proxy:               nil,
+	ForceAttemptHTTP2:   true,
+	MaxIdleConns:        64,
 	MaxIdleConnsPerHost: 8,
-	IdleConnTimeout:   90 * time.Second,
+	IdleConnTimeout:     90 * time.Second,
 }
 
 // handleBrowserRoot GET /b（无子路径）：提示用法。
@@ -452,39 +452,18 @@ func browserSnippet(data []byte) string {
 }
 
 var (
-	browserReBase      = regexp.MustCompile(`(?i)<base\b[^>]*>`)
-	browserReHead      = regexp.MustCompile(`(?i)<head[^>]*>`)
-	browserReHTMLTag   = regexp.MustCompile(`(?i)<html[^>]*>`)
-	browserReCSPMeta   = regexp.MustCompile(`(?i)<meta[^>]+http-equiv\s*=\s*("content-security-policy"|'content-security-policy'|content-security-policy)[^>]*>`)
-	browserReAttr      = regexp.MustCompile(`(?i)\s(href|src|action|poster|srcset|formaction|data-src|data-href|data-url|data-original)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`)
+	browserReBase       = regexp.MustCompile(`(?i)<base\b[^>]*>`)
+	browserReHead       = regexp.MustCompile(`(?i)<head[^>]*>`)
+	browserReHTMLTag    = regexp.MustCompile(`(?i)<html[^>]*>`)
+	browserReCSPMeta    = regexp.MustCompile(`(?i)<meta[^>]+http-equiv\s*=\s*("content-security-policy"|'content-security-policy'|content-security-policy)[^>]*>`)
+	browserReAttr       = regexp.MustCompile(`(?i)\s(href|src|action|poster|srcset|formaction|data-src|data-href|data-url|data-original)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`)
 	browserReSrcsetPart = regexp.MustCompile(`^(\s*)([^\s,]+)(.*)$`)
-	browserReCSSURL    = regexp.MustCompile(`(?i)url\(\s*('[^']*'|"[^"]*"|[^)]*?)\s*\)`)
-	browserReRefresh   = regexp.MustCompile(`(?i)<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>`)
-	browserReRefreshU  = regexp.MustCompile(`(?i)(url\s*=\s*)(['"]?)([^'">;]+)`)
-	// 前置边界 (^|[^.\w$]) 不可省：location.* 必须是全局 location 的用法，不能是
-	// 别的对象上的同名属性。v1.2.54 修复——百度 min_super / all_async_search
-	// 里大量出现 n.location.protocol、h[o][h.location.hostname]（自定义对象），
-	// 旧正则从 location 处起匹配，把 "n." + location.protocol 改成 "n." + "https:"
-	// → n."https:" 直接 SyntaxError，整个包报废（实测第 3017/59 行报错即此处）。
-	browserReJSHost    = regexp.MustCompile(`(?i)(^|[^.\w$])((?:document|window|top|self|parent)\s*\.\s*location|location)\s*\.\s*(hostname|host|origin|protocol|port)\b`)
+	browserReCSSURL     = regexp.MustCompile(`(?i)url\(\s*('[^']*'|"[^"]*"|[^)]*?)\s*\)`)
+	browserReRefresh    = regexp.MustCompile(`(?i)<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>`)
+	browserReRefreshU   = regexp.MustCompile(`(?i)(url\s*=\s*)(['"]?)([^'">;]+)`)
+	// JS 改写已改为词法级（jslex.go）：先用 token 切分再按邻接关系替换，
+	// 不再用正则去猜字符串/注释边界。这里只保留定位 <script> 块的正则。
 	browserReScriptBlk = regexp.MustCompile(`(?is)(<script\b[^>]*>)(.*?)(</script>)`)
-	browserReDocDomain = regexp.MustCompile(`(?i)(^|[^.\w$])document\s*\.\s*domain\s*=\s*["'][^"']*["']`)
-	browserReTopLoc    = regexp.MustCompile(`(?i)(^|[^.\w$])top\s*\.\s*location\b`)
-	// 页面 JS 的 location 赋值（location=/location.href=/top.location=/self.location=…）
-	// ——这是"跳出代理"的头号出口：赋值触发真实导航，直连绝对 URL。
-	// 统一改写为 self.location.href = __xbp(原表达式)，由运行时函数把绝对 URL
-	// 转成代理路径，导航就落在代理内。注意：v1.2.50 曾简单改为 self.location
-	// （不包装），结果赋值仍直连 → 逃逸 → 拉回 → 无限重载循环。
-	// 字符类 [^=\s] 排除 '=' 以免误伤 == 比较。
-	// 前置边界同上：不能把 obj.location = x 当成导航（那会改变业务对象语义）。
-	// 只匹配到赋值号 + 右侧首字符；右侧表达式的**结束位置**由
-	// browserLocAssignEnd 手写扫描（按括号配平），不能用正则吞到下一个 ';'
-	// —— v1.2.54 踩过：百度 all_async_search 里赋值语句没有分号且嵌在
-	// void(...) 里，正则一路吞到远处的 ';' 把 ):void 0} 也包进了 __xbp()。
-	// 左侧必须明确是"导航"：带 .href，或带窗口限定符（top/self/parent/window/
-	// document）。裸 location = x 一律不动——它很可能是**局部变量赋值**
-	// （jQuery 1.x 开头就是 location = window.location，误改直接 SyntaxError）。
-	browserReLocAssign = regexp.MustCompile(`(?i)(^|[^.\w$])(?:(?:document|window|top|self|parent)\s*\.\s*location(?:\s*\.\s*href)?|location\s*\.\s*href)\s*=\s*([^=\s])`)
 )
 
 // browserVerSeg 代理路径的版本段（/b/v1254/{scheme}/{host}/...）。
@@ -666,11 +645,34 @@ func browserRewriteCSS(css string, tu *url.URL) string {
 		if nv == inner {
 			return m
 		}
+		// 引号只按原样保留，绝不补：url() 可能出现在 style 属性（外层已被
+		// 引号包着）或 JS 字符串里，补引号会提前闭合外层 → 语法错误
+		// （实测光猫页 style.background="url(/x.gif) no-repeat" 整段脚本报废）
 		if q == "" {
-			q = "\""
+			return "url(" + nv + ")"
 		}
 		return "url(" + q + nv + q + ")"
 	})
+}
+
+// browserRewriteCSSOutsideScripts 只改写 <script> 之外的 CSS url()。
+// 页面 JS 字符串里常出现 "url(/x.gif) no-repeat" 这类赋值，一并改写会破坏
+// JS 字符串（v1.2.55 起的实测故障：整段脚本 SyntaxError）。
+func browserRewriteCSSOutsideScripts(doc string, tu *url.URL) string {
+	locs := browserReScriptBlk.FindAllStringIndex(doc, -1)
+	if locs == nil {
+		return browserRewriteCSS(doc, tu)
+	}
+	var b strings.Builder
+	b.Grow(len(doc) + 128)
+	last := 0
+	for _, loc := range locs {
+		b.WriteString(browserRewriteCSS(doc[last:loc[0]], tu))
+		b.WriteString(doc[loc[0]:loc[1]]) // <script> 块原样保留
+		last = loc[1]
+	}
+	b.WriteString(browserRewriteCSS(doc[last:], tu))
+	return b.String()
 }
 
 // browserRewriteRefreshValue 重写 Refresh 头/meta 里的 url=。
@@ -692,217 +694,11 @@ func browserRewriteRefreshValue(v string, tu *url.URL) string {
 	})
 }
 
-// browserIsWordByte 标识符字符（含 $ 与 _）。
-func browserIsWordByte(c byte) bool {
-	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-}
-
-// browserSlashStartsRegex 判断位置 i 前的 '/' 是否可能开始一个正则字面量。
-// 若不区分，正则里的引号会被当成字符串开头，掩码整体错位——错位到"字符串当
-// 代码"的方向就会把字符串内的 location.host 也替换掉，产生 SyntaxError。
-// 规则：看前一个非空白字符。运算符/开括号/关键字 → 正则；标识符、数字、
-// ')'、']'、'}' → 除号（保守，宁可漏判正则为除号也不误吞代码）。
-func browserSlashStartsRegex(js string, i int) bool {
-	j := i - 1
-	for j >= 0 {
-		c := js[j]
-		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
-			j--
-			continue
-		}
-		break
-	}
-	if j < 0 {
-		return true
-	}
-	c := js[j]
-	if c == ')' || c == ']' || c == '}' {
-		return false
-	}
-	if !browserIsWordByte(c) {
-		return true // 运算符、开括号、逗号、冒号…
-	}
-	k := j
-	for k >= 0 && browserIsWordByte(js[k]) {
-		k--
-	}
-	switch js[k+1 : j+1] {
-	case "return", "typeof", "case", "in", "of", "new", "delete", "void", "instanceof", "do", "else", "yield", "await":
-		return true
-	}
-	return false
-}
-
-// browserStringMask 标记 js 中处于字符串字面量/模板串/注释/正则内的字节。
-// 字符串里的 "location.host" 等不是代码（eval 参数、拼接的代码文本很常见），
-// 一旦被替换就会产生 SyntaxError（实测 music.taihe.com："Unexpected string"），
-// 所以 JS 改写必须只作用于代码区。
-func browserStringMask(js string) []bool {
-	m := make([]bool, len(js))
-	inStr := byte(0)
-	i, n := 0, len(js)
-	for i < n {
-		c := js[i]
-		if inStr == 0 {
-			switch c {
-			case '\'', '"', '`':
-				inStr = c
-				m[i] = true
-				i++
-			case '/':
-				if i+1 < n && js[i+1] == '/' { // 行注释
-					for i < n && js[i] != '\n' {
-						m[i] = true
-						i++
-					}
-				} else if i+1 < n && js[i+1] == '*' { // 块注释
-					stop := n
-					if end := strings.Index(js[i+2:], "*/"); end >= 0 {
-						stop = i + 2 + end + 2
-					}
-					if stop > n {
-						stop = n
-					}
-					for k := i; k < stop; k++ {
-						m[k] = true
-					}
-					i = stop
-				} else if browserSlashStartsRegex(js, i) { // 正则字面量
-					j := i + 1
-					inClass := false
-					for j < n {
-						c2 := js[j]
-						if c2 == '\\' {
-							j += 2
-							continue
-						}
-						if c2 == '\n' { // 未闭合的正则：不吞行
-							break
-						}
-						if c2 == '[' {
-							inClass = true
-						} else if c2 == ']' {
-							inClass = false
-						} else if c2 == '/' && !inClass {
-							j++
-							break
-						}
-						j++
-					}
-					if j > n {
-						j = n
-					}
-					for k := i; k < j; k++ {
-						m[k] = true
-					}
-					for j < n && browserIsWordByte(js[j]) { // 正则 flags
-						m[j] = true
-						j++
-					}
-					i = j
-				} else {
-					i++
-				}
-			default:
-				i++
-			}
-		} else {
-			m[i] = true
-			if c == '\\' && i+1 < n { // 转义字符
-				m[i+1] = true
-				i += 2
-				continue
-			}
-			if c == inStr {
-				inStr = 0
-			}
-			i++
-		}
-	}
-	return m
-}
-
-// browserReplaceCode 只在代码区（非字符串/注释/正则）做正则替换：
-// 匹配起点落在字符串/注释内的一律跳过（保守——漏替换好过语法错误）。
-// repl 的 tail 参数是匹配后紧随的文本，供调用方判断上下文（如是否在赋值左侧）。
-func browserReplaceCode(js string, re *regexp.Regexp, repl func(m []string, tail string) string) string {
-	locs := re.FindAllStringSubmatchIndex(js, -1)
-	if locs == nil {
-		return js
-	}
-	mask := browserStringMask(js)
-	var b strings.Builder
-	b.Grow(len(js) + 256)
-	last := 0
-	for _, loc := range locs {
-		if loc[0] < last { // 与上一匹配重叠
-			continue
-		}
-		if mask[loc[0]] { // 起点在字符串/注释内：原样保留
-			continue
-		}
-		b.WriteString(js[last:loc[0]])
-		sub := make([]string, 0, len(loc)/2)
-		for g := 0; g*2 < len(loc); g++ {
-			if loc[g*2] < 0 {
-				sub = append(sub, "")
-			} else {
-				sub = append(sub, js[loc[g*2]:loc[g*2+1]])
-			}
-		}
-		tail := js[loc[1]:]
-		if len(tail) > 8 {
-			tail = tail[:8]
-		}
-		b.WriteString(repl(sub, tail))
-		last = loc[1]
-	}
-	b.WriteString(js[last:])
-	return b.String()
-}
-
-// browserRewriteJS 替换页面 JS（含内联）里的 location.* 为面板值 + 中和必崩写法。
-// protocol/port 为**面板**的对应值。这些值在代理页面下本来就是面板域名；页面
-// JS 拿它们拼 URL 时得到"面板根下的路径"（如 https://面板/cgi-bin/x），由
-// handleOrphan 兜底重定向回最近站点的代理路径。此前替换为真实目标值反而引导
-// JS 拼出 http://192.168.1.1/... 直连 URL——https 面板下被混合内容拦截 → 空白。
+// browserRewriteJS 页面 JS 改写入口：交给词法级引擎（见 jslex.go）。
+// 只做四件事：location.host 系列取值替换为面板值、location 赋值改走代理、
+// top.location 收成 self、document.domain 赋值中和。
 func browserRewriteJS(js string, panelScheme, panelHost string) string {
-	vals := map[string]string{
-		"hostname": `"` + panelHostname(panelHost) + `"`,
-		"host":     `"` + panelHost + `"`,
-		"origin":   `"` + panelScheme + "://" + panelHost + `"`,
-		"protocol": `"` + panelScheme + `:"`,
-		"port":     `"` + panelPort(panelHost) + `"`,
-	}
-	// 只改代码区：字符串/注释里的 location.* 一旦替换就是 SyntaxError
-	// （实测 music.taihe.com、image.baidu.com 均因此整页脚本报废）
-	js = browserReplaceCode(js, browserReJSHost, func(m []string, browserTail string) string {
-		prefix, text := m[1], m[2]
-		// 赋值左侧（location.host = x）不能换成字符串字面量，否则语法错误：
-		// 原样保留（代理页面下就是一次合法的 location 赋值导航）
-		if browserIsAssignTarget(browserTail) {
-			return prefix + text
-		}
-		if v, has := vals[strings.ToLower(m[3])]; has {
-			return prefix + v
-		}
-		return prefix + text
-	})
-	return browserDefusePageJS(js)
-}
-
-// browserIsAssignTarget 判断匹配后紧随的文本是否为"赋值号"（排除 ==/===）。
-func browserIsAssignTarget(tail string) bool {
-	t := strings.TrimLeft(tail, " \t\r\n")
-	return strings.HasPrefix(t, "=") && !strings.HasPrefix(t, "==")
-}
-
-// browserReLocObj 匹配"当前/上级窗口的 Location 对象本身"（非字符串表达式）。
-var browserReLocObj = regexp.MustCompile(`(?i)^(?:(?:document|window|top|self|parent)\s*\.\s*)?location(?:\s*\.\s*href)?$`)
-
-// browserIsLocObject 右侧是否为一个 Location 对象/其 href（而不是字符串地址）。
-func browserIsLocObject(rhs string) bool {
-	return browserReLocObj.MatchString(strings.TrimSpace(rhs))
+	return browserRewriteJSLex(js, panelScheme, panelHost)
 }
 
 // browserRewriteScriptBlocks 只对 <script>…</script> 块内部做 JS 改写。
@@ -918,166 +714,6 @@ func browserRewriteScriptBlocks(doc, panelScheme, panelHost string) string {
 		return sub[1] + browserRewriteJS(sub[2], panelScheme, panelHost) + sub[3]
 	})
 }
-
-// browserLocAssignEnd 从赋值号右侧首字符 start 起，找赋值表达式的结束位置。
-// 返回 end（不含终止符）与该位置的终止符（";" 或 ""）。
-// 依据括号配平判断：遇到深度为 0 的 ';' 即语句结束；遇到深度为 0 的 ')'、']'、
-// '}' 说明这个赋值只是外层表达式的一部分（且外层已闭合），就地结束、不吞外层。
-// 这是正则做不到的部分——RE2 没有括号配对能力。
-func browserLocAssignEnd(js string, start int) (int, string) {
-	depth := 0
-	n := len(js)
-	trim := func(e int) int {
-		for e > start {
-			c := js[e-1]
-			if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
-				e--
-				continue
-			}
-			break
-		}
-		return e
-	}
-	i := start
-	for i < n {
-		switch js[i] {
-		case '\'', '"', '`':
-			q := js[i]
-			i++
-			for i < n {
-				if js[i] == '\\' {
-					i += 2
-					continue
-				}
-				if js[i] == q {
-					i++
-					break
-				}
-				if js[i] == '\n' && q != '`' {
-					break
-				}
-				i++
-			}
-			continue
-		case '/':
-			if i+1 < n && js[i+1] == '/' { // 行注释：跳到行尾
-				for i < n && js[i] != '\n' {
-					i++
-				}
-				continue
-			}
-			if i+1 < n && js[i+1] == '*' { // 块注释
-				if e := strings.Index(js[i+2:], "*/"); e >= 0 {
-					i = i + 2 + e + 2
-					continue
-				}
-			}
-			if browserSlashStartsRegex(js, i) { // 正则字面量：整段跳过（里面可能有 , ) ;）
-				j := i + 1
-				inClass := false
-				for j < n {
-					c2 := js[j]
-					if c2 == '\\' {
-						j += 2
-						continue
-					}
-					if c2 == '\n' {
-						break
-					}
-					if c2 == '[' {
-						inClass = true
-					} else if c2 == ']' {
-						inClass = false
-					} else if c2 == '/' && !inClass {
-						j++
-						break
-					}
-					j++
-				}
-				i = j
-				continue
-			}
-		case '(', '[', '{':
-			depth++
-		case ')', ']', '}':
-			if depth == 0 {
-				return trim(i), ""
-			}
-			depth--
-		case ';':
-			if depth == 0 {
-				return trim(i), ";"
-			}
-		case '\n', ',':
-			if depth == 0 {
-				return trim(i), ""
-			}
-		}
-		i++
-	}
-	return trim(n), ""
-}
-
-// browserRewriteLocAssign 把页面里的 location 赋值改写为"经代理的导航"。
-// 覆盖 location=x、location.href=x、top/self/parent/document.location = x。
-func browserRewriteLocAssign(js string) string {
-	locs := browserReLocAssign.FindAllStringSubmatchIndex(js, -1)
-	if locs == nil {
-		return js
-	}
-	mask := browserStringMask(js)
-	var b strings.Builder
-	b.Grow(len(js) + 512)
-	last := 0
-	for _, loc := range locs {
-		if loc[0] < last || mask[loc[0]] { // 重叠 / 落在字符串注释内
-			continue
-		}
-		rhsStart := loc[4] // 组 2：右侧首字符
-		end, term := browserLocAssignEnd(js, rhsStart)
-		rhs := js[rhsStart:end]
-		b.WriteString(js[last:loc[0]])
-		prefix := js[loc[2]:loc[3]] // 组 1：前一个字符（保持原样）
-		if browserIsLocObject(rhs) {
-			// 帧跳出惯用法 top.location = self.location：右侧是 Location 对象而不是
-			// 地址字符串。若包装成导航，等于"把当前 URL 再导航一次"——在 iframe 里
-			// 就是自己刷自己，页面永远白屏（实测 192.168.1.1 光猫登录页的
-			// if(top!=self){top.location=self.location;}）。直接中和为无操作。
-			b.WriteString(prefix + "void 0" + term)
-		} else {
-			b.WriteString(prefix + `self.location.href=(window.__xbp?__xbp(` + rhs + `):(` + rhs + `))` + term)
-		}
-		last = end
-		if term == ";" {
-			last++
-		}
-	}
-	b.WriteString(js[last:])
-	return b.String()
-}
-
-// browserDefusePageJS 中和老页面两类"必崩"写法（光猫/路由器页面极常见）：
-//  1. document.domain = "192.168.1.1" —— 老跨 frame 技巧，现代 Chrome 直接抛
-//     "Failed to set document.domain"，整个 <script> 块中断，登录表单等后续
-//     渲染全部消失；中和为无害注释。
-//  2. top.location（读 href 比较或赋值跳转）—— top 是 fnOS 客户端顶层窗口
-//     （跨源），读属性抛 SecurityError，赋值被 sandbox 静默阻止；统一改写为
-//     self.location，同源可读不抛，且"想让顶层跳转"在代理场景下恰好应该
-//     落回当前框架。
-func browserDefusePageJS(js string) string {
-	// 顺序：先把赋值改成"经代理"的导航（含 top.location 赋值），再中和剩余的
-	// top.location 读取（跨源读抛 SecurityError），最后中和 document.domain 赋值。
-	// 全部只在代码区生效（字符串/注释内跳过）。
-	js = browserRewriteLocAssign(js)
-	js = browserReplaceCode(js, browserReTopLoc, func(m []string, tail string) string {
-		return m[1] + "self.location"
-	})
-	js = browserReplaceCode(js, browserReDocDomain, func(m []string, tail string) string {
-		return m[1] + "/*xb*/"
-	})
-	return js
-}
-
 func panelHostname(host string) string {
 	if i := strings.LastIndex(host, ":"); i >= 0 && !strings.Contains(host[i:], "]") {
 		return host[:i]
@@ -1121,7 +757,7 @@ func (s *Server) handleOrphan(w http.ResponseWriter, r *http.Request) {
 // browserRewriteHTML 全量重写 + 注入 base 与运行时脚本。
 func browserRewriteHTML(doc string, tu *url.URL, panelScheme, panelHost string) []byte {
 	doc = browserReAttr.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteAttr(m, tu) })
-	doc = browserRewriteCSS(doc, tu) // <style> 块与 style 属性内的绝对 url()
+	doc = browserRewriteCSSOutsideScripts(doc, tu) // <style>/style 属性里的 url()，跳过 <script>
 	doc = browserReRefresh.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteRefreshValue(m, tu) })
 	doc = browserRewriteScriptBlocks(doc, panelScheme, panelHost) // JS 改写只作用于 <script> 块内部
 	doc = browserReBase.ReplaceAllString(doc, "")
@@ -1171,7 +807,7 @@ func browserPatchScript(tu *url.URL) string {
 		`if(/^https?:\/\//i.test(s)){var j=s.indexOf("/b/");return j>=0?un(s.substring(j)):s;}` +
 		`try{var x=new URL(s,(document.baseURI||location.href)).href,k=x.indexOf("/b/");return k>=0?un(x.substring(k)):x;}catch(e){}return s;}` +
 		`function msg(t,u){try{parent.postMessage({__xbox:1,type:t,url:norm(u)},"*");}catch(e){}}` +
-		// 暴露给页面 JS：browserDefusePageJS 把页面里的 location 赋值改写成
+		// 暴露给页面 JS：词法级改写把页面里的 location 赋值改写成
 		// __xbp(...) 调用，使"跳转"也走代理，而不是跳出代理直连目标
 		`try{window.__xbp=px;}catch(e){}` +
 		// fetch

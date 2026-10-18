@@ -112,7 +112,8 @@ PAGE = (b'<html><head><base href="http://old.example/"><title>t</title>'
         b'<style>body{background:url(http://' + H.encode() + b'/pic.png)}</style>'
         b'<meta http-equiv="refresh" content="3;url=http://' + H.encode() + b'/next">'
         b'<meta http-equiv="refresh" content="0; URL=cgi-bin/luci/">'  # 无引号相对：不能补引号
-        b'<script>var h=location.hostname;</script></head><body>'
+        b'<script>var h=location.hostname;var bg="url(/ib.gif) no-repeat";</script></head><body>'
+        b'<div style="background:url(/root-bg.png)">bg</div>'
         b'<a href="/rel">r</a>'                                   # 相对：交给 base
         b'<link rel="stylesheet" href="/root.css">'               # 根相对：必须拼目标站点根
         b'<a href="http://' + H.encode() + b'/abs">a</a>'         # 绝对：必须重写
@@ -206,7 +207,11 @@ check("浏览器代理改写幂等", ('href="/b/v9999/http/' + H + '/deep"') in 
       and (BP + '/b/v9999') not in body, body[:400])
 # HTML 可见文本不是 JS 代码，其中的 location.host 不能被改写
 check("浏览器代理HTML文本不改写", '<div>location.host</div>' in body, body[:300])
-check("浏览器代理CSS url()重写", 'url("' + BP + '/pic.png")' in body or "url('" + BP + "/pic.png')" in body, body[:300])
+check("浏览器代理CSS url()重写", 'url(' + BP + '/pic.png)' in body, body[:300])
+# style 属性里的 url() 同样不能补引号（外层已被 HTML 属性引号包着）
+check("浏览器代理CSS不改引号", 'url(' + BP + '/root-bg.png)' in body and 'url("' + BP + '"' not in body, body[:400])
+# <script> 内的 url() 字符串不是 CSS，绝不能改写（否则整段脚本报废）
+check("浏览器代理CSS跳过script", 'var bg="url(/ib.gif) no-repeat"' in body, body[:400])
 check("浏览器代理meta refresh重写", 'url=' + BP + '/next' in body, body[:300])
 # meta content 自带的引号不能再补一层（否则 content="0; URL="x"" → 解析成刷新到
 # 空地址 → 无限刷新自己，实测 192.168.1.50 的 LuCI 首页就卡在这里）
@@ -215,7 +220,7 @@ check("浏览器代理meta refresh不加引号", 'content="0; URL=cgi-bin/luci/"
 # 页面 JS 拿 location.hostname/host/origin/port 拼绝对 URL：必须替换为**面板**值，
 # 让拼出的 URL 落到面板根下再由孤儿兜底回代理（v1.2.47 替换为真实目标值反而引导
 # JS 拼出 http://192.168.1.1/... 直连 → https 面板下混合内容被拦 → 页面空白）
-check("浏览器代理内联JS location替换", '<script>var h="127.0.0.1";</script>' in body, body[:400])
+check("浏览器代理内联JS location替换", 'var h="127.0.0.1";' in body, body[:400])
 st, body = get(B + "/s.js")
 check("浏览器代理JS文件location替换", st == 200 and body == 'var a="127.0.0.1";var b="http://127.0.0.1:8899";var c="8899";', body[:120])
 # 老光猫页面两类必崩写法的中和（v1.2.50）：
