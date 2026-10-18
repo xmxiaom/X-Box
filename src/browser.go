@@ -1016,7 +1016,15 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		// 前端路由：pushState('/login') 会把 iframe 地址改成站点根（逃出代理），
 		// 触发"跳转→拦截→重载"的循环。这里把根相对路径改成代理路径。
 		`try{var oh=history.pushState,orp=history.replaceState;` +
+		`var psc=0,pst=Date.now();` +
 		`function hpx(u){try{if(M||typeof u!=="string"||!u)return u;` +
+		// 频率闸门：前端路由互相跳转时不产生网络请求，服务端限流拦不住，
+		// 只能在这里数。10 秒内超过 30 次就冻结页面，避免持续占用 CPU。
+		`var pn=Date.now();if(pn-pst>10000){pst=pn;psc=0;}psc++;` +
+		`if(psc>30){try{if(!window.__xbStopped){window.__xbStopped=1;` +
+		`document.documentElement.innerHTML='<body style="font:14px system-ui,sans-serif;padding:24px;color:#666">该站点在代理下反复跳转，已停止加载。请改用站点自身的入口打开。</body>';}}catch(e){}` +
+		`return location.href;}` +
+
 		`if(u.charAt(0)==="/"&&u.charAt(1)!=="/"){var g=/^(https?):\/\/([\s\S]+)$/.exec(O);` +
 		`if(g)return spfx(P+g[1]+"/"+g[2]+u);}return u;}catch(e){return u;}}` +
 		`history.pushState=function(s,t,u){return oh.call(history,s,t,hpx(u));};` +

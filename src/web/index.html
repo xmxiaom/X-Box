@@ -1713,7 +1713,10 @@ function browserOnFrameLoad(t){
   try{ href = t.frame.contentWindow.location.href || ''; }catch(e){ href = ''; }
   const blank = href.indexOf('about:') === 0;
   if(blank) return;                                   // 中间态：什么也不做
-  const escaped = href === '' || href.indexOf('/b/') < 0;
+  // 读不到地址（跨域中间态/尚未就绪）不能当作"逃逸"：否则每打开一个页面都会
+  // 白重载一次并弹出"试图跳出代理"，而页面本身是正常的。
+  if(href === '') return;
+  const escaped = href.indexOf('/b/') < 0;
   if(escaped){
     // 累计计数（escTotal）：不能用"每次正常加载就清零"的写法——前端路由站点
     // 每次重载后都会先正常加载一次再跳转，清零会让循环永不停止。
@@ -1723,7 +1726,7 @@ function browserOnFrameLoad(t){
       toast('页面试图跳出代理，已拦截并重新载入（'+t.escTotal+'/2）','err');
       t.frame.src = t.url;
     }else if(t.escTotal === 3){
-      toast('该站点使用前端路由，代理下无法原样运行，请在 fnOS 自己的入口打开','err');
+      toast('该站点使用前端路由，代理下可能无法完整运行；若页面已正常显示可忽略','err');
     }
     return;
   }
