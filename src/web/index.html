@@ -642,94 +642,68 @@ document.getElementById('menu').addEventListener('click', e => {
   (loaders[page]||(()=>{}))();
 });
 
-/* ---------- 反向代理（规则写入飞牛网关，由网关监听） ---------- */
-let proxyCache = [];
+/* ---------- 反向代理（应用自带的独立 nginx 实例） ---------- */
+let proxyCache = [], proxyRunning = false, proxyLog = '';
 async function loadReverseProxy(){
   try{
     const st = await api('/api/proxy/status');
-    const c = document.getElementById('proxy-rows');
     if(!st.available){
       document.getElementById('proxy-sub').textContent = '当前环境不支持';
-      c.innerHTML = `<div class="proxy-hint">未找到飞牛网关的配置目录（<span class="mono">/usr/trim/nginx/conf/conf.d</span>），此功能不可用。</div>`;
+      document.getElementById('proxy-rows').innerHTML = '<div class="proxy-hint">未找到 nginx 可执行文件，此功能不可用。</div>';
       return;
     }
-    let j;
-    try{ j = await api('/api/proxy/list'); }
-    catch(e){
-      // 网关刚重载时可能瞬时不可达：等 1.2 秒重试一次
-      await new Promise(r=>setTimeout(r,1200));
-      j = await api('/api/proxy/list');
-    }
-    proxyCache = j.rules||[];
-    document.getElementById('proxy-sub').textContent = `共 ${proxyCache.length} 个站点`;
-    c.innerHTML = '<div class="proxy-hint">规则由飞牛网关监听（应用自身不占端口）。<b>请使用 8443 以上的高位端口</b>——80/443 由飞牛自身占用；HTTPS 需要该域名已在飞牛配好证书。域名需先能解析到 NAS（可用 DDNS）。</div>' +
-      '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button></div>' +
-      (proxyCache.map(s=>{
-        const hosts = s.domain||'';
-        const listen = s.port ? (':'+s.port) : '—';
-        return `<div class="row">
+    const j = await api('/api/proxy/list');
+    proxyCache = j.rules||[]; proxyRunning = !!j.running; proxyLog = j.log||'';
+    document.getElementById('proxy-sub').textContent = '共 ' + proxyCache.length + ' 个站点 · 实例' + (proxyRunning?'运行中':'未运行');
+    const c = document.getElementById('proxy-rows');
+    c.innerHTML = '<div class="proxy-hint">由本应用启动一个<b>独立的 nginx 实例</b>（自有配置/日志/端口），改规则只重载它，<b>不触碰飞牛网关</b>；面板本身仍只走飞牛网关、不监听端口。请使用 8443 以上端口。</div>' +
+      '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button>' +
+      '<button class="btn btn-outline btn-sm" style="margin-left:8px" onclick="proxyShowLog()">查看日志</button></div>' +
+      (proxyCache.map(x=>`<div class="row">
           <div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v4M16 3v4M4 7h16M4 7v13a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7"/></svg></div>
           <div class="info">
-            <div class="name">${esc(hosts)}
-              ${s.tls?'<span class="badge badge-green"><span class="dot"></span>HTTPS</span>':'<span class="badge badge-gray"><span class="dot"></span>HTTP</span>'}
-              <span class="badge badge-blue"><span class="dot"></span>网关 ${listen}</span>
-              ${s.applyState==='pending'?'<span class="badge badge-gray"><span class="dot"></span>应用中…</span>':''}
-              ${s.applyState==='failed'?`<span class="badge" style="background:var(--danger-light);color:var(--danger)" title="${esc(s.applyError||'')}">应用失败</span>`:''}
+            <div class="name">${esc(x.name||x.id)}
+              <span class="badge badge-blue"><span class="dot"></span>端口 ${x.port}</span>
+              ${x.domain?`<span class="badge badge-gray"><span class="dot"></span>${esc(x.domain)}</span>`:''}
             </div>
-            <div class="desc mono" style="font-size:11.5px">→ ${esc(s.target)}${s.pathPrefix?' · 前缀 '+esc(s.pathPrefix):''}${s.stripPrefix?' · 去前缀':''}${s.desc?' · '+esc(s.desc):''}</div>
+            <div class="desc mono" style="font-size:11.5px">→ ${esc(x.target)}</div>
           </div>
           <div class="actions">
-            <button class="btn btn-text btn-sm" onclick="openProxyForm('${esc(s.id)}')">编辑</button>
-            <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="proxyDelete('${esc(s.id)}')">删除</button>
+            <button class="btn btn-text btn-sm" onclick="openProxyForm('${esc(x.id)}')">编辑</button>
+            <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="proxyDelete('${esc(x.id)}')">删除</button>
           </div>
-        </div>`;
-      }).join('') || '<div class="empty">还没有站点，点右上角「添加站点」</div>');
-    if(proxyCache.some(x=>x.applyState==='pending')){ setTimeout(loadReverseProxy, 1500); }
+        </div>`).join('') || '<div class="empty">还没有站点，点右上角「添加站点」</div>');
   }catch(e){ toast(e.message,'err'); }
+}
+function proxyShowLog(){
+  confirmDialog('反代实例日志', '<pre style="max-height:320px;overflow:auto;font-size:11.5px;white-space:pre-wrap">' + esc(proxyLog||'（暂无日志）') + '</pre>', async ()=>{}, '关闭');
 }
 function openProxyForm(id){
   const s = id ? proxyCache.find(x=>x.id===id) : null;
   const body = `
-    <div class="form-row"><label>域名（多个用逗号分隔，支持 *.example.com 通配）</label><input type="text" id="px-hosts" value="${esc(s?s.domain:'')}" placeholder="nas.example.com, app.example.com"><div style="font-size:12px;color:var(--text3);margin-top:4px">网关按域名路由，需先解析到 NAS</div></div>
-    <div class="form-row"><label>后端地址</label><input type="text" id="px-backend" value="${esc(s?s.target:'')}" placeholder="http://192.168.1.20:8096"></div>
-    <div class="form-row"><label>路径前缀<span id="px-prefix-hint" style="color:var(--muted);font-weight:normal">（留空=整站）</span></label><input type="text" id="px-prefix" value="${esc(s?s.pathPrefix:'')}" placeholder="选填，如 /app" oninput="document.getElementById('px-prefix-hint').textContent=this.value.trim()?('（前缀 '+this.value.trim()+'）'):'（留空=整站）'"></div>
-    <div class="form-row"><label>监听端口<span style="color:var(--muted);font-weight:normal">（建议 8443 以上；80/443 由飞牛自身占用）</span></label><input type="number" id="px-port" min="1024" max="65535" value="${s&&s.port?s.port:8443}" placeholder="8443"></div>
-    <label class="field-check"><input type="checkbox" id="px-strip" ${s&&s.stripPrefix?'checked':''}> 转发时去除路径前缀</label>
-    <label class="field-check"><input type="checkbox" id="px-tls" ${s&&s.tls?'checked':''}> 使用 HTTPS（需该域名在飞牛已配好证书，否则网关重载会失败）</label>
-    <div class="form-row"><label>备注</label><input type="text" id="px-desc" value="${esc(s?s.desc:'')}"></div>`;
+    <div class="form-row"><label>标识</label><input type="text" id="px-id" value="${esc(s?s.id:'')}" placeholder="jellyfin" ${s?'disabled':''}></div>
+    <div class="form-row"><label>名称</label><input type="text" id="px-name" value="${esc(s?s.name:'')}" placeholder="影视库"></div>
+    <div class="form-row"><label>监听端口<span style="color:var(--muted);font-weight:normal">（8443 以上；80/443 由飞牛占用）</span></label><input type="number" id="px-port" min="1024" max="65535" value="${s&&s.port?s.port:8443}" placeholder="8443"></div>
+    <div class="form-row"><label>域名<span style="color:var(--muted);font-weight:normal">（可选，留空接受任意 Host）</span></label><input type="text" id="px-domain" value="${esc(s?s.domain:'')}" placeholder="media.example.com"></div>
+    <div class="form-row"><label>目标地址</label><input type="text" id="px-target" value="${esc(s?s.target:'')}" placeholder="http://192.168.1.20:8096"></div>`;
   confirmDialog(id?'编辑站点':'添加站点', body, async ()=>{
-    const domain = document.getElementById('px-hosts').value.trim();
-    const target = document.getElementById('px-backend').value.trim();
-    if(!domain || !target){ toast('域名与后端地址不能为空','err'); return; }
-    const portRaw = document.getElementById('px-port').value.trim();
     const payload = {
-      id: id || ('p' + Date.now().toString(36)),
-      name: (domain.split(/[\s,]+/)[0] || domain),
-      domain: domain,
-      target: target,
-      pathPrefix: document.getElementById('px-prefix').value.trim(),
-      stripPrefix: document.getElementById('px-strip').checked,
-      port: portRaw ? parseInt(portRaw, 10) : 0,
-      // 默认走 HTTP 高位端口：避免与飞牛 80/443 及证书钩子冲突
-      tls: document.getElementById('px-tls').checked,
-      desc: document.getElementById('px-desc').value.trim(),
+      id: (document.getElementById('px-id').value||'').trim(),
+      name: (document.getElementById('px-name').value||'').trim(),
+      port: parseInt(document.getElementById('px-port').value, 10),
+      domain: (document.getElementById('px-domain').value||'').trim(),
+      target: (document.getElementById('px-target').value||'').trim(),
     };
-    try{
-      await api('/api/proxy/save',{method:'POST',body:JSON.stringify(payload)});
-      toast('已保存，正在应用到网关…','ok');
-      loadReverseProxy();                    // 立即看到"应用中"
-      setTimeout(loadReverseProxy, 1800);    // 再取一次最终状态
-    }
+    if(!/^[a-zA-Z0-9_-]{1,40}$/.test(payload.id)){ toast('标识只能用字母/数字/下划线/短横线','err'); return; }
+    if(!payload.port || payload.port < 1024){ toast('端口请填 1024 以上（建议 8443）','err'); return; }
+    if(!/^https?:\/\/[^\s]+$/.test(payload.target)){ toast('目标地址需形如 http://192.168.1.20:8096','err'); return; }
+    try{ await api('/api/proxy/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存并应用','ok'); loadReverseProxy(); }
     catch(e){ toast(e.message,'err'); }
   }, id?'保存':'添加');
 }
 async function proxyDelete(id){
-  confirmDialog('删除站点','确认删除该反向代理站点？网关配置会被移除并重新加载。', async ()=>{
-    try{
-      await api('/api/proxy/delete?id='+encodeURIComponent(id),{method:'POST'});
-      toast('已删除，正在应用到网关…','ok');
-      loadReverseProxy(); setTimeout(loadReverseProxy, 1800);
-    }
+  confirmDialog('删除站点','确认删除该反向代理站点？对应监听会立即停止。', async ()=>{
+    try{ await api('/api/proxy/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除','ok'); loadReverseProxy(); }
     catch(e){ toast(e.message,'err'); }
   });
 }

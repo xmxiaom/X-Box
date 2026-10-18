@@ -1,15 +1,17 @@
 package main
 
-// 反向代理：路由规则交给飞牛自带网关（nginx）监听，应用不自己占端口。
+// 反向代理：应用自己拉起一个独立 nginx 实例（复用系统二进制，但配置/pid/日志/端口
+// 全部独立），完全不碰飞牛自带的那个网关实例。
 //
-// 工作方式：在 /usr/trim/nginx/conf/conf.d 下写入独立的 xbox-proxy-*.conf，
-// 网关按 server_name 路由到目标服务；证书沿用飞牛的证书托管（trim_hook_cert_switch），
-// 外部访问走的就是飞牛网关的 443，与官方应用同一套入口。
+// 为什么这样做（三轮踩坑后的结论）：
+//   - 改飞牛网关的 conf.d 并 reload：飞牛自身连接会抖一下（客户端弹"连接已断开"），
+//     而且它的 conf.d 在系统重启时会被重建，规则会丢；
+//   - 应用自己监听 TCP 转发：多占一个端口；
+//   - 纯路径挂载（/app/xxx/r/id/）：不占端口，但站点跑在子路径下，SPA 无法运行。
 //
-// 安全边界：
-//   - 只写/删本应用生成的文件，不修改主配置，不碰其他站点；
-//   - 每次改动后先 nginx -t 校验，失败立即回滚旧文件；
-//   - 校验通过才 reload，reload 失败同样回滚。
+// 现在的模型：规则（目标+端口）存应用数据卷；由本应用生成的 nginx.conf 驱动一个
+// **独立实例**。改规则只 reload 这个实例，飞牛网关完全不受影响。
+// 应用自身依然不监听任何 TCP 端口（面板只走网关 socket）。
 
 import (
 	"context"
@@ -17,159 +19,145 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 type ProxyRule struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Domain      string `json:"domain"`      // 支持多个，空格/逗号分隔
-	PathPrefix  string `json:"pathPrefix"`  // 可选，如 /app
-	StripPrefix bool   `json:"stripPrefix"` // 转发时去掉路径前缀
-	Port        int    `json:"port"`        // 0 = 由网关 443 托管
-	Target      string `json:"target"`
-	TLS         bool   `json:"tls"`
-	Desc        string `json:"desc"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Port   int    `json:"port"`
+	Domain string `json:"domain"`
+	Target string `json:"target"`
+	Desc   string `json:"desc"`
 }
 
 var proxyReID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,40}$`)
 var proxyReDomain = regexp.MustCompile(`^[a-zA-Z0-9.*_-]{1,120}$`)
 var proxyReTarget = regexp.MustCompile(`^https?://[^\s;{}]+$`)
 
-// splitDomains 把 "a.com, b.com" 拆成 ["a.com","b.com"]。
-func splitDomains(v string) []string {
-	f := strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
-	out := make([]string, 0, len(f))
-	for _, x := range f {
-		if x = strings.TrimSpace(x); x != "" {
-			out = append(out, x)
-		}
+var proxyStore struct{ mu sync.Mutex }
+
+// ---------------- 规则持久化 ----------------
+
+func proxyRulesPath() string {
+	dir := os.Getenv("XBOX_DATA")
+	if dir == "" {
+		dir = "."
 	}
-	return out
+	return filepath.Join(dir, "reverse-proxy.json")
 }
 
-// nginxPaths 探测飞牛网关位置。XBOX_NGINX_ROOT 仅供测试。
-func nginxPaths() (bin, mainConf, confDir string, ok bool) {
-	root := strings.TrimSpace(os.Getenv("XBOX_NGINX_ROOT"))
-	if root == "" {
-		root = "/usr/trim/nginx"
-	}
-	bin = filepath.Join(root, "sbin", "nginx")
-	mainConf = filepath.Join(root, "conf", "nginx.conf")
-	confDir = filepath.Join(root, "conf", "conf.d")
-	if _, err := os.Stat(mainConf); err != nil {
-		return "", "", "", false
-	}
-	if b, err := os.ReadFile(mainConf); err == nil && strings.Contains(string(b), "conf.d") {
-		if st, err := os.Stat(confDir); err == nil && st.IsDir() {
-			return bin, mainConf, confDir, true
-		}
-	}
-	return bin, mainConf, "", true
-}
-
-func proxyRules() []ProxyRule {
-	_, _, confDir, ok := nginxPaths()
-	if !ok || confDir == "" {
+func loadProxyRules() []ProxyRule {
+	proxyStore.mu.Lock()
+	defer proxyStore.mu.Unlock()
+	b, err := os.ReadFile(proxyRulesPath())
+	if err != nil {
 		return nil
 	}
-	files, _ := filepath.Glob(filepath.Join(confDir, "xbox-proxy-*.conf"))
-	out := make([]ProxyRule, 0, len(files))
-	for _, f := range files {
-		b, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		for _, line := range strings.Split(string(b), "\n") {
-			const tag = "# XBOX-PROXY-META: "
-			if !strings.HasPrefix(line, tag) {
-				continue
-			}
-			var r ProxyRule
-			if json.Unmarshal([]byte(strings.TrimPrefix(line, tag)), &r) == nil {
-				out = append(out, r)
-			}
-			break
-		}
+	var out []ProxyRule
+	if json.Unmarshal(b, &out) != nil {
+		return nil
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })
+	sort.Slice(out, func(i, j int) bool { return out[i].Port < out[j].Port })
 	return out
 }
 
-// renderProxyConf 生成 server 段。Port=0 时由网关 443 + 证书托管接管。
-func renderProxyConf(r ProxyRule) string {
-	meta, _ := json.Marshal(r)
+func saveProxyRules(rules []ProxyRule) error {
+	proxyStore.mu.Lock()
+	defer proxyStore.mu.Unlock()
+	b, err := json.MarshalIndent(rules, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(proxyRulesPath(), b, 0o600)
+}
+
+// ---------------- 独立 nginx 实例 ----------------
+
+// ownNginxDir 本应用自己的 nginx 工作目录（配置、pid、日志、临时文件都在这里）。
+func ownNginxDir() string {
+	dir := os.Getenv("XBOX_DATA")
+	if dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "nginx")
+}
+
+// systemNginxBin 复用系统 nginx 的可执行文件（不启动它的实例，只借二进制）。
+func systemNginxBin() string {
+	if v := strings.TrimSpace(os.Getenv("XBOX_NGINX_BIN")); v != "" {
+		return v
+	}
+	for _, p := range []string{"/usr/trim/nginx/sbin/nginx", "/usr/sbin/nginx", "/usr/bin/nginx"} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// renderOwnConf 生成本应用实例的主配置。
+func renderOwnConf(rules []ProxyRule) string {
 	var b strings.Builder
-	b.WriteString("# 由 X-Box 生成，请勿手工修改；在面板「反向代理」里删除即可\n")
-	b.WriteString("# XBOX-PROXY-META: " + string(meta) + "\n")
-	b.WriteString("server {\n")
-	if r.TLS {
-		if r.Port == 0 || r.Port == 443 {
-			b.WriteString("\tlisten 443 ssl;\n")
-		} else {
-			b.WriteString(fmt.Sprintf("\tlisten %d ssl;\n", r.Port))
-		}
-		b.WriteString("\tssl_certificate $ssl_server_name;\n")
-		b.WriteString("\tssl_certificate_key $ssl_server_name;\n")
-		b.WriteString("\ttrim_hook_cert_switch on;\n") // 由飞牛按域名自动挂证书
-		b.WriteString("\tssl_session_cache shared:SSL:1m;\n")
-		b.WriteString("\tssl_session_timeout 5m;\n")
-		b.WriteString("\tssl_ciphers HIGH:!aNULL:!MD5;\n")
-		b.WriteString("\tssl_prefer_server_ciphers on;\n")
-	} else {
-		port := r.Port
-		if port == 0 {
-			port = 80
-		}
-		b.WriteString(fmt.Sprintf("\tlisten %d;\n", port))
-	}
-	domains := splitDomains(r.Domain)
-	b.WriteString("\tserver_name " + strings.Join(domains, " ") + ";\n")
+	b.WriteString("# 由 X-Box 生成：本应用专用的 nginx 实例配置（与飞牛网关实例互不影响）\n")
+	b.WriteString("worker_processes 1;\n")
+	b.WriteString("pid logs/nginx.pid;\n")
+	b.WriteString("error_log logs/error.log warn;\n")
+	b.WriteString("events { worker_connections 512; }\n")
+	b.WriteString("http {\n")
+	b.WriteString("\taccess_log off;\n")
 	b.WriteString("\tclient_max_body_size 0;\n")
-	loc := "/"
-	if r.PathPrefix != "" {
-		loc = "/" + strings.Trim(r.PathPrefix, "/") + "/"
+	b.WriteString("\tclient_body_temp_path temp/body;\n")
+	b.WriteString("\tproxy_temp_path temp/proxy;\n")
+	b.WriteString("\tfastcgi_temp_path temp/fastcgi;\n")
+	b.WriteString("\tuwsgi_temp_path temp/uwsgi;\n")
+	b.WriteString("\tscgi_temp_path temp/scgi;\n")
+	for _, r := range rules {
+		b.WriteString("\tserver {\n")
+		b.WriteString(fmt.Sprintf("\t\tlisten %d;\n", r.Port))
+		if d := strings.TrimSpace(r.Domain); d != "" {
+			b.WriteString("\t\tserver_name " + d + ";\n")
+		} else {
+			b.WriteString("\t\tserver_name _;\n")
+		}
+		b.WriteString("\t\tlocation / {\n")
+		b.WriteString("\t\t\tproxy_pass " + r.Target + ";\n")
+		b.WriteString("\t\t\tproxy_http_version 1.1;\n")
+		b.WriteString("\t\t\tproxy_set_header Host $host;\n")
+		b.WriteString("\t\t\tproxy_set_header X-Real-IP $remote_addr;\n")
+		b.WriteString("\t\t\tproxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
+		b.WriteString("\t\t\tproxy_set_header X-Forwarded-Proto $scheme;\n")
+		b.WriteString("\t\t\tproxy_set_header Upgrade $http_upgrade;\n")
+		b.WriteString("\t\t\tproxy_set_header Connection $http_connection;\n")
+		b.WriteString("\t\t\tproxy_read_timeout 3600s;\n")
+		b.WriteString("\t\t\tproxy_send_timeout 3600s;\n")
+		b.WriteString("\t\t}\n")
+		b.WriteString("\t}\n")
 	}
-	target := r.Target
-	if r.StripPrefix {
-		target = strings.TrimSuffix(target, "/") + "/"
-	}
-	b.WriteString("\tlocation " + loc + " {\n")
-	b.WriteString("\t\tproxy_pass " + target + ";\n")
-	b.WriteString("\t\tproxy_http_version 1.1;\n")
-	b.WriteString("\t\tproxy_set_header Host $host;\n")
-	b.WriteString("\t\tproxy_set_header X-Real-IP $remote_addr;\n")
-	b.WriteString("\t\tproxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
-	b.WriteString("\t\tproxy_set_header X-Forwarded-Proto $scheme;\n")
-	// $http_connection 是客户端原始值：普通请求 keep-alive/close，WebSocket 是 upgrade
-	b.WriteString("\t\tproxy_set_header Upgrade $http_upgrade;\n")
-	b.WriteString("\t\tproxy_set_header Connection $http_connection;\n")
-	b.WriteString("\t\tproxy_read_timeout 3600s;\n")
-	b.WriteString("\t\tproxy_send_timeout 3600s;\n")
-	b.WriteString("\t}\n")
 	b.WriteString("}\n")
 	return b.String()
 }
 
-func nginxRun(bin, mainConf string, args ...string) string {
+// runOwn 以「本应用实例」的身份执行 nginx 命令（-p 指向自己的目录）。
+func runOwn(args ...string) string {
+	bin := systemNginxBin()
 	if bin == "" {
-		return ""
+		return "未找到 nginx 可执行文件"
 	}
-	if _, err := os.Stat(bin); err != nil {
-		return ""
-	}
-	// 加超时：某些设备上 nginx -t 会读全量配置（含证书），耗时可能超过网关的
-	// 转发超时；不设上限会把请求一起拖死。
+	dir := ownNginxDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	a := append(args, "-c", mainConf)
+	a := append([]string{"-p", dir + "/", "-c", "nginx.conf"}, args...)
 	out, err := exec.CommandContext(ctx, bin, a...).CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -180,90 +168,95 @@ func nginxRun(bin, mainConf string, args ...string) string {
 	return ""
 }
 
-// 异步应用：保存立刻返回，校验/重载在后台做，前端轮询状态。
-// 原因：同步跑 nginx -t + reload 可能超过网关转发超时，导致调用方拿到 502、
-// 而应用侧还在执行甚至回滚，表现为"提示失败而且规则也没了"。
-type applyInfo struct {
-	State string    `json:"state"` // pending / applied / failed
-	Error string    `json:"error"`
-	At    time.Time `json:"at"`
-}
-
-var applyMu sync.Mutex
-var applyState = map[string]applyInfo{}
-
-func setApply(id, state, msg string) {
-	applyMu.Lock()
-	applyState[id] = applyInfo{State: state, Error: msg, At: time.Now()}
-	applyMu.Unlock()
-}
-
-func getApply(id string) applyInfo {
-	applyMu.Lock()
-	defer applyMu.Unlock()
-	if v, ok := applyState[id]; ok {
-		return v
+// ownRunning 判断本应用实例是否在跑。
+func ownRunning() bool {
+	b, err := os.ReadFile(filepath.Join(ownNginxDir(), "logs", "nginx.pid"))
+	if err != nil {
+		return false
 	}
-	return applyInfo{State: "applied"}
+	pid, perr := strconv.Atoi(strings.TrimSpace(string(b)))
+	if perr != nil || pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
 }
 
-// applyProxyAsync 后台校验并重载；失败回滚文件。
-func applyProxyAsync(id, path string, prev []byte, hadPrev bool, bin, mainConf string) {
-	go func() {
-		setApply(id, "pending", "")
-		time.Sleep(300 * time.Millisecond) // 先让保存响应发出去
-		if msg := nginxRun(bin, mainConf, "-t"); msg != "" {
-			if hadPrev {
-				_ = os.WriteFile(path, prev, 0o644)
-			} else {
-				_ = os.Remove(path)
-			}
-			setApply(id, "failed", "配置校验未通过，已回滚："+msg)
-			return
+// applyOwnConfig 写配置并（重）加载本应用实例。返回错误文本，空串为成功。
+func applyOwnConfig(rules []ProxyRule) string {
+	dir := ownNginxDir()
+	for _, sub := range []string{"", "logs", "temp/body", "temp/proxy", "temp/fastcgi", "temp/uwsgi", "temp/scgi"} {
+		_ = os.MkdirAll(filepath.Join(dir, sub), 0o755)
+	}
+	conf := renderOwnConf(rules)
+	if err := os.WriteFile(filepath.Join(dir, "nginx.conf"), []byte(conf), 0o644); err != nil {
+		return "写入配置失败：" + err.Error()
+	}
+	if msg := runOwn("-t"); msg != "" {
+		return "配置校验未通过：" + msg
+	}
+	if ownRunning() {
+		if msg := runOwn("-s", "reload"); msg != "" {
+			return "重载失败：" + msg
 		}
-		if msg := nginxRun(bin, mainConf, "-s", "reload"); msg != "" {
-			if hadPrev {
-				_ = os.WriteFile(path, prev, 0o644)
-			} else {
-				_ = os.Remove(path)
-			}
-			_ = nginxRun(bin, mainConf, "-s", "reload")
-			setApply(id, "failed", "网关重载失败，已回滚："+msg)
-			return
-		}
-		setApply(id, "applied", "")
-		log.Printf("[反代] 规则 %s 已生效", id)
-	}()
+		return ""
+	}
+	if len(rules) == 0 {
+		return "" // 没有规则就不需要常驻
+	}
+	if msg := runOwn(); msg != "" {
+		return "启动失败：" + msg
+	}
+	return ""
 }
+
+// syncProxyOnStart 启动时确保实例按当前规则运行。
+func (s *Server) syncProxyOnStart() {
+	rules := loadProxyRules()
+	if len(rules) == 0 {
+		return
+	}
+	if msg := applyOwnConfig(rules); msg != "" {
+		log.Printf("[反代] 启动同步失败：%s", msg)
+		return
+	}
+	log.Printf("[反代] 已按 %d 条规则启动独立实例", len(rules))
+}
+
+// ---------------- HTTP 接口 ----------------
 
 func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
-	bin, mainConf, confDir, found := nginxPaths()
+	bin := systemNginxBin()
 	ok(w, map[string]any{
-		"available": found && confDir != "",
-		"confDir":   confDir,
-		"mainConf":  mainConf,
+		"available": bin != "",
 		"binary":    bin,
+		"dir":       ownNginxDir(),
+		"running":   ownRunning(),
 	})
 }
 
 func (s *Server) handleProxyList(w http.ResponseWriter, r *http.Request) {
-	_, _, confDir, found := nginxPaths()
-	if !found || confDir == "" {
-		fail(w, 400, "未找到飞牛网关的 conf.d 目录，当前环境不支持")
-		return
+	rules := loadProxyRules()
+	b, _ := os.ReadFile(filepath.Join(ownNginxDir(), "logs", "error.log"))
+	tail := ""
+	if len(b) > 0 {
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		if n := len(lines); n > 0 {
+			if n > 6 {
+				lines = lines[n-6:]
+			}
+			tail = strings.Join(lines, "\n")
+		}
 	}
-	rules := proxyRules()
-	out := make([]map[string]any, 0, len(rules))
-	for _, r := range rules {
-		st := getApply(r.ID)
-		out = append(out, map[string]any{
-			"id": r.ID, "name": r.Name, "domain": r.Domain, "pathPrefix": r.PathPrefix,
-			"stripPrefix": r.StripPrefix, "port": r.Port, "target": r.Target,
-			"tls": r.TLS, "desc": r.Desc,
-			"applyState": st.State, "applyError": st.Error,
-		})
-	}
-	ok(w, map[string]any{"rules": out, "confDir": confDir})
+	ok(w, map[string]any{
+		"rules":   rules,
+		"running": ownRunning(),
+		"dir":     ownNginxDir(),
+		"log":     tail,
+	})
 }
 
 func (s *Server) handleProxySave(w http.ResponseWriter, r *http.Request) {
@@ -280,68 +273,64 @@ func (s *Server) handleProxySave(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "标识只能用字母/数字/下划线/短横线")
 		return
 	}
-	rule.Domain = strings.Join(splitDomains(rule.Domain), " ")
-	if rule.Domain == "" {
-		fail(w, 400, "请填写域名（网关按域名路由）")
+	if rule.Port < 1024 || rule.Port > 65535 {
+		fail(w, 400, "监听端口请使用 1024-65535（80/443 由飞牛占用）")
 		return
 	}
-	for _, d := range splitDomains(rule.Domain) {
-		if !proxyReDomain.MatchString(d) {
-			fail(w, 400, "域名格式不合法："+d)
-			return
-		}
-	}
-	// 80/443 被飞牛自身占用：第三方 server 块监听它们会与系统站点冲突，
-	// 证书钩子取不到域名证书时还会导致 reload 失败。因此端口必填且要求高位。
-	if rule.Port <= 0 || rule.Port > 65535 {
-		fail(w, 400, "请填写监听端口（建议 8443 以上；80/443 由飞牛占用）")
-		return
-	}
-	if rule.Port < 1024 {
-		fail(w, 400, "监听端口请使用 1024 以上（80/443 由飞牛自身占用）")
+	if rule.Domain != "" && !proxyReDomain.MatchString(rule.Domain) {
+		fail(w, 400, "域名格式不合法")
 		return
 	}
 	if !proxyReTarget.MatchString(rule.Target) {
 		fail(w, 400, "目标地址需形如 http://192.168.1.10:8096")
 		return
 	}
+	u, err := url.Parse(rule.Target)
+	if err != nil || u.Host == "" {
+		fail(w, 400, "目标地址不合法")
+		return
+	}
 	if rule.Name == "" {
 		rule.Name = rule.ID
 	}
 
-	bin, mainConf, confDir, found := nginxPaths()
-	if !found || confDir == "" {
-		fail(w, 400, "未找到飞牛网关的 conf.d 目录，当前环境不支持")
-		return
-	}
-	// 同域名冲突：两条规则抢同一 server_name，网关只会命中其一
-	for _, x := range proxyRules() {
+	old := loadProxyRules()
+	for _, x := range old {
 		if x.ID == rule.ID {
 			continue
 		}
-		for _, d1 := range splitDomains(rule.Domain) {
-			for _, d2 := range splitDomains(x.Domain) {
-				if strings.EqualFold(d1, d2) {
-					fail(w, 400, "域名 "+d1+" 已被规则「"+x.Name+"」使用")
-					return
-				}
-			}
+		if x.Port == rule.Port {
+			fail(w, 400, fmt.Sprintf("端口 %d 已被规则「%s」使用", rule.Port, x.Name))
+			return
 		}
 	}
 
-	path := filepath.Join(confDir, "xbox-proxy-"+rule.ID+".conf")
-	var prev []byte
-	hadPrev := false
-	if b, e := os.ReadFile(path); e == nil {
-		prev, hadPrev = b, true
+	merged := make([]ProxyRule, 0, len(old)+1)
+	found := false
+	for _, x := range old {
+		if x.ID == rule.ID {
+			merged = append(merged, rule)
+			found = true
+		} else {
+			merged = append(merged, x)
+		}
 	}
-	if err := os.WriteFile(path, []byte(renderProxyConf(rule)), 0o644); err != nil {
-		fail(w, 500, "写入配置失败："+err.Error())
+	if !found {
+		merged = append(merged, rule)
+	}
+
+	// 先落盘配置再应用：失败要能回滚到旧规则
+	if err := saveProxyRules(merged); err != nil {
+		fail(w, 500, "保存失败："+err.Error())
 		return
 	}
-	// 立即返回，校验与重载在后台进行（避免超过网关转发超时导致 502）
-	ok(w, map[string]any{"saved": rule, "applying": true})
-	applyProxyAsync(rule.ID, path, prev, hadPrev, bin, mainConf)
+	if msg := applyOwnConfig(merged); msg != "" {
+		_ = saveProxyRules(old)
+		_ = applyOwnConfig(old)
+		fail(w, 400, "应用失败，已回滚："+msg)
+		return
+	}
+	ok(w, map[string]any{"saved": rule})
 }
 
 func (s *Server) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
@@ -350,53 +339,49 @@ func (s *Server) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "标识不合法")
 		return
 	}
-	bin, mainConf, confDir, found := nginxPaths()
-	if !found || confDir == "" {
-		fail(w, 400, "未找到飞牛网关的 conf.d 目录，当前环境不支持")
-		return
+	old := loadProxyRules()
+	kept := make([]ProxyRule, 0, len(old))
+	found := false
+	for _, x := range old {
+		if x.ID == id {
+			found = true
+			continue
+		}
+		kept = append(kept, x)
 	}
-	path := filepath.Join(confDir, "xbox-proxy-"+id+".conf")
-	prev, err := os.ReadFile(path)
-	if err != nil {
+	if !found {
 		fail(w, 404, "规则不存在")
 		return
 	}
-	if err := os.Remove(path); err != nil {
-		fail(w, 500, "删除失败："+err.Error())
+	if err := saveProxyRules(kept); err != nil {
+		fail(w, 500, "保存失败："+err.Error())
 		return
 	}
-	ok(w, map[string]any{"deleted": id, "applying": true})
-	go func() {
-		setApply(id, "pending", "")
-		time.Sleep(300 * time.Millisecond)
-		if msg := nginxRun(bin, mainConf, "-t"); msg != "" {
-			_ = os.WriteFile(path, prev, 0o644)
-			setApply(id, "failed", "删除后校验失败，已回滚："+msg)
-			return
-		}
-		_ = nginxRun(bin, mainConf, "-s", "reload")
-		setApply(id, "applied", "")
-	}()
+	if msg := applyOwnConfig(kept); msg != "" {
+		_ = saveProxyRules(old)
+		_ = applyOwnConfig(old)
+		fail(w, 400, "删除后应用失败，已回滚："+msg)
+		return
+	}
+	ok(w, map[string]any{"deleted": id})
 }
 
-// handleProxyEntry 兼容旧链接：提示改用域名访问。
+// handleProxyEntry 兼容旧链接：提示改用端口访问。
 func (s *Server) handleProxyEntry(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.RequestURI(), "/r/")
 	id = strings.SplitN(id, "/", 2)[0]
-	domain := ""
-	for _, x := range proxyRules() {
+	port := 0
+	for _, x := range loadProxyRules() {
 		if x.ID == id {
-			domain = x.Domain
-			break
+			port = x.Port
 		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if domain == "" {
+	if port == 0 {
 		w.WriteHeader(404)
 		_, _ = w.Write([]byte(`<body style="font:14px system-ui,sans-serif;padding:24px;color:#555">没有找到这条反向代理规则。</body>`))
 		return
 	}
-	_, _ = w.Write([]byte(`<body style="font:14px system-ui,sans-serif;padding:24px;color:#555">该规则由飞牛网关按域名接管，请访问 <b>https://` +
-		domain + `/</b></body>`))
+	_, _ = w.Write([]byte(`<body style="font:14px system-ui,sans-serif;padding:24px;color:#555">该规则由本应用的独立反代实例监听，请访问 <b>http://NAS地址:` +
+		strconv.Itoa(port) + `/</b></body>`))
 }
-
