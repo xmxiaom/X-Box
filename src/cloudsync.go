@@ -50,6 +50,8 @@ type SyncState struct {
 	Bytes    int64     `json:"bytes"`    // 上次同步复制的字节
 	Deleted  int       `json:"deleted"`  // 上次删除的文件数
 	Scanned  int       `json:"scanned"`  // 上次扫描的文件数
+	Total    int       `json:"total"`    // 本轮待处理文件数
+	Done     int       `json:"done"`     // 已处理数（运行中实时更新）
 	Duration string    `json:"duration"` // 上次耗时
 }
 
@@ -299,31 +301,44 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	}
 	st.Scanned = len(files)
 
+	// 阶段一：确定待处理清单（索引未命中或内容有变的文件）
 	idx := loadSyncIndex(task.ID)
 	newIdx := make(map[string]syncIdxEnt, len(files))
 	srcSet := make(map[string]bool, len(files))
+	var pending []srcEntry
 	for _, f := range files {
 		srcSet[f.rel] = true
 		newIdx[f.rel] = syncIdxEnt{Size: f.size, Mtime: f.mtime.UnixNano()}
-		// 上次索引里未变的文件：跳过（连目标端 stat 都不做）
+		// 索引命中且未变：直接跳过（连目标端 stat 都不做）
 		if e, ok := idx[f.rel]; ok && indexUnchanged(e, f) {
 			continue
 		}
+		pending = append(pending, f)
+	}
+	st.Total = len(pending)
+	setSyncState(task.ID, func(x *SyncState) { x.Total = st.Total; x.Done = 0; x.Running = true })
+
+	// 阶段二：逐个复制，实时上报进度
+	for i, f := range pending {
 		dst := filepath.Join(task.Target, f.rel)
 		if sameFileInfo(f, dst) {
+			done := i + 1
+			setSyncState(task.ID, func(x *SyncState) { x.Done = done })
 			continue
 		}
 		n, cerr := copyFileWithMtime(filepath.Join(task.Source, f.rel), dst, f.mtime)
+		done := i + 1
 		if cerr != nil {
 			st.LastErr = "复制失败 " + f.rel + "：" + cerr.Error()
 			log.Printf("[同步] %s %v", task.ID, cerr)
-			continue
+		} else {
+			st.Files++
+			st.Bytes += n
 		}
-		st.Files++
-		st.Bytes += n
+		setSyncState(task.ID, func(x *SyncState) { x.Done = done })
 	}
 
-	// 镜像删除：目标多出来的文件删掉（源里已不存在）
+	// 镜像删除：源里已删除的文件删掉（源里已不存在）
 	if task.Mirror {
 		_ = filepath.Walk(task.Target, func(p string, info os.FileInfo, werr error) error {
 			if werr != nil || info.IsDir() || p == task.Target {
