@@ -399,6 +399,7 @@ func runSyncTask(task SyncTask) {
 	}()
 
 	setSyncState(task.ID, func(s *SyncState) { s.Running = true; s.LastErr = "" })
+	log.Printf("[同步] 任务 %s（%s）开始", task.ID, task.Name)
 	st, err := syncOnce(task)
 	if err != nil {
 		st.LastErr = err.Error()
@@ -406,6 +407,8 @@ func runSyncTask(task SyncTask) {
 		st.LastAt = time.Now()
 	}
 	setSyncState(task.ID, func(s *SyncState) { *s = st })
+	log.Printf("[同步] 任务 %s 结束：复制 %d · 删除 %d · 扫描 %d · %s",
+		task.ID, st.Files, st.Deleted, st.Scanned, st.Duration)
 }
 
 // startSyncScheduler 每秒检查一次有没有到期的任务。
@@ -417,8 +420,6 @@ func (s *Server) startSyncScheduler() {
 				if !t.Enabled {
 					continue
 				}
-				// 实时模式：约 2 秒轮询一次（远程挂载不支持可靠的 inotify）；
-				// 普通模式：按 Interval 秒；0 = 仅手动。
 				iv := 2 * time.Second
 				if !t.Realtime {
 					if t.Interval <= 0 {
@@ -429,6 +430,16 @@ func (s *Server) startSyncScheduler() {
 					iv = time.Duration(t.WatchSec) * time.Second
 				}
 				if d := time.Since(last[t.ID]); d >= iv {
+					// 上一轮还在跑（远程挂载扫描慢，常见）时**不推进触发时间**，
+					// 否则每轮都撞上忙碌、每轮都被跳过，任务就永远不再同步。
+					// 这里先看一眼是否忙碌：忙则本轮跳过，但保留原触发时间，
+					// 扫描一结束立即补跑。
+					syncStore.mu.Lock()
+					busy := syncStore.busy[t.ID]
+					syncStore.mu.Unlock()
+					if busy {
+						continue
+					}
 					last[t.ID] = time.Now()
 					go runSyncTask(t)
 				}
