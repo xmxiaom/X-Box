@@ -120,6 +120,7 @@ PAGE = (b'<html><head><base href="http://old.example/"><title>t</title>'
         b'<img srcset="http://' + H.encode() + b'/s1.png 1x, /s2.png 2x">'
         b'<form action="http://' + H.encode() + b'/login" method="post"></form>'
         b'<a href="javascript:void(0)">j</a><a href="#top">h</a>'
+        b'<a href="/b/v9999/http/' + H.encode() + b'/deep">d</a>'  # 已是代理路径：不得二次嵌套
         b'<div>location.host</div>'                              # HTML 文本不是 JS，绝不能改写
         b'</body></html>')
 JS = b'var a=location.hostname;var b=window.location.origin;var c=location.port;'
@@ -199,6 +200,10 @@ check("浏览器代理根相对URL重写", 'href="' + BP + '/root.css"' in body,
 check("浏览器代理srcset重写", BP + '/s1.png 1x' in body, body[:300])
 check("浏览器代理表单action重写", 'action="' + BP + '/login"' in body, body[:300])
 check("浏览器代理保留非URL协议", 'javascript:void(0)' in body and 'href="#top"' in body, body[:300])
+# 幂等：已经是代理路径的属性值不能再套一层（v1.2.55 曾因此死循环：属性每轮变长
+# → MutationObserver 反复触发 → 浏览器卡死）
+check("浏览器代理改写幂等", ('href="/b/v9999/http/' + H + '/deep"') in body
+      and (BP + '/b/v9999') not in body, body[:400])
 # HTML 可见文本不是 JS 代码，其中的 location.host 不能被改写
 check("浏览器代理HTML文本不改写", '<div>location.host</div>' in body, body[:300])
 check("浏览器代理CSS url()重写", 'url("' + BP + '/pic.png")' in body or "url('" + BP + "/pic.png')" in body, body[:300])

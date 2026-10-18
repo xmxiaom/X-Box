@@ -591,6 +591,13 @@ func browserProxyURL(s string, cur *url.URL) string {
 			return s
 		}
 	}
+	// 幂等：已经是代理路径（本次改写过的结果）绝不能再套一层。
+	// v1.2.55 的根相对改写引入过死循环：属性值被改成 /b/v1255/...（根相对形式），
+	// 运行时的原型 setter / MutationObserver 再拿它调一次改写 → /b/…/b/… 无限增长
+	// → 每轮属性都变、观察器再触发 → 浏览器卡死。
+	if strings.HasPrefix(s, "/b/") {
+		return s
+	}
 	if strings.HasPrefix(s, "//") { // 协议相对
 		s = cur.Scheme + ":" + s
 	} else if strings.HasPrefix(s, "/") && cur.Host != "" { // 根相对
@@ -1146,6 +1153,9 @@ func browserPatchScript(tu *url.URL) string {
 		// px: 任意 URL → 代理路径（相对/非 http 原样）
 		`function px(u){try{if(typeof u!=="string")return u;var s=u.replace(/^\s+|\s+$/g,"");if(!s)return u;` +
 		`var l=s.toLowerCase();if(l.indexOf("javascript:")===0||l.indexOf("data:")===0||l.indexOf("mailto:")===0||l.indexOf("#")===0)return u;` +
+		// 幂等：已经是代理路径（服务端已改写过的属性值）绝不能再套一层，
+		// 否则 MutationObserver 每轮都会看到"属性又变了"→ 无限嵌套 → 卡死
+		`if(s.indexOf("/b/")===0)return u;` +
 		// 根相对（"/res/x.js"）：<base> 管不到，必须显式拼上目标站点根，
 		// 否则落到面板根下 → 孤儿重定向 → 站点错位（百度地图 CSS/Worker 全丢）
 		`if(s.charAt(0)==="/"&&s.charAt(1)!=="/"){var g=/^(https?):\/\/([\s\S]+)$/.exec(O);if(g)return P+g[1]+"/"+g[2]+s;}` +
