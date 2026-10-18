@@ -386,15 +386,23 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 	}
 	// 出向 Cookie 回写：显式 Path 限本站点代理子树（浏览器默认"当前请求目录"
 	// 在无子路径时会抬到 /b/，导致跨站点串 cookie）
-	cookiePath := "; Path=" + browserPathPrefix() + scheme + "/" + host + "/"
+	cookiePathV := "; Path=" + browserPathPrefix() + scheme + "/" + host + "/" // 带版本段（base 注入的页面）
+	cookiePathN := "; Path=/b/" + scheme + "/" + host + "/"                     // 无版本段（入口地址）
 	if direct {
-		cookiePath = "; Path=/"
+		cookiePathV = "; Path=/"
+		cookiePathN = ""
 	}
 	if os.Getenv("XBOX_DEBUG_COOKIE") == "1" {
 		log.Printf("[cookie] %s respSet=%d jarHit=%d", target, len(resp.Cookies()), len(jar.Cookies(tu)))
 	}
 	for _, c := range jar.Cookies(tu) {
-		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePath)
+		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePathV)
+		// 入口页面地址不带版本段，Cookie 若只写带版本段的 Path，登录等表单提交
+		// （发往无版本段路径）时浏览器不会携带——会话丢失导致光猫提示"密码错误"。
+		// 同一站点回写两份（值相同），两种地址都能携带。
+		if cookiePathN != "" && cookiePathN != cookiePathV {
+			w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePathN)
+		}
 	}
 	// 媒体/下载相关：断点续传与文件名（视频拖动、大文件下载依赖）
 	for _, h := range []string{"Accept-Ranges", "Content-Range", "Content-Disposition"} {
