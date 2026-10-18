@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -123,8 +124,13 @@ func fetchRawVersion() string {
 	return string(m[1])
 }
 
+var updateInProgress int64 // atomic：检查更新进行中（同步引擎见此标记会让路）
+
 func checkUpdate() UpdateInfo {
 	info := UpdateInfo{Current: version, CheckedAt: time.Now().Format("2006-01-02 15:04:05")}
+	// 检查更新需要外网带宽（GitHub），与同步争抢；进行中标记让同步引擎让路
+	atomic.StoreInt64(&updateInProgress, 1)
+	defer atomic.StoreInt64(&updateInProgress, 0)
 
 	// 1) 主路径：raw manifest 版本（无 API 限流）
 	latest := fetchRawVersion()
@@ -451,7 +457,11 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // runDownload 执行后台下载（结果写回全局状态）。
+var downloadInProgress int64 // atomic：后台下载 fpk 进行中（同步引擎让路）
+
 func runDownload(rawURL string, isAPI bool, dst string) {
+	atomic.StoreInt64(&downloadInProgress, 1)
+	defer atomic.StoreInt64(&downloadInProgress, 0)
 	setFail := func(msg string) {
 		dlMu.Lock()
 		dlRun, dlDone, dlErr = false, true, msg

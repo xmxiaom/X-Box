@@ -753,6 +753,12 @@ func syncYield() {
 	if now-last < int64(120*time.Millisecond) {
 		return
 	}
+	// 检查更新 / 后台下载 fpk 进行中：都需要外网带宽，同步优先让路
+	if atomic.LoadInt64(&updateInProgress) == 1 || atomic.LoadInt64(&downloadInProgress) == 1 {
+		atomic.StoreInt64(&syncLastYield, now)
+		time.Sleep(150 * time.Millisecond)
+		return
+	}
 	panelBusy := now-atomic.LoadInt64(&panelLastReq) < int64(2*time.Second)
 	if panelBusy {
 		atomic.StoreInt64(&syncLastYield, now)
