@@ -238,6 +238,55 @@ func copyFileWithMtime(src, dst string, mtime time.Time) (int64, error) {
 	return n, nil
 }
 
+// ---------------- 持久化索引（未变动的文件直接跳过，不做目标端比对） ----------------
+
+type syncIdxEnt struct {
+	Size  int64 `json:"s"`
+	Mtime int64 `json:"m"` // UnixNano
+}
+
+func syncIndexPath(id string) string {
+	dir := os.Getenv("XBOX_DATA")
+	if dir == "" {
+		dir = "."
+	}
+	d := filepath.Join(dir, "sync")
+	_ = os.MkdirAll(d, 0o755)
+	return filepath.Join(d, id+".idx")
+}
+
+func loadSyncIndex(id string) map[string]syncIdxEnt {
+	b, err := os.ReadFile(syncIndexPath(id))
+	if err != nil {
+		return map[string]syncIdxEnt{}
+	}
+	out := map[string]syncIdxEnt{}
+	if json.Unmarshal(b, &out) != nil {
+		return map[string]syncIdxEnt{}
+	}
+	return out
+}
+
+func saveSyncIndex(id string, idx map[string]syncIdxEnt) {
+	b, err := json.Marshal(idx)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(syncIndexPath(id), b, 0o600)
+}
+
+// indexUnchanged 判断相对上次索引是否未变（2 秒容差，与目标端比对一致）。
+func indexUnchanged(e syncIdxEnt, f srcEntry) bool {
+	if e.Size != f.size {
+		return false
+	}
+	d := e.Mtime - f.mtime.UnixNano()
+	if d < 0 {
+		d = -d
+	}
+	return d <= int64(2*time.Second)
+}
+
 // syncOnce 执行一次单向同步（源 → 目标）。
 func syncOnce(task SyncTask) (SyncState, error) {
 	start := time.Now()
@@ -250,9 +299,16 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	}
 	st.Scanned = len(files)
 
+	idx := loadSyncIndex(task.ID)
+	newIdx := make(map[string]syncIdxEnt, len(files))
 	srcSet := make(map[string]bool, len(files))
 	for _, f := range files {
 		srcSet[f.rel] = true
+		newIdx[f.rel] = syncIdxEnt{Size: f.size, Mtime: f.mtime.UnixNano()}
+		// 上次索引里未变的文件：跳过（连目标端 stat 都不做）
+		if e, ok := idx[f.rel]; ok && indexUnchanged(e, f) {
+			continue
+		}
 		dst := filepath.Join(task.Target, f.rel)
 		if sameFileInfo(f, dst) {
 			continue
@@ -286,6 +342,8 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			return nil
 		})
 	}
+
+	saveSyncIndex(task.ID, newIdx)
 
 	st.Running = false
 	st.LastAt = time.Now()
@@ -456,6 +514,7 @@ func (s *Server) handleSyncDelete(w http.ResponseWriter, r *http.Request) {
 	syncStore.mu.Lock()
 	delete(syncStore.state, id)
 	syncStore.mu.Unlock()
+	_ = os.Remove(syncIndexPath(id))
 	ok(w, map[string]any{"deleted": id})
 }
 
