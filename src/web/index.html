@@ -650,7 +650,8 @@ async function loadSyncTasks(){
     document.getElementById('sync-sub').textContent = '共 ' + syncCache.length + ' 个任务';
     const c = document.getElementById('sync-rows');
     const head = '<div class="proxy-hint">原理：网盘由飞牛「文件管理 → 远程挂载」挂到本机，本板块只负责比对文件变化并复制到本地目录（不接管挂载）。' +
-      '默认只复制"新增/修改"的文件，勾选"镜像删除"才会删除目标端多出来的文件。</div>' +
+      '同步规则：<b>网盘有 → 本地没有/有变化</b> 则复制/覆盖；<b>网盘没有、本地有</b> 默认<b>保留本地</b>（勾选"镜像删除"才会删除）。' +
+      '你手动删掉本地文件后，下一轮会被网盘版本恢复；恢复节奏由检测间隔决定。</div>' +
       '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openSyncForm(null)">+ 添加同步任务</button></div>';
     c.innerHTML = head + (syncCache.map(t => {
       const st = t.state || {};
