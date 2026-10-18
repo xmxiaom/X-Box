@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.78"
+	version = "1.2.79"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -97,6 +97,12 @@ func main() {
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
 	// 通道探测端点：登录态由 fnOS 网关校验，这里只回报已认证，
 	// 让前端不需要靠 404 判定链路可用
+	// 网盘同步：远程挂载 → 本地目录的增量同步
+	mux.HandleFunc("GET /api/sync/list", srv.handleSyncList)
+	mux.HandleFunc("POST /api/sync/save", srv.handleSyncSave)
+	mux.HandleFunc("POST /api/sync/delete", srv.handleSyncDelete)
+	mux.HandleFunc("POST /api/sync/run", srv.handleSyncRun)
+	mux.HandleFunc("GET /api/sync/dirs", srv.handleSyncDirs)
 	mux.HandleFunc("GET /api/auth/status", func(w http.ResponseWriter, r *http.Request) {
 		ok(w, map[string]any{"authed": true})
 	})
@@ -112,6 +118,7 @@ func main() {
 	mux.HandleFunc("POST /", srv.handleOrphan)
 
 	initAppBase()
+	srv.startSyncScheduler() // 网盘同步定时任务
 	cleanupLegacyReverseProxy() // 反向代理功能已移除，清掉早期版本留下的实例
 	handler := formBridge(tunnelBridge(mux))
 	if appBase != "" {

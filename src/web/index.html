@@ -280,6 +280,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
         DDNS服务
       </div>
+      <div class="menu-item" data-page="sync">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6-1.6A4 4 0 0 1 19 17H7a3 3 0 0 1-3-2z"/><path d="M12 12v7M9 16l3 3 3-3"/></svg>
+        网盘同步
+      </div>
       <div class="menu-item" data-page="browser">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>
         浏览器
@@ -400,6 +404,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       </div>
 
       <!-- 浏览器（多标签 · 经后端 /b 同源代理加载） -->
+      <div class="page" id="page-sync">
+        <div class="page-head"><h2>网盘同步</h2><span class="sub" id="sync-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadSyncTasks()">刷新</button></div>
+        <div class="rows" id="sync-rows"></div>
+      </div>
       <div class="page" id="page-browser">
         <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub"></span><div class="spacer"></div></div>
         <div class="browser-bar">
@@ -622,7 +630,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, sync:loadSyncTasks, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -632,6 +640,85 @@ document.getElementById('menu').addEventListener('click', e => {
   document.getElementById('page-'+page).classList.add('active');
   (loaders[page]||(()=>{}))();
 });
+
+/* ---------- 网盘同步（远程挂载 → 本地，类 Cloud Sync 单向同步） ---------- */
+let syncCache = [];
+async function loadSyncTasks(){
+  try{
+    const j = await api('/api/sync/list');
+    syncCache = j.tasks || [];
+    document.getElementById('sync-sub').textContent = '共 ' + syncCache.length + ' 个任务';
+    const c = document.getElementById('sync-rows');
+    const head = '<div class="proxy-hint">原理：网盘由飞牛「文件管理 → 远程挂载」挂到本机，本板块只负责比对文件变化并复制到本地目录（不接管挂载）。' +
+      '默认只复制"新增/修改"的文件，勾选"镜像删除"才会删除目标端多出来的文件。</div>' +
+      '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openSyncForm(null)">+ 添加同步任务</button></div>';
+    c.innerHTML = head + (syncCache.map(t => {
+      const st = t.state || {};
+      let badge = '<span class="badge badge-gray"><span class="dot"></span>待运行</span>';
+      if(st.running) badge = '<span class="badge badge-blue"><span class="dot"></span>同步中</span>';
+      else if(st.lastAt) badge = st.lastOk
+        ? '<span class="badge badge-green"><span class="dot"></span>已同步</span>'
+        : '<span class="badge" style="background:var(--danger-light);color:var(--danger)"><span class="dot"></span>有错误</span>';
+      const when = st.lastAt ? new Date(st.lastAt).toLocaleString() : '—';
+      const detail = st.lastAt
+        ? ('复制 ' + (st.files||0) + ' 个 / ' + fmtB(st.bytes||0) + (st.deleted?(' · 删除 '+st.deleted):'') + ' · 扫描 ' + (st.scanned||0) + ' · 耗时 ' + (st.duration||'—'))
+        : '尚未同步过';
+      return '<div class="row">' +
+        '<div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6-1.6A4 4 0 0 1 19 17H7a3 3 0 0 1-3-2z"/></svg></div>' +
+        '<div class="info"><div class="name">' + esc(t.name) + ' ' + badge +
+          (t.enabled ? '' : ' <span class="badge badge-gray"><span class="dot"></span>已停用</span>') +
+          (t.mirror ? ' <span class="badge badge-blue"><span class="dot"></span>镜像删除</span>' : '') + '</div>' +
+          '<div class="desc mono" style="font-size:11.5px">' + esc(t.source) + ' → ' + esc(t.target) + '</div>' +
+          '<div class="desc" style="font-size:11.5px;color:var(--text3)">' + esc(when) + ' · ' + esc(detail) +
+          (st.lastErr ? ' · <span style="color:var(--danger)">' + esc(st.lastErr.slice(0,80)) + '</span>' : '') +
+          (t.sourceOk ? '' : ' · <span style="color:var(--danger)">源目录不可达</span>') + '</div>' +
+        '</div>' +
+        '<div class="actions">' +
+          '<button class="btn btn-text btn-sm" onclick="syncRun(\'' + esc(t.id) + '\')">立即同步</button>' +
+          '<button class="btn btn-text btn-sm" onclick="openSyncForm(\'' + esc(t.id) + '\')">编辑</button>' +
+          '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="syncDelete(\'' + esc(t.id) + '\')">删除</button>' +
+        '</div></div>';
+    }).join('') || '<div class="empty">还没有同步任务，点右上角「添加同步任务」</div>');
+  }catch(e){ toast(e.message,'err'); }
+}
+function openSyncForm(id){
+  const t = id ? syncCache.find(x => x.id === id) : null;
+  const body = `
+    <div class="form-row"><label>名称</label><input type="text" id="sy-name" value="${esc(t?t.name:'')}" placeholder="例如 网盘备份"></div>
+    <div class="form-row"><label>源目录<span style="color:var(--muted);font-weight:normal">（飞牛远程挂载出来的目录）</span></label><input type="text" id="sy-source" value="${esc(t?t.source:'')}" placeholder="/vol1/@remote/我的网盘"></div>
+    <div class="form-row"><label>目标目录<span style="color:var(--muted);font-weight:normal">（本地文件夹）</span></label><input type="text" id="sy-target" value="${esc(t?t.target:'')}" placeholder="/vol1/1000/backup"></div>
+    <div class="form-row"><label>同步间隔（秒，0 = 仅手动）</label><input type="number" id="sy-interval" min="0" value="${t?t.interval:300}"></div>
+    <div class="form-row"><label>排除规则<span style="color:var(--muted);font-weight:normal">（逗号分隔，如 *.tmp,.DS_Store）</span></label><input type="text" id="sy-exclude" value="${esc(t?t.exclude:'')}" placeholder="*.tmp,.DS_Store"></div>
+    <label class="field-check"><input type="checkbox" id="sy-mirror" ${t&&t.mirror?'checked':''}> 镜像删除（源里删掉的，目标也删）</label>
+    <label class="field-check"><input type="checkbox" id="sy-enabled" ${(!t||t.enabled)?'checked':''}> 启用定时同步</label>
+    <div style="font-size:12px;color:var(--text3);margin-top:6px">挂载由飞牛「文件管理 → 远程挂载」负责；这里只做文件比对与复制，不会改动网盘挂载配置。</div>`;
+  confirmDialog(id?'编辑同步任务':'添加同步任务', body, async ()=>{
+    const payload = {
+      id: id || '',
+      name: (document.getElementById('sy-name').value||'').trim(),
+      source: (document.getElementById('sy-source').value||'').trim(),
+      target: (document.getElementById('sy-target').value||'').trim(),
+      interval: parseInt(document.getElementById('sy-interval').value, 10) || 0,
+      exclude: (document.getElementById('sy-exclude').value||'').trim(),
+      mirror: document.getElementById('sy-mirror').checked,
+      enabled: document.getElementById('sy-enabled').checked,
+    };
+    if(!payload.source || !payload.target){ toast('源与目标目录都要填','err'); return; }
+    try{ await api('/api/sync/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存','ok'); loadSyncTasks(); }
+    catch(e){ toast(e.message,'err'); }
+  }, id?'保存':'添加');
+}
+async function syncRun(id){
+  try{ await api('/api/sync/run?id='+encodeURIComponent(id),{method:'POST'}); toast('已开始同步','ok');
+    setTimeout(loadSyncTasks, 1200); setTimeout(loadSyncTasks, 3500); }
+  catch(e){ toast(e.message,'err'); }
+}
+async function syncDelete(id){
+  confirmDialog('删除同步任务','确认删除？已同步的文件不会被删除。', async ()=>{
+    try{ await api('/api/sync/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除','ok'); loadSyncTasks(); }
+    catch(e){ toast(e.message,'err'); }
+  });
+}
 
 /* ---------- 仪表盘 ---------- */
 async function loadOverview(){
