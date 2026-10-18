@@ -505,7 +505,7 @@ var (
 func browserVerSeg() string { return "v" + strings.ReplaceAll(version, ".", "") }
 
 // browserPathPrefix 代理路径前缀，如 "/b/v1254/"。
-func browserPathPrefix() string { return "/b/" + browserVerSeg() + "/" }
+func browserPathPrefix() string { return appBase + "/b/" + browserVerSeg() + "/" }
 
 // browserStripVerSeg 去掉路径里的版本段（"v1254/https/host/x" → "https/host/x"），
 // 供解析入口统一使用；不带版本段的旧路径原样返回（兼容面板里写死的 /b/...）。

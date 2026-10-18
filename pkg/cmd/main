@@ -32,7 +32,13 @@ start_process() {
     log_msg "Starting X-Box (arch=$(uname -m)) ..."
 
     # XBOX_DATA 指向持久数据卷：access_token / info.log 落于此处
-    ( export XBOX_DATA="${TRIM_PKGVAR}" && cd "${TRIM_PKGVAR}" && exec "${BIN}" ) >> "${LOG_FILE}" 2>&1 &
+    # XBOX_SOCKET / XBOX_BASE：fnOS 统一网关入口（网关校验登录态后转发到 socket）
+    (
+      export XBOX_DATA="${TRIM_PKGVAR}"
+      export XBOX_SOCKET="${TRIM_APPDEST}/app.sock"
+      export XBOX_BASE="/app/${TRIM_APPNAME}"
+      cd "${TRIM_PKGVAR}" && exec "${BIN}"
+    ) >> "${LOG_FILE}" 2>&1 &
     printf "%s" "$!" > "${PID_FILE}"
 
     sleep 2

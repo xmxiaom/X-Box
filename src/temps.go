@@ -332,5 +332,7 @@ func collectTempsCached() TempsInfo {
 
 // handleTemps 轻量温度接口（前端 5s 轮询局部刷新，比整页 overview 便宜得多）。
 func handleTemps(w http.ResponseWriter, r *http.Request) {
-	ok(w, collectTempsCached())
+	// 前端读取 j.temps（cpuMax/diskMax 等），必须包一层 map；
+	// 直接把结构体交给 ok() 会触发类型断言 panic（曾导致该接口直接断连）
+	ok(w, map[string]any{"temps": collectTempsCached()})
 }

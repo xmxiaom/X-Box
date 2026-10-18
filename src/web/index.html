@@ -472,6 +472,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 <div id="toast"></div>
 
 <script>
+// 网关模式前缀（服务端按 TRIM_APPNAME 注入；非网关模式为空）
+window.__XB_BASE__=(function(){var b="__XBOX_BASE__";return b.charAt(0)==="/"?b:"";})();
+window.__XB_DTOKEN__="__XBOX_DTOKEN__";
 let portsData = [], procsData = [], servicesData = [], appsData = [], dockerData = [];
 let portFilter = 'all', svcFilter = 'all';
 let cleanData = null;
@@ -1470,6 +1473,8 @@ function browserDirectMode(){
   if(!m){ toast('该地址不支持直通模式','err'); return; }
   const site = m[1] + '://' + m[2];
   document.cookie = 'xbox_site=' + encodeURIComponent(site) + '; path=/; SameSite=Lax';
+  // 直通端口校验用的一次性令牌（与本次面板会话绑定）
+  document.cookie = 'xbox_tk=' + encodeURIComponent(window.__XB_DTOKEN__||'') + '; path=/; SameSite=Lax';
   const url = 'http://' + location.hostname + ':' + BROWSER_DIRECT_PORT + '/';
   const nt = browserNewTab(url);
   if(nt){
@@ -1569,7 +1574,8 @@ function browserToProxy(u){
   if(!/^https?:\/\//i.test(u)) u = 'http://'+u;
   const m = u.match(/^(https?):\/\/([^\/?#]+)([^#]*)/);
   if(!m) return '';
-  return '/b/'+m[1]+'/'+m[2]+(m[3]||'/');
+  // 网关模式下必须带应用前缀（/app/<appname>），否则请求会跑出网关
+  return (window.__XB_BASE__||'')+'/b/'+m[1]+'/'+m[2]+(m[3]||'/');
 }
 // 代理路径 → 原始 URL（地址栏/标签标题显示真实地址，便于核对）
 // 路径里可能带版本段（/b/v1254/https/host/...），用于升级后自动弃用旧缓存

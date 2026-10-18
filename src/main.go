@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.60"
+	version = "1.2.61"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -106,7 +106,33 @@ func main() {
 	mux.HandleFunc("GET /", srv.handleOrphan)
 	mux.HandleFunc("POST /", srv.handleOrphan)
 
+	initAppBase()
 	handler := formBridge(tunnelBridge(mux))
+	if appBase != "" {
+		// 网关入口：先剥前缀，再交给正常路由
+		inner := handler
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			stripAppBase(r)
+			inner.ServeHTTP(w, r)
+		})
+	}
+	// fnOS 统一网关入口：监听 app.sock，网关校验登录态后转发进来
+	gatewayUp := false
+	if sock := strings.TrimSpace(os.Getenv("XBOX_SOCKET")); sock != "" {
+		_ = os.Remove(sock)
+		if ln, err := net.Listen("unix", sock); err != nil {
+			log.Printf("网关 socket 监听失败 %s: %v", sock, err)
+		} else {
+			gatewayUp = true
+			_ = os.Chmod(sock, 0o770)
+			go func(ln net.Listener) {
+				if err := http.Serve(ln, handler); err != nil {
+					log.Printf("网关 socket 服务退出: %v", err)
+				}
+			}(ln)
+			log.Printf("网关入口已就绪：%s -> %s", sock, appBase)
+		}
+	}
 	addrs := listenAddrs()
 	listened := 0
 	for _, a := range addrs {
@@ -136,7 +162,7 @@ func main() {
 			}
 		}(a, ln)
 	}
-	if listened == 0 {
+	if listened == 0 && !gatewayUp {
 		log.Fatalf("所有监听地址均失败: %v", addrs)
 	}
 	log.Printf("X-Box v%s 启动，监听 %v（回环+局域网私网，不对公网暴露；外部经 fnOS 远程访问体系）", version, addrs)
@@ -145,9 +171,14 @@ func main() {
 
 // listenAddrs 监听地址列表：127.0.0.1 + 首个局域网私网 IPv4（探测不到则仅回环）。
 func listenAddrs() []string {
+	// 默认只绑本机回环：外部入口统一由 fnOS 网关承担（socket + 登录态），
+	// 面板功能（清理、终端、进程结束）不再暴露到局域网。
+	// 需要局域网直连排障时显式设置 XBOX_LAN=1。
 	addrs := []string{"127.0.0.1:" + listenPort}
-	if ip := lanIPv4(); ip != "" {
-		addrs = append(addrs, net.JoinHostPort(ip, listenPort))
+	if os.Getenv("XBOX_LAN") == "1" {
+		if ip := lanIPv4(); ip != "" {
+			addrs = append(addrs, net.JoinHostPort(ip, listenPort))
+		}
 	}
 	return addrs
 }
@@ -260,8 +291,16 @@ func fail(w http.ResponseWriter, code int, msg string) {
 
 func ok(w http.ResponseWriter, v any) {
 	m := map[string]any{"ok": true}
-	for k, val := range v.(map[string]any) {
-		m[k] = val
+	switch mm := v.(type) {
+	case map[string]any:
+		for k, val := range mm {
+			m[k] = val
+		}
+	case nil:
+		// 无数据：只回 {ok:true}
+	default:
+		// 非 map 结构以 data 承载，避免类型断言 panic（曾有接口因此直接断连）
+		m["data"] = v
 	}
 	writeJSON(w, 200, m)
 }
@@ -274,6 +313,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// 注入版本标识到登录卡片：便于确认客户端实际加载的构建版本（iframe 缓存/未重启排障）
 	page := bytes.Replace(indexHTML, []byte("<!--XBOX_VER-->"), []byte("v"+version), 1)
+	// 网关模式下前端需要知道前缀，才能拼出网关能识别的绝对路径
+	page = bytes.Replace(page, []byte("__XBOX_BASE__"), []byte(appBase), 1)
+	page = bytes.Replace(page, []byte("__XBOX_DTOKEN__"), []byte(directToken), 1)
 	_, _ = w.Write(page)
 }
 

@@ -7,12 +7,13 @@
       "control": {
         "accessPerm": "readonly"
       },
-      "protocol": "http",
+      "protocol": "",
       "title": "X-Box",
       "icon": "images/icon_256.png",
       "type": "iframe",
-      "port": "8899",
-      "url": ""
+      "gatewayPrefix": "/app/X-Box",
+      "gatewaySocket": "app.sock",
+      "url": "/app/X-Box/"
     }
   }
 }

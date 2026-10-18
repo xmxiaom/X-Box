@@ -12,6 +12,8 @@ package main
 // 路径式代理（8899）。该端口仅局域网可达，远程访问经 fnOS 域名时用不上。
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,6 +28,20 @@ func directAddrs() []string {
 		addrs = append(addrs, net.JoinHostPort(ip, directPort))
 	}
 	return addrs
+}
+
+// directToken 直通端口的一次性令牌：由面板页面注入，浏览器写入 Cookie。
+// 直通端口无法复用飞牛登录态（它不在网关后面），令牌把可用范围限制在
+// "从本面板打开过桌面模式的那个浏览器"内，避免局域网内被他人当作代理跳板。
+var directToken = randHexToken(16)
+
+// randHexToken 生成随机十六进制令牌。
+func randHexToken(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b)
 }
 
 // directSite 从 Cookie 取当前直通站点（"http://host:port"）。
@@ -47,6 +63,10 @@ func directSite(r *http.Request) string {
 
 // handleDirectProxy 直通模式入口：路径原样转发到 Cookie 指定的站点。
 func (s *Server) handleDirectProxy(w http.ResponseWriter, r *http.Request) {
+	if tk, err := r.Cookie("xbox_tk"); err != nil || tk.Value != directToken {
+		fail(w, 403, "直通模式需从面板「桌面模式」进入")
+		return
+	}
 	site := directSite(r)
 	if site == "" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
