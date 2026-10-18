@@ -685,7 +685,7 @@ async function loadSyncTasks(){
           (t.realtime ? ' <span class="badge badge-green"><span class="dot"></span>实时 ' + (t.watchSec||2) + 's</span>' : '') +
           (t.mirror ? ' <span class="badge badge-blue"><span class="dot"></span>镜像删除</span>' : '') + '</div>' +
           '<div class="desc mono" style="font-size:11.5px">' + esc(t.source) + ' → ' + esc(t.target) + '</div>' +
-          '<div class="desc" style="font-size:11.5px;color:var(--text3)">' + esc(when) + ' · ' + esc(detail) +
+          '<div class="desc" style="font-size:11.5px;color:var(--text3)">' + esc(when) + ' · ' + detail +
           (st.lastErr ? ' · <span style="color:var(--danger)">' + esc(st.lastErr.slice(0,80)) + '</span>' : '') +
           (t.sourceOk ? '' : ' · <span style="color:var(--danger)">源目录不可达</span>') + '</div>' +
         '</div>' +
