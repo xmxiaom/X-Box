@@ -10,7 +10,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 )
 
 // execCommand 带超时执行外部命令，返回 stdout。
@@ -23,12 +25,12 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 // ============ 系统概览 ============
 
 type DiskInfo struct {
-	Mount    string `json:"mount"`
-	Device   string `json:"device"`
-	FsType   string `json:"fsType"`
-	TotalKB  int64  `json:"totalKB"`
-	FreeKB   int64  `json:"freeKB"`
-	AvailKB  int64  `json:"availKB"`
+	Mount   string `json:"mount"`
+	Device  string `json:"device"`
+	FsType  string `json:"fsType"`
+	TotalKB int64  `json:"totalKB"`
+	FreeKB  int64  `json:"freeKB"`
+	AvailKB int64  `json:"availKB"`
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +66,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		ov["cpuModel"] = model
 		ov["cpuCores"] = cores
 	}
+	ov["cpuUsage"] = cpuUsagePercent()
 
 	if b, err := os.ReadFile("/proc/uptime"); err == nil {
 		fs := strings.Fields(string(b))
@@ -228,4 +231,71 @@ func readOsRelease() string {
 		}
 	}
 	return ""
+}
+
+// cpuStat 读取 /proc/stat 里的总体 CPU 时间片（total 含 idle）。
+func cpuStat() (total, idle uint64, ok bool) {
+	b, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "cpu ") {
+			continue
+		}
+		for i, v := range strings.Fields(line)[1:] {
+			n, perr := strconv.ParseUint(v, 10, 64)
+			if perr != nil {
+				continue
+			}
+			total += n
+			if i == 3 || i == 4 { // idle + iowait 都算空闲
+				idle += n
+			}
+		}
+		return total, idle, true
+	}
+	return 0, 0, false
+}
+
+var cpuPrev struct {
+	mu          sync.Mutex
+	total, idle uint64
+	set         bool
+}
+
+// cpuUsagePercent 返回上次调用以来的 CPU 占用率（百分比）。
+// 用两次 /proc/stat 的时间片差值计算，与 top 的口径一致（idle+iowait 视为空闲）。
+// 首次调用补一次 100ms 短采样，避免首屏显示 0%。
+func cpuUsagePercent() float64 {
+	cpuPrev.mu.Lock()
+	defer cpuPrev.mu.Unlock()
+
+	total, idle, ok := cpuStat()
+	if !ok {
+		return 0
+	}
+	if !cpuPrev.set {
+		cpuPrev.total, cpuPrev.idle = total, idle
+		cpuPrev.set = true
+		time.Sleep(100 * time.Millisecond) // 只在进程启动后的首次请求付出这点延迟
+		t2, i2, ok2 := cpuStat()
+		if !ok2 {
+			return 0
+		}
+		total, idle = t2, i2
+	}
+	dt, di := total-cpuPrev.total, idle-cpuPrev.idle
+	cpuPrev.total, cpuPrev.idle = total, idle
+	if dt == 0 {
+		return 0
+	}
+	pct := float64(dt-di) * 100 / float64(dt)
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return float64(int(pct*10+0.5)) / 10 // 一位小数
 }
