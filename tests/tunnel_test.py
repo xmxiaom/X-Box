@@ -282,6 +282,11 @@ st, body = get(urllib.request.Request(B + "/postecho", data=b"action=login&x=1",
                headers={"Content-Type": "application/x-www-form-urlencoded"}))
 check("浏览器代理POST带Content-Length", st == 200 and "CL=16;" in body and "TE=;" in body
       and "LEN=16" in body, body)
+# /api/temps 必须与 overview 里的 temps 同构（扁平）：前端轮询按顶层取 disks/cpuMax。
+# 之前包了一层 {temps:{...}}，导致"首次有温度、5 秒后变成暂无传感器"。
+st, body = get(tunnel({"m": "GET", "p": "/api/temps"}))
+j = json.loads(body) if body else {}
+check("温度接口结构", st == 200 and j.get("ok") and ("cpuMax" in j) and ("disks" in j), body[:100])
 st, body = get(B + "/style.css")
 check("浏览器代理CSS文件重写", st == 200 and BP + '/pic.png' in body, body[:120])
 st, body = get(B + "/pic.png")

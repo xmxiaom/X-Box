@@ -678,6 +678,7 @@ function renderDiskTemps(temps){
     '</div>';
 }
 function applyTemps(t){
+  t = (t && t.temps) || t || {};   // 兼容 {temps:{...}} 与扁平两种结构
   const cpuEl = document.getElementById('stat-cpu-temp');
   const cpuMax = (t||{}).cpuMax||0;
   if(cpuEl){

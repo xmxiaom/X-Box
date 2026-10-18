@@ -350,7 +350,9 @@ func collectTempsCached() TempsInfo {
 
 // handleTemps 轻量温度接口（前端 5s 轮询局部刷新，比整页 overview 便宜得多）。
 func handleTemps(w http.ResponseWriter, r *http.Request) {
-	// 前端读取 j.temps（cpuMax/diskMax 等），必须包一层 map；
-	// 直接把结构体交给 ok() 会触发类型断言 panic（曾导致该接口直接断连）
-	ok(w, map[string]any{"temps": collectTempsCached()})
+	// 与 /api/overview 里的 temps 字段保持同构（扁平：cpu / cpuMax / disks）。
+	// 之前包了一层 {temps:{...}}，而前端轮询后按顶层取 t.disks，导致
+	// "首次进入有温度、5 秒后变成暂无传感器"。
+	t := collectTempsCached()
+	ok(w, map[string]any{"cpu": t.CPU, "cpuMax": t.CPUMax, "disks": t.Disks})
 }
