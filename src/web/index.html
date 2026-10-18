@@ -642,7 +642,7 @@ document.getElementById('menu').addEventListener('click', e => {
 });
 
 /* ---------- 网盘同步（远程挂载 → 本地，类 Cloud Sync 单向同步） ---------- */
-let syncCache = [];
+let syncCache = [], syncTimer = null;
 async function loadSyncTasks(){
   try{
     const j = await api('/api/sync/list');
@@ -662,7 +662,9 @@ async function loadSyncTasks(){
       const when = st.lastAt ? new Date(st.lastAt).toLocaleString() : '—';
       const errText = st.lastErr ? ('<span style="color:var(--danger)">' + esc(st.lastErr.slice(0, 160)) + '</span> · ') : '';
       let detail;
-      if(st.running && st.total > 0){
+      if(st.running && st.phase === 'scan'){
+        detail = '<span style="font-size:12px;color:var(--text2)">正在扫描源目录（已枚举 ' + (st.scanning||0) + ' 项，大网盘可能需要几分钟）…</span>';
+      } else if(st.running && st.total > 0){
         const pct = Math.min(100, Math.round((st.done||0) * 100 / st.total));
         detail = '<div class="bar" style="margin-top:6px"><i style="width:' + pct + '%"></i></div>' +
           '<span style="font-size:12px;color:var(--text2)">正在复制 ' + (st.done||0) + ' / ' + st.total + '（' + pct + '%）' +

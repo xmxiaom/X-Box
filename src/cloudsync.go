@@ -53,6 +53,8 @@ type SyncState struct {
 	Total    int       `json:"total"`    // 本轮待处理文件数
 	Done     int       `json:"done"`     // 已处理数（运行中实时更新）
 	Speed    string    `json:"speed"`    // 运行中实时网速（如 12.3 MB/s）
+	Phase    string    `json:"phase"`    // scan=扫描源目录 copy=复制 idle
+	Scanning int       `json:"scanning"` // 扫描阶段已枚举的条目数
 	Duration string    `json:"duration"` // 上次耗时
 }
 
@@ -132,8 +134,8 @@ type srcEntry struct {
 	mtime time.Time
 }
 
-// scanSource 收集源端文件清单（相对路径）。
-func scanSource(root string, excludes []string) ([]srcEntry, error) {
+// scanSource 收集源端文件清单（相对路径）。onProg 每 500 项回调一次（可为 nil）。
+func scanSource(root string, excludes []string, onProg func(int)) ([]srcEntry, error) {
 	var out []srcEntry
 	root = filepath.Clean(root)
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
@@ -163,6 +165,9 @@ func scanSource(root string, excludes []string) ([]srcEntry, error) {
 			return nil
 		}
 		out = append(out, srcEntry{rel: rel, size: info.Size(), mtime: info.ModTime()})
+		if onProg != nil && len(out)%500 == 0 {
+			onProg(len(out))
+		}
 		if len(out) > syncMaxFiles {
 			return errors.New("源目录文件数超过上限（" + fmt.Sprint(syncMaxFiles) + "）。请在「排除规则」里排除不需要的子目录，或减少挂载范围")
 		}
@@ -296,7 +301,10 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	var st SyncState
 
 	excludes := strings.Split(task.Exclude, ",")
-	files, err := scanSource(task.Source, excludes)
+	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
+	files, err := scanSource(task.Source, excludes, func(n int) {
+		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
+	})
 	if err != nil {
 		return st, err
 	}
@@ -310,14 +318,17 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	for _, f := range files {
 		srcSet[f.rel] = true
 		newIdx[f.rel] = syncIdxEnt{Size: f.size, Mtime: f.mtime.UnixNano()}
-		// 索引命中且未变：直接跳过（连目标端 stat 都不做）
+		// 索引命中且未变：仍确认目标文件存在（被删/丢失则进入复制阶段恢复）
 		if e, ok := idx[f.rel]; ok && indexUnchanged(e, f) {
-			continue
+			if _, serr := os.Stat(filepath.Join(task.Target, f.rel)); serr == nil {
+				continue
+			}
+			log.Printf("[同步] 目标端缺失 %s，将重新复制", f.rel)
 		}
 		pending = append(pending, f)
 	}
 	st.Total = len(pending)
-	setSyncState(task.ID, func(x *SyncState) { x.Total = st.Total; x.Done = 0; x.Running = true })
+	setSyncState(task.ID, func(x *SyncState) { x.Total = st.Total; x.Done = 0; x.Running = true; x.Phase = "copy" })
 
 	// 阶段二：逐个复制，实时上报进度与网速
 	copyStart := time.Now()
@@ -347,9 +358,21 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		})
 	}
 
-	// 镜像删除：源里已删除的文件删掉（源里已不存在）
-	if task.Mirror {
+	// 镜像删除（带安全阀）：
+	//   1. 首轮（索引为空，即上次同步结果未知）绝不删除——远程挂载是按需枚举，
+	//      首扫可能只看到网盘的一小部分，此时做镜像会把目标端文件误删光；
+	//   2. 单轮删除数超过 max(100, 已复制数×2) 时立即中止并保留剩余文件，
+	//      挂载端枚举异常（部分内容缺失）时宁可漏删也不误删。
+	if task.Mirror && len(idx) > 0 {
+		delLimit := st.Files * 2
+		if delLimit < 100 {
+			delLimit = 100
+		}
+		aborted := false
 		_ = filepath.Walk(task.Target, func(p string, info os.FileInfo, werr error) error {
+			if aborted {
+				return errors.New("del-limit")
+			}
 			if werr != nil || info.IsDir() || p == task.Target {
 				return nil
 			}
@@ -362,6 +385,11 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			}
 			if err := os.Remove(p); err == nil {
 				st.Deleted++
+				if st.Deleted > delLimit {
+					aborted = true
+					st.LastErr = fmt.Sprintf("镜像删除中止：本轮删除数(%d)异常超过上限(%d)，已保留剩余文件。若确需删除请再次同步", st.Deleted, delLimit)
+					return errors.New("del-limit")
+				}
 			}
 			return nil
 		})
@@ -559,6 +587,13 @@ func (s *Server) handleSyncDelete(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSyncRun(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	syncStore.mu.Lock()
+	busy := syncStore.busy[id]
+	syncStore.mu.Unlock()
+	if busy {
+		fail(w, 409, "上一轮同步仍在进行中（大网盘扫描可能需要几分钟），请等它完成后再试")
+		return
+	}
 	for _, t := range loadSyncTasks() {
 		if t.ID == id {
 			go runSyncTask(t)
