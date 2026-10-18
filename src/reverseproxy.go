@@ -14,6 +14,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 type ProxyRule struct {
@@ -264,17 +266,10 @@ func (s *Server) handleProxySave(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "网关配置校验未通过，已回滚："+msg)
 		return
 	}
-	if msg := nginxRun(bin, mainConf, "-s", "reload"); msg != "" {
-		if hadPrev {
-			_ = os.WriteFile(path, prev, 0o644)
-		} else {
-			_ = os.Remove(path)
-		}
-		_ = nginxRun(bin, mainConf, "-s", "reload")
-		fail(w, 400, "网关重载失败，已回滚："+msg)
-		return
-	}
+	// 先返回结果，再延迟重载：nginx reload 会短暂切断连接（包括本请求的响应
+	// 和飞牛桌面的长连接），同步执行会让前端看到 502 / "连接已断开"。
 	ok(w, map[string]any{"saved": rule})
+	go nginxReloadLater(bin, mainConf)
 }
 
 func (s *Server) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
@@ -303,8 +298,8 @@ func (s *Server) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "删除后网关配置校验失败，已回滚："+msg)
 		return
 	}
-	_ = nginxRun(bin, mainConf, "-s", "reload")
 	ok(w, map[string]any{"deleted": id})
+	go nginxReloadLater(bin, mainConf)
 }
 
 // handleProxyEntry 兼容旧链接：提示改用域名访问。
@@ -326,4 +321,15 @@ func (s *Server) handleProxyEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	_, _ = w.Write([]byte(`<body style="font:14px system-ui,sans-serif;padding:24px;color:#555">该规则由飞牛网关按域名接管，请访问 <b>https://` +
 		domain + `/</b></body>`))
+}
+
+// nginxReloadLater 等响应写完再重载网关。
+// reload 期间网关 worker 会短暂中断，同步执行会让调用方拿到 502。
+func nginxReloadLater(bin, mainConf string) {
+	time.Sleep(500 * time.Millisecond)
+	if msg := nginxRun(bin, mainConf, "-s", "reload"); msg != "" {
+		log.Printf("[反代] 网关重载失败：%s", msg)
+		return
+	}
+	log.Printf("[反代] 网关配置已重载")
 }

@@ -653,7 +653,13 @@ async function loadReverseProxy(){
       c.innerHTML = `<div class="proxy-hint">未找到飞牛网关的配置目录（<span class="mono">/usr/trim/nginx/conf/conf.d</span>），此功能不可用。</div>`;
       return;
     }
-    const j = await api('/api/proxy/list');
+    let j;
+    try{ j = await api('/api/proxy/list'); }
+    catch(e){
+      // 网关刚重载时可能瞬时不可达：等 1.2 秒重试一次
+      await new Promise(r=>setTimeout(r,1200));
+      j = await api('/api/proxy/list');
+    }
     proxyCache = j.rules||[];
     document.getElementById('proxy-sub').textContent = `共 ${proxyCache.length} 个站点`;
     c.innerHTML = '<div class="proxy-hint">规则由飞牛网关监听：默认使用网关 <b>443</b> 与飞牛证书托管，<b>应用自身不占用端口</b>。域名需先能解析到 NAS（可用 DDNS）。</div>' +
@@ -704,13 +710,15 @@ function openProxyForm(id){
       tls: document.getElementById('px-tls').checked,
       desc: document.getElementById('px-desc').value.trim(),
     };
-    try{ await api('/api/proxy/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存站点','ok'); loadReverseProxy(); }
+    try{ await api('/api/proxy/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存，网关正在重载…','ok');
+      setTimeout(loadReverseProxy, 1400); }   // 避开 nginx reload 的短暂断连
     catch(e){ toast(e.message,'err'); }
   }, id?'保存':'添加');
 }
 async function proxyDelete(id){
   confirmDialog('删除站点','确认删除该反向代理站点？网关配置会被移除并重新加载。', async ()=>{
-    try{ await api('/api/proxy/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除','ok'); loadReverseProxy(); }
+    try{ await api('/api/proxy/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除，网关正在重载…','ok');
+      setTimeout(loadReverseProxy, 1400); }
     catch(e){ toast(e.message,'err'); }
   });
 }
