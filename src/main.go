@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.98"
+	version = "1.2.99"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -102,6 +102,7 @@ func main() {
 	mux.HandleFunc("POST /api/sync/save", srv.handleSyncSave)
 	mux.HandleFunc("POST /api/sync/delete", srv.handleSyncDelete)
 	mux.HandleFunc("POST /api/sync/run", srv.handleSyncRun)
+	mux.HandleFunc("POST /api/sync/pause", srv.handleSyncPause)
 	mux.HandleFunc("GET /api/sync/dirs", srv.handleSyncDirs)
 	mux.HandleFunc("GET /api/auth/status", func(w http.ResponseWriter, r *http.Request) {
 		ok(w, map[string]any{"authed": true})

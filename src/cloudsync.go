@@ -697,6 +697,30 @@ func (s *Server) handleSyncRun(w http.ResponseWriter, r *http.Request) {
 	fail(w, 404, "任务不存在")
 }
 
+// handleSyncPause 切换任务的暂停/继续（Enabled 的便捷切换，配置与索引保留）。
+func (s *Server) handleSyncPause(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	on := r.URL.Query().Get("on") == "1"
+	tasks := loadSyncTasks()
+	found := false
+	for i := range tasks {
+		if tasks[i].ID == id {
+			tasks[i].Enabled = on
+			found = true
+			break
+		}
+	}
+	if !found {
+		fail(w, 404, "任务不存在")
+		return
+	}
+	if err := saveSyncTasks(tasks); err != nil {
+		fail(w, 500, "保存失败："+err.Error())
+		return
+	}
+	ok(w, map[string]any{"id": id, "paused": !on})
+}
+
 // handleSyncDirs 简单的目录候选（便于前端提示当前卷）
 func (s *Server) handleSyncDirs(w http.ResponseWriter, r *http.Request) {
 	out := []string{}
