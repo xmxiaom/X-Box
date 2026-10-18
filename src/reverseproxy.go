@@ -157,7 +157,7 @@ func runOwn(args ...string) string {
 	dir := ownNginxDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	a := append([]string{"-p", dir + "/", "-c", "nginx.conf"}, args...)
+	a := append([]string{"-p", dir + "/", "-c", filepath.Join(dir, "nginx.conf")}, args...)
 	out, err := exec.CommandContext(ctx, bin, a...).CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -168,14 +168,50 @@ func runOwn(args ...string) string {
 	return ""
 }
 
-// ownRunning 判断本应用实例是否在跑。
-func ownRunning() bool {
+// ownPid 读取本实例的 pid（失败返回 0）。
+func ownPid() int {
 	b, err := os.ReadFile(filepath.Join(ownNginxDir(), "logs", "nginx.pid"))
 	if err != nil {
-		return false
+		return 0
 	}
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(b)))
 	if perr != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// ownReload 只给自己实例发 SIGHUP。
+// 这里刻意不用 `nginx -s reload`：它是按 pid 文件定的，一旦我们的 pid 文件缺失，
+// nginx 会回退到编译期默认 pid 路径（也就是飞牛网关那个实例），于是一个"重载"
+// 就把飞牛网关给重启了。改为：读自己的 pid → 校验进程 cmdline 含本实例目录 →
+// 直接 kill -HUP。任何一步不符就放弃，宁可报错也不误伤系统实例。
+func ownReload() string {
+	pid := ownPid()
+	if pid <= 0 {
+		return "本实例未运行（找不到 pid）"
+	}
+	cb, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil {
+		return "无法校验进程归属：" + err.Error()
+	}
+	if !strings.Contains(string(cb), ownNginxDir()) {
+		return "pid " + strconv.Itoa(pid) + " 不属于本实例，已取消信号"
+	}
+	proc, perr := os.FindProcess(pid)
+	if perr != nil {
+		return "获取进程失败：" + perr.Error()
+	}
+	if serr := proc.Signal(syscall.SIGHUP); serr != nil {
+		return "发送 SIGHUP 失败：" + serr.Error()
+	}
+	return ""
+}
+
+// ownRunning 判断本应用实例是否在跑。
+func ownRunning() bool {
+	pid := ownPid()
+	if pid <= 0 {
 		return false
 	}
 	p, err := os.FindProcess(pid)
@@ -199,7 +235,7 @@ func applyOwnConfig(rules []ProxyRule) string {
 		return "配置校验未通过：" + msg
 	}
 	if ownRunning() {
-		if msg := runOwn("-s", "reload"); msg != "" {
+		if msg := ownReload(); msg != "" {
 			return "重载失败：" + msg
 		}
 		return ""
