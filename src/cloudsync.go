@@ -53,8 +53,10 @@ type SyncState struct {
 	Total    int       `json:"total"`    // 本轮待处理文件数
 	Done     int       `json:"done"`     // 已处理数（运行中实时更新）
 	Speed    string    `json:"speed"`    // 运行中实时网速（如 12.3 MB/s）
-	Phase    string    `json:"phase"`    // scan=扫描源目录 copy=复制 idle
-	Scanning int       `json:"scanning"` // 扫描阶段已枚举的条目数
+	Phase      string    `json:"phase"`      // scan=扫描源目录 copy=复制 idle
+	Scanning   int       `json:"scanning"`   // 扫描阶段已枚举的条目数
+	TotalBytes int64     `json:"totalBytes"` // 本轮待复制总字节
+	DoneBytes  int64     `json:"doneBytes"`  // 已复制字节（运行中实时更新）
 	Duration string    `json:"duration"` // 上次耗时
 }
 
@@ -214,7 +216,7 @@ func sameFileInfo(src srcEntry, dstPath string) bool {
 	return diff <= 2*time.Second
 }
 
-func copyFileWithMtime(src, dst string, mtime time.Time) (int64, error) {
+func copyFileWithMtime(src, dst string, mtime time.Time, onProg func(int64)) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return 0, err
 	}
@@ -229,21 +231,51 @@ func copyFileWithMtime(src, dst string, mtime time.Time) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	n, cerr := io.Copy(out, in)
+	// 分块复制，回调里上报已写字节（大文件内部也有实时进度）
+	var written int64
+	buf := make([]byte, 256*1024)
+	var cerr error
+	for {
+		nn, er := in.Read(buf)
+		if nn > 0 {
+			on, ew := out.Write(buf[:nn])
+			written += int64(on)
+			if onProg != nil {
+				onProg(written)
+			}
+			if ew != nil {
+				cerr = ew
+				break
+			}
+			if er != nil {
+				if er != io.EOF {
+					cerr = er
+				}
+				break
+			}
+			continue
+		}
+		if er != nil {
+			if er != io.EOF {
+				cerr = er
+			}
+			break
+		}
+	}
 	serr := out.Close()
 	if cerr != nil || serr != nil {
 		_ = os.Remove(tmp)
 		if cerr != nil {
-			return n, cerr
+			return written, cerr
 		}
-		return n, serr
+		return written, serr
 	}
 	_ = os.Chtimes(tmp, mtime, mtime)
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.Remove(tmp)
-		return n, err
+		return written, err
 	}
-	return n, nil
+	return written, nil
 }
 
 // ---------------- 持久化索引（未变动的文件直接跳过，不做目标端比对） ----------------
@@ -328,18 +360,38 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		pending = append(pending, f)
 	}
 	st.Total = len(pending)
-	setSyncState(task.ID, func(x *SyncState) { x.Total = st.Total; x.Done = 0; x.Running = true; x.Phase = "copy" })
+	var totalBytes int64
+	for _, f := range pending {
+		totalBytes += f.size
+	}
+	st.TotalBytes = totalBytes
+	setSyncState(task.ID, func(x *SyncState) {
+		x.Total = st.Total; x.Done = 0; x.Running = true; x.Phase = "copy"
+		x.TotalBytes = totalBytes; x.DoneBytes = 0
+	})
 
 	// 阶段二：逐个复制，实时上报进度与网速
 	copyStart := time.Now()
+	var doneBytes int64
 	for i, f := range pending {
 		dst := filepath.Join(task.Target, f.rel)
 		if sameFileInfo(f, dst) {
+			doneBytes += f.size
 			done := i + 1
-			setSyncState(task.ID, func(x *SyncState) { x.Done = done })
+			setSyncState(task.ID, func(x *SyncState) { x.Done = done; x.DoneBytes = doneBytes })
 			continue
 		}
-		n, cerr := copyFileWithMtime(filepath.Join(task.Source, f.rel), dst, f.mtime)
+		localBase := doneBytes
+		n, cerr := copyFileWithMtime(filepath.Join(task.Source, f.rel), dst, f.mtime, func(w int64) {
+			setSyncState(task.ID, func(x *SyncState) {
+				x.DoneBytes = localBase + w
+				// 网速：按已复制字节 / 复制耗时（剔除前 300ms 抖动窗口）
+				if el := time.Since(copyStart); el > 300*time.Millisecond && x.DoneBytes > 0 {
+					x.Speed = fmtBytesRate(float64(x.DoneBytes) / el.Seconds())
+				}
+			})
+		})
+		doneBytes += n
 		done := i + 1
 		if cerr != nil {
 			st.LastErr = "复制失败 " + f.rel + "：" + cerr.Error()
@@ -348,14 +400,7 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			st.Files++
 			st.Bytes += n
 		}
-		setSyncState(task.ID, func(x *SyncState) {
-			x.Done = done
-			// 网速：按已复制字节 / 复制耗时（剔除前 300ms 抖动窗口）
-			if el := time.Since(copyStart); el > 300*time.Millisecond && st.Bytes > 0 {
-				bps := float64(st.Bytes) / el.Seconds()
-				x.Speed = fmtBytesRate(bps)
-			}
-		})
+		setSyncState(task.ID, func(x *SyncState) { x.Done = done; x.DoneBytes = doneBytes })
 	}
 
 	// 镜像删除（带安全阀）：
@@ -401,6 +446,9 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	st.LastAt = time.Now()
 	st.LastOK = st.LastErr == ""
 	st.Duration = time.Since(start).Round(time.Millisecond).String()
+	if st.DoneBytes < st.TotalBytes {
+		st.DoneBytes = st.TotalBytes
+	}
 	// 完成后记录平均速度（运行中已由复制循环实时更新瞬时速度）
 	if el := time.Since(start).Seconds(); el > 0 && st.Bytes > 0 {
 		st.Speed = fmtBytesRate(float64(st.Bytes) / el)
@@ -620,14 +668,10 @@ func (s *Server) handleSyncDirs(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"dirs": out})
 }
 
+// fmtBytesRate 速度固定用 KB/s 或 MB/s 显示（用户偏好，不用 B/s / GB/s）。
 func fmtBytesRate(bps float64) string {
-	units := []string{"B/s", "KB/s", "MB/s", "GB/s"}
-	v := bps
-	for _, u := range units {
-		if v < 1024 || u == units[len(units)-1] {
-			return fmt.Sprintf("%.1f %s", v, u)
-		}
-		v /= 1024
+	if bps >= 1024*1024 {
+		return fmt.Sprintf("%.1f MB/s", bps/1024/1024)
 	}
-	return fmt.Sprintf("%.1f B/s", bps)
+	return fmt.Sprintf("%.1f KB/s", bps/1024)
 }
