@@ -201,6 +201,19 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		defer browserReleaseSlot()
 	}
 
+	// 防护 4：同一路径的页面导航限流。前端路由互相跳转（登录页↔首页）时，
+	// 浏览器会以极高频率重载同一文档；只限 HTML 导航，不影响静态资源。
+	// key 用路径部分：循环跳转时查询串会变化，用完整 URL 会漏判
+	navKey := raw
+	if qi := strings.IndexByte(navKey, '?'); qi > 0 {
+		navKey = navKey[:qi]
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") &&
+		!browserNavAllowed(navKey) {
+		fail(w, 429, "该页面在代理下反复跳转，已暂停加载；请改用站点自身入口")
+		return
+	}
+
 	rest := browserStripVerSeg(strings.TrimPrefix(raw, "/b/"))
 	parts := strings.SplitN(rest, "/", 3)
 	scheme := parts[0]
@@ -414,11 +427,10 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 			return
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct)) // 保留原 charset（GBK 等不乱码）
-		browserWriteStatus(w, resp.StatusCode)
 		rec.Snippet = browserSnippet(data)
 		browserSnapSave(target, ct, data) // 保存原始响应（重写前），供「查看源码」诊断
 		lastSite.Store(scheme + "://" + host)
-		browserWriteText(cw, w, r, browserRewriteHTML(string(data), tu, panelScheme, panelHost, direct))
+		browserWriteText(cw, w, r, browserRewriteHTML(string(data), tu, panelScheme, panelHost, direct), resp.StatusCode)
 	case strings.Contains(low, "text/css"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
@@ -427,10 +439,9 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 			return
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct))
-		browserWriteStatus(w, resp.StatusCode)
 		rec.Snippet = browserSnippet(data)
 		browserSnapSave(target, ct, data)
-		browserWriteText(cw, w, r, []byte(browserRewriteCSS(string(data), tu, direct)))
+		browserWriteText(cw, w, r, []byte(browserRewriteCSS(string(data), tu, direct)), resp.StatusCode)
 	case strings.Contains(low, "javascript") || strings.Contains(low, "ecmascript"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
@@ -439,10 +450,9 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 			return
 		}
 		w.Header().Set("Content-Type", browserKeepCharset(ct))
-		browserWriteStatus(w, resp.StatusCode)
 		rec.Snippet = browserSnippet(data)
 		browserSnapSave(target, ct, data)
-		browserWriteText(cw, w, r, []byte(browserRewriteJS(string(data), panelScheme, panelHost)))
+		browserWriteText(cw, w, r, []byte(browserRewriteJS(string(data), panelScheme, panelHost)), resp.StatusCode)
 	default:
 		// 其余类型：流式透传（图片/字体/媒体/二进制）
 		if ct != "" {
@@ -481,17 +491,22 @@ func browserKeepCharset(ct string) string {
 // browserWriteText 文本类响应回写：客户端支持 gzip 且压缩确有收益时压缩回传。
 // 远程访问经 fnOS 域名中转、带宽常是瓶颈，HTML/CSS/JS 压缩后通常只剩原文的
 // 1/4~1/3，点击链接的等待时间明显缩短。
-func browserWriteText(cw *countWriter, w http.ResponseWriter, r *http.Request, data []byte) {
+func browserWriteText(cw *countWriter, w http.ResponseWriter, r *http.Request, data []byte, status int) {
 	if len(data) >= browserGzipMin && strings.Contains(strings.ToLower(r.Header.Get("Accept-Encoding")), "gzip") {
 		var buf bytes.Buffer
 		gz := gzip.NewWriter(&buf)
 		if _, err := gz.Write(data); err == nil && gz.Close() == nil && buf.Len() < len(data) {
+			// 编码头必须在写状态码之前设置：非 200 响应（如未登录的 403）若先
+			// WriteHeader，之后再设置的头会被丢弃，浏览器拿到 gzip 字节却不知道
+			// 要解压，整页显示为乱码。
 			w.Header().Set("Content-Encoding", "gzip")
 			w.Header().Set("Vary", "Accept-Encoding")
+			browserWriteStatus(w, status)
 			_, _ = cw.Write(buf.Bytes())
 			return
 		}
 	}
+	browserWriteStatus(w, status)
 	_, _ = cw.Write(data)
 }
 
@@ -667,7 +682,43 @@ func browserProxyURL(s string, cur *url.URL, direct bool) string {
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return s
 	}
-	return browserURLPath(u)
+	out := browserURLPath(u)
+	// 登录类跳转常把"当前地址"编码进 redirect_uri 等查询参数。若当前地址已经是
+	// 代理路径，目标站会把它当作站点内路径再回跳一次，于是每跳一次多套一层
+	// （实测某管理面板的 /login?redirect_uri=... 无限嵌套）。
+	// 这里把查询参数里的自身代理前缀剥掉，回跳参数恢复成站点内路径。
+	pres := []string{
+		browserPathPrefix() + cur.Scheme + "/" + cur.Host,
+		"/b/" + cur.Scheme + "/" + cur.Host,
+	}
+	out = browserStripPrefixInQuery(out, pres)
+	// 硬兜底：路径本身已有一段代理标记，查询串里再出现一段就是嵌套。
+	// 此时宁可丢弃查询串（回跳参数失效），也不能让 URL 无限增长。
+	if browserProxyDepth(out) > 1 {
+		if i := strings.IndexByte(out, '?'); i > 0 {
+			out = out[:i]
+		}
+	}
+	return out
+}
+
+// browserStripPrefixInQuery 只处理 ? 之后的查询串，避免误伤路径本身。
+func browserStripPrefixInQuery(u string, pres []string) string {
+	i := strings.IndexByte(u, '?')
+	if i < 0 {
+		return u
+	}
+	head, q := u[:i], u[i:]
+	for _, pre := range pres {
+		if pre == "" {
+			continue
+		}
+		q = strings.ReplaceAll(q, url.QueryEscape(pre+"/"), "%2F")
+		q = strings.ReplaceAll(q, url.QueryEscape(pre), "")
+		q = strings.ReplaceAll(q, pre+"/", "/")
+		q = strings.ReplaceAll(q, pre, "")
+	}
+	return head + q
 }
 
 // browserRewriteAttr 整体匹配形式：" name=value"（含引号/无引号）。
@@ -873,9 +924,31 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 	s := `<script>(function(){try{` +
 		// 脚本错误上报（最先安装）：页面 JS 崩溃（如跨源访问抛 SecurityError 导致
 		// 登录表单等后续渲染中断）时，面板能直接看到错误位置
+		// 导航风暴自保护：登录页互相跳转这类循环不触发"逃逸"判断，
+		// 靠页面自身的加载频次拦住（sessionStorage 按路径计数，10 秒窗口）。
+		`try{var nk="_xbv_"+location.pathname,nt=Date.now(),na=[];` +
+		`try{na=JSON.parse(sessionStorage.getItem(nk)||"[]")||[];}catch(ee){}` +
+		`na=na.filter(function(t){return nt-t<10000;});na.push(nt);` +
+		`try{sessionStorage.setItem(nk,JSON.stringify(na));}catch(ee){}` +
+		`if(na.length>8){document.documentElement.innerHTML='<body style="font:14px system-ui,sans-serif;padding:24px;color:#666">此页面在代理下反复跳转，已停止加载。请改用站点自身的入口打开。</body>';return;}}catch(ee){}` +
 		`window.onerror=function(m,s,l){try{parent.postMessage({__xbox:1,type:"jserr",url:location.href,msg:String(m).slice(0,200),line:l,src:String(s||"")},"*");}catch(e){}return false;};` +
 		`var B="` + appBase + `",P="` + browserPathPrefix() + `",H=` + hostLit + `,O=` + originLit + `,M=` + directFlag + `;` +
 		// px: 任意 URL → 代理路径（相对/非 http 原样）
+		// spfx：把地址里"已编码的自身代理前缀"剥掉（登录回跳参数常见），
+		// 避免每次跳转都把上一次的代理路径再套一层。
+		`function spfx(out){try{var qm=out.indexOf("?");if(qm<0)return out;` +
+		`var head=out.slice(0,qm),q=out.slice(qm);` +
+		`var g=/^(https?):\/\/([\s\S]+)$/.exec(O);if(!g)return out;` +
+		`var pres=[P+g[1]+"/"+g[2],P.replace(/v\d+\//,"")+g[1]+"/"+g[2]];` +
+		`for(var i=0;i<pres.length;i++){var pv=pres[i];` +
+		// 查询参数里的回跳地址可能是 encodeURIComponent 编码（%2F...），
+		// 也可能是 encodeURI 未编码（/b/...），两种都要剥
+		`q=q.split(encodeURIComponent(pv+"/")).join("%2F").split(pv+"/").join("/")` +
+		`.split(encodeURIComponent(pv)).join("").split(pv).join("");}` +
+		`var res=head+q;` +
+		// 硬兜底：查询串里再出现一段代理标记就整体丢弃，阻止无限嵌套
+		`if((res.match(/\/b\/v\d+\//g)||[]).length>1){var qi=res.indexOf("?");if(qi>0)res=res.slice(0,qi);}` +
+		`return res;}catch(e){return out;}}` +
 		`function px(u){try{if(typeof u!=="string")return u;var s=u.replace(/^\s+|\s+$/g,"");if(!s)return u;` +
 		`var l=s.toLowerCase();if(l.indexOf("javascript:")===0||l.indexOf("data:")===0||l.indexOf("mailto:")===0||l.indexOf("#")===0)return u;` +
 		// 保险：地址异常长或已含多段代理路径，说明改写出现了自激，直接放弃改写
@@ -893,7 +966,11 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`if(s.charAt(0)==="/"&&s.charAt(1)!=="/"){var g=/^(https?):\/\/([\s\S]+)$/.exec(O);if(g)return P+g[1]+"/"+g[2]+s;}` +
 		`if(s.indexOf("//")===0)s=location.protocol+s;` +
 		`var m=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!m)return u;` +
-		`return P+m[1]+"/"+m[2]+((m[3]&&m[3].charAt(0)==="/")?m[3]:"/"+(m[3]||""));}catch(e){return u;}}` +
+		`var out=P+m[1]+"/"+m[2]+((m[3]&&m[3].charAt(0)==="/")?m[3]:"/"+(m[3]||""));` +
+		// 防自嵌套：登录类跳转常把当前地址编码进 redirect_uri 等参数，
+		// 若不剥掉其中的代理前缀，每跳一次就多套一层（URL 越来越长 → 死循环）
+		`out=spfx(out);` +
+		`return out;}catch(e){return u;}}` +
 		// un: 代理路径 → 原始绝对 URL
 		`function un(p){try{var m=/^\/b\/(?:v\d+\/)?(https?)\/([^\/]+)([\s\S]*)$/.exec(String(p));if(m)return m[1]+"://"+m[2]+(m[3]||"/");}catch(e){}return String(p);}` +
 		// norm: 任意形式（相对/代理路径/绝对/面板绝对）→ 原始目标绝对 URL（供宿主新标签用）
@@ -936,6 +1013,14 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`try{var OWS=window.WebSocket;if(OWS){var NWS=function(u,p){var s=u;try{s=wsz(u);}catch(e){}` +
 		`return p===undefined?new OWS(s):new OWS(s,p);};NWS.prototype=OWS.prototype;` +
 		`NWS.CONNECTING=0;NWS.OPEN=1;NWS.CLOSING=2;NWS.CLOSED=3;window.WebSocket=NWS;}}catch(e){}` +
+		// 前端路由：pushState('/login') 会把 iframe 地址改成站点根（逃出代理），
+		// 触发"跳转→拦截→重载"的循环。这里把根相对路径改成代理路径。
+		`try{var oh=history.pushState,orp=history.replaceState;` +
+		`function hpx(u){try{if(M||typeof u!=="string"||!u)return u;` +
+		`if(u.charAt(0)==="/"&&u.charAt(1)!=="/"){var g=/^(https?):\/\/([\s\S]+)$/.exec(O);` +
+		`if(g)return spfx(P+g[1]+"/"+g[2]+u);}return u;}catch(e){return u;}}` +
+		`history.pushState=function(s,t,u){return oh.call(history,s,t,hpx(u));};` +
+		`history.replaceState=function(s,t,u){return orp.call(history,s,t,hpx(u));};}catch(e){}` +
 		// 原型级 setter 拦截：地图瓦片/懒加载图片大量使用 new Image()、
 		// createElement('img') 且**不插入 DOM**（MutationObserver 观察不到），
 		// 只能通过原型上的 src/href setter 兜住，否则这类资源直连目标必然失败。
@@ -1122,4 +1207,37 @@ func browserIsLocalGateway(host string) bool {
 		return false
 	}
 	return port == "" || port == "80" || port == "443"
+}
+
+// browserNavAllowed 同一路径（含查询串）每秒最多 5 次 HTML 导航。
+var navRate = struct {
+	mu sync.Mutex
+	m  map[string]*navHit
+}{m: map[string]*navHit{}}
+
+type navHit struct {
+	ts []time.Time
+}
+
+func browserNavAllowed(key string) bool {
+	navRate.mu.Lock()
+	defer navRate.mu.Unlock()
+	now := time.Now()
+	if len(navRate.m) > 512 { // 简单防膨胀
+		navRate.m = map[string]*navHit{}
+	}
+	h := navRate.m[key]
+	if h == nil {
+		h = &navHit{}
+		navRate.m[key] = h
+	}
+	// 滑动窗口：只保留 10 秒内的加载时间点
+	keep := h.ts[:0]
+	for _, t := range h.ts {
+		if now.Sub(t) < 10*time.Second {
+			keep = append(keep, t)
+		}
+	}
+	h.ts = append(keep, now)
+	return len(h.ts) <= 8
 }

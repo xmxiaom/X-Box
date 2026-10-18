@@ -166,6 +166,10 @@ class BH(BaseHTTPRequestHandler):
             # 绝不能当成导航改写
             self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
             self.wfile.write(b'var a=typeof undefined,location=window.location,doc=window.document;boot(location.href);')
+        elif self.path == '/forbidden':
+            body_txt = b'FORBIDDEN' + b'x' * 2000
+            self.send_response(403); self.send_header('Content-Type', 'text/html'); self.end_headers()
+            self.wfile.write(body_txt)
         elif self.path.startswith('/slow'):
             time.sleep(1.5)
             self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.end_headers()
@@ -334,6 +338,21 @@ try:
 except Exception:
     txt = raw.decode("utf-8", "replace")
 check("浏览器代理文本gzip回传", enc == "gzip" and ('<base href="' + BP + '/page">') in txt and len(raw) < len(txt), enc)
+# 非 200 响应也会压缩回传：编码头必须在写状态码之前设置，否则浏览器收到 gzip
+# 字节却没有解压标记 → 整页乱码（未登录的设备管理页 403 曾全屏乱码）
+import gzip as _gz2
+rq403 = urllib.request.Request(B + "/forbidden", headers={"Accept-Encoding": "gzip"})
+try:
+    r403 = urllib.request.urlopen(rq403, timeout=5)
+except urllib.error.HTTPError as e:
+    r403 = e
+enc403 = (r403.headers.get("Content-Encoding") or "").lower()
+raw403 = r403.read()
+try:
+    dec403 = _gz2.decompress(raw403) if enc403 == "gzip" else raw403
+except Exception:
+    dec403 = b""
+check("非200响应编码一致", enc403 == "gzip" and (b"FORBIDDEN" in dec403), enc403 + " len=" + str(len(raw403)))
 # 缓存头透传（二次访问命中浏览器缓存 / 条件请求 304）
 rq2 = urllib.request.urlopen(B + "/page", timeout=5)
 cc = rq2.headers.get("Cache-Control") or ""; et = rq2.headers.get("ETag") or ""; rq2.close()

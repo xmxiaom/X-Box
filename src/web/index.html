@@ -1564,6 +1564,7 @@ function browserOpenURL(u, newTab){
   if(!t) t = browserNewTab(src);
   if(!t) return;
   t.url = src; t.raw = raw; t.title = (raw.match(/^https?:\/\/([^\/:]+)/)||['',''])[1].slice(0,20) || t.title;
+  t.escTotal = 0;   // 用户主动导航：重置"跳出代理"计数
   browserPushHist(t, src);   // 入栈：地址栏跳转/新标签打开都算一次导航
   t.frame.src = src;
   document.getElementById('browser-url').value = raw;
@@ -1714,18 +1715,29 @@ function browserOnFrameLoad(t){
   if(blank) return;                                   // 中间态：什么也不做
   const escaped = href === '' || href.indexOf('/b/') < 0;
   if(escaped){
-    const now = Date.now();
-    if(now - (t.escT0 || 0) > 5000){ t.escT0 = now; t.esc = 0; }
-    t.esc = (t.esc || 0) + 1;
-    if(t.esc <= 2 && t.url){
-      toast('该页面试图跳出代理直连目标，已拦截并重载（'+t.esc+'/2）','err');
+    // 累计计数（escTotal）：不能用"每次正常加载就清零"的写法——前端路由站点
+    // 每次重载后都会先正常加载一次再跳转，清零会让循环永不停止。
+    // 只有用户主动导航（地址栏/新标签）时才重置。
+    t.escTotal = (t.escTotal || 0) + 1;
+    if(t.escTotal <= 2 && t.url){
+      toast('页面试图跳出代理，已拦截并重新载入（'+t.escTotal+'/2）','err');
       t.frame.src = t.url;
-    }else if(t.esc === 3){
-      toast('该页面反复跳出代理，已停止自动重载（页面停留在代理内的版本）','err');
+    }else if(t.escTotal === 3){
+      toast('该站点使用前端路由，代理下无法原样运行，请在 fnOS 自己的入口打开','err');
     }
     return;
   }
-  t.esc = 0; t.escT0 = 0;
+  // 兜底：代理内的循环重载（例如登录页互相跳转）不会触发"逃逸"判断，
+  // 用短时间内的加载频次拦住，避免把客户端和 NAS 一起拖慢。
+  const _now = Date.now();
+  t.loadTimes = (t.loadTimes || []).filter(function(x){ return _now - x < 10000; });
+  t.loadTimes.push(_now);
+  if(t.loadTimes.length > 6){
+    toast('该页面在代理下反复跳转，已停止加载；请改用站点自身入口','err');
+    try{ t.frame.src = 'about:blank'; }catch(e){}
+    return;
+  }
+
   let doc; try{ doc = t.frame.contentDocument; }catch(e){ return; }
   // 空白页检测（v1.2.53）：页面 JS 跳转过去的页面若"body 存在但内容为空"，
   // 说明它在代理下渲染不出来 —— 自动退回上一个历史项，避免"从能显示一部分
