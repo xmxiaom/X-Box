@@ -5,7 +5,7 @@ BIN = "/mnt/e/软件/开发/WorkBuddy/飞牛应用/x-box/pkg/app/server/xbox-amd
 TMPBIN = "/tmp/xbox_tun_test"
 subprocess.run(["cp", BIN, TMPBIN])
 os.chmod(TMPBIN, 0o755)
-env = dict(os.environ); env["XBOX_DATA"] = tempfile.mkdtemp()
+env = dict(os.environ); env["XBOX_DATA"] = tempfile.mkdtemp(); env["XBOX_DEV"] = "1"
 srv = subprocess.Popen([TMPBIN], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(1.2)
 if srv.poll() is not None:
@@ -282,9 +282,6 @@ st, body = get(B + "/style.css")
 check("浏览器代理CSS文件重写", st == 200 and BP + '/pic.png' in body, body[:120])
 st, body = get(B + "/pic.png")
 check("浏览器代理透传", st == 200 and body == "PNGDATA", body[:40])
-# 直通端口（桌面模式）必须带面板下发的令牌，否则局域网内任何人都能借用
-st, body = get("http://127.0.0.1:8900/")
-check("直通端口无令牌拒绝", st == 403, "%s %s" % (st, body[:60]))
 st, body = get(B + "/echo?k=v")
 check("浏览器代理查询参数透传", st == 200 and 'QUERY:/echo?k=v' in body, body[:80])
 # 3xx 不跟随 + Location 重写为代理路径（否则浏览器直连目标 → 拒绝连接）
@@ -422,11 +419,17 @@ check("网关入口socket已创建", ok_sock, sock_path)
 if ok_sock:
     code, page = gw("/app/X-Box/")
     check("网关入口首页", code == "200" and 'var b="/app/X-Box"' in page, code)
-    code, page = gw("/app/X-Box/b/v1261/http/192.168.1.1/")
-    check("网关入口代理路径带前缀", code == "200" and '<base href="/app/X-Box/b/v1261/http/192.168.1.1/"' in page, code + " " + page[:120])
     tp = _b64.urlsafe_b64encode(json.dumps({"m": "GET", "p": "/api/overview"}).encode()).decode().rstrip("=")
     code, js = gw("/app/X-Box/?__x=" + tp)
     check("网关入口隧道API", code == "200" and '"version"' in js, code)
+    # 版本段随发布变化：从接口取当前版本拼出来，避免硬编码
+    try:
+        seg = "v" + str(json.loads(js).get("version", "")).replace(".", "")
+    except Exception:
+        seg = ""
+    code, page = gw("/app/X-Box/b/" + seg + "/http/192.168.1.1/")
+    check("网关入口代理路径带前缀", code == "200" and re.search(
+        r'<base href="/app/X-Box/b/v\d+/http/192\.168\.1\.1/"', page) is not None, code + " " + page[:120])
     # 全量接口：确认前缀剥离没有破坏任何一个端点
     for ep in ["/api/ports", "/api/processes", "/api/services", "/api/autostart",
                "/api/nat", "/api/ddns", "/api/terminal/info", "/api/browser/log", "/api/temps"]:

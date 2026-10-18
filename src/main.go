@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.61"
+	version = "1.2.62"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -148,22 +148,8 @@ func main() {
 			}
 		}(a, ln)
 	}
-	// 直通模式端口（路径不加前缀）：供按 pathname 路由的单页应用使用
-	directHandler := http.HandlerFunc(srv.handleDirectProxy)
-	for _, a := range directAddrs() {
-		ln, err := net.Listen("tcp", a)
-		if err != nil {
-			log.Printf("直通端口 %s 未监听（跳过）：%v", a, err)
-			continue
-		}
-		go func(a string, ln net.Listener) {
-			if err := http.Serve(ln, directHandler); err != nil {
-				log.Printf("直通服务(%s)退出: %v", a, err)
-			}
-		}(a, ln)
-	}
 	if listened == 0 && !gatewayUp {
-		log.Fatalf("所有监听地址均失败: %v", addrs)
+		log.Fatalf("服务无可用的监听入口（网关 socket 与 TCP 均失败）")
 	}
 	log.Printf("X-Box v%s 启动，监听 %v（回环+局域网私网，不对公网暴露；外部经 fnOS 远程访问体系）", version, addrs)
 	select {} // 主协程驻留：服务在监听协程中运行
@@ -171,16 +157,12 @@ func main() {
 
 // listenAddrs 监听地址列表：127.0.0.1 + 首个局域网私网 IPv4（探测不到则仅回环）。
 func listenAddrs() []string {
-	// 默认只绑本机回环：外部入口统一由 fnOS 网关承担（socket + 登录态），
-	// 面板功能（清理、终端、进程结束）不再暴露到局域网。
-	// 需要局域网直连排障时显式设置 XBOX_LAN=1。
-	addrs := []string{"127.0.0.1:" + listenPort}
-	if os.Getenv("XBOX_LAN") == "1" {
-		if ip := lanIPv4(); ip != "" {
-			addrs = append(addrs, net.JoinHostPort(ip, listenPort))
-		}
+	// 生产形态只走 fnOS 统一网关（unix socket，网关校验登录态），不监听任何 TCP 端口。
+	// 仅本地开发/自动化测试用 XBOX_DEV=1 临时开回环端口。
+	if os.Getenv("XBOX_DEV") != "1" {
+		return nil
 	}
-	return addrs
+	return []string{"127.0.0.1:" + listenPort}
 }
 
 // lanIPv4 取首个局域网私网 IPv4（10.x / 172.16-31.x / 192.168.x），跳过回环/链路本地/非私网。
@@ -315,7 +297,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	page := bytes.Replace(indexHTML, []byte("<!--XBOX_VER-->"), []byte("v"+version), 1)
 	// 网关模式下前端需要知道前缀，才能拼出网关能识别的绝对路径
 	page = bytes.Replace(page, []byte("__XBOX_BASE__"), []byte(appBase), 1)
-	page = bytes.Replace(page, []byte("__XBOX_DTOKEN__"), []byte(directToken), 1)
 	_, _ = w.Write(page)
 }
 
