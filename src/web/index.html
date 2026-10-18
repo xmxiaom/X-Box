@@ -535,10 +535,14 @@ function xhrApi(url, method, timeoutMs){
           let j = null; try{ j = JSON.parse(xhr.responseText); }catch(e){}
           if(j && j.ok) resolve(j);
           else reject(new Error((j && j.error) || '请求失败')); // 应用错误（有响应）
+        }else if(xhr.status === 0 || xhr.status >= 500){
+          let msg = 'HTTP ' + xhr.status;
+          try{ const j = JSON.parse(xhr.responseText); if(j && j.error) msg = j.error; }catch(e){}
+          const e = new Error(msg); e.transport = true; reject(e);
         }else{
           let msg = 'HTTP ' + xhr.status;
           try{ const j = JSON.parse(xhr.responseText); if(j && j.error) msg = j.error; }catch(e){}
-          reject(new Error(msg)); // 服务端有响应：应用错误，不换通道
+          reject(new Error(msg)); // 其他 4xx：应用错误，不换通道
         }
       };
       xhr.ontimeout = function(){ const e = new Error('TIMEOUT'); e.transport = true; reject(e); };
@@ -650,11 +654,24 @@ function syncPollTick(){
   syncTimer = setTimeout(syncPollTick, 1500); // 已切到其他页：挂着等，切回即恢复
 }
 
+async function apiRetry(path, opts){
+  try{
+    return await api(path, opts);
+  }catch(e){
+    // 网关忙（HTTP 0/5xx）时静默重试一次；仍失败才抛给调用方
+    if(e.transport || /HTTP (0|5\d\d)/.test(String(e.message))){
+      await new Promise(r=>setTimeout(r, 1200));
+      return await api(path, opts);
+    }
+    throw e;
+  }
+}
+
 /* ---------- 网盘同步（远程挂载 → 本地，类 Cloud Sync 单向同步） ---------- */
 let syncCache = [], syncTimer = null;
 async function loadSyncTasks(){
   try{
-    const j = await api('/api/sync/list');
+    const j = await apiRetry('/api/sync/list');
     syncCache = j.tasks || [];
     document.getElementById('sync-sub').textContent = '共 ' + syncCache.length + ' 个任务';
     const c = document.getElementById('sync-rows');
@@ -707,7 +724,10 @@ async function loadSyncTasks(){
     }).join('') || '<div class="empty">还没有同步任务，点右上角「添加同步任务」</div>');
     if(syncTimer) clearTimeout(syncTimer);
     syncTimer = setTimeout(syncPollTick, 1500);
-  }catch(e){ toast(e.message,'err'); }
+  }catch(e){
+    // 同步页轮询失败（多为网关忙的瞬时 HTTP 0/5xx）：静默，心跳会自动重试
+    if(!/HTTP (0|5\d\d)/.test(String(e.message))){ toast(e.message,'err'); }
+  }
 }
 function openSyncForm(id){
   const t = id ? syncCache.find(x => x.id === id) : null;
@@ -736,18 +756,18 @@ function openSyncForm(id){
       enabled: document.getElementById('sy-enabled').checked,
     };
     if(!payload.source || !payload.target){ toast('源与目标目录都要填','err'); return; }
-    try{ await api('/api/sync/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存','ok'); loadSyncTasks(); }
+    try{ await apiRetry('/api/sync/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存','ok'); loadSyncTasks(); }
     catch(e){ toast(e.message,'err'); }
   }, id?'保存':'添加');
 }
 async function syncRun(id){
-  try{ await api('/api/sync/run?id='+encodeURIComponent(id),{method:'POST'}); toast('已开始同步','ok');
+  try{ await apiRetry('/api/sync/run?id='+encodeURIComponent(id),{method:'POST'}); toast('已开始同步','ok');
     setTimeout(loadSyncTasks, 1200); setTimeout(loadSyncTasks, 3500); }
   catch(e){ toast(e.message,'err'); }
 }
 async function syncDelete(id){
   confirmDialog('删除同步任务','确认删除？已同步的文件不会被删除。', async ()=>{
-    try{ await api('/api/sync/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除','ok'); loadSyncTasks(); }
+    try{ await apiRetry('/api/sync/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除','ok'); loadSyncTasks(); }
     catch(e){ toast(e.message,'err'); }
   });
 }
