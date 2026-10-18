@@ -223,6 +223,12 @@ check("浏览器代理meta refresh不加引号", 'content="0; URL=cgi-bin/luci/"
 check("浏览器代理内联JS location替换", 'var h="127.0.0.1";' in body, body[:400])
 st, body = get(B + "/s.js")
 check("浏览器代理JS文件location替换", st == 200 and body == 'var a="127.0.0.1";var b="http://127.0.0.1:8899";var c="8899";', body[:120])
+# Content-Type 必须原样保留：模块脚本对 MIME 严格校验，JS 被标成 text/html 会
+# 让整个模块图被拒（实测 fnOS 前端 Vite/ESM 全白）
+rr = urllib.request.urlopen(B + "/s.js", timeout=5); ct = rr.headers.get("Content-Type") or ""; rr.close()
+check("浏览器代理保留JS类型", "javascript" in ct.lower(), ct)
+rq = urllib.request.urlopen(B + "/style.css", timeout=5); ct2 = rq.headers.get("Content-Type") or ""; rq.close()
+check("浏览器代理保留CSS类型", "text/css" in ct2.lower(), ct2)
 # 老光猫页面两类必崩写法的中和（v1.2.50）：
 # document.domain 赋值在现代 Chrome 抛错中断整个 script；top.location 跨源读抛 SecurityError
 st, body = get(B + "/t.js")

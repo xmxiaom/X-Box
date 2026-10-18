@@ -401,7 +401,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 
       <!-- 浏览器（多标签 · 经后端 /b 同源代理加载） -->
       <div class="page" id="page-browser">
-        <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub">经本机代理加载（Ctrl+滚轮缩放；链接/弹窗均在框架内打开）</span><div class="spacer"></div></div>
+        <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub"></span><div class="spacer"></div></div>
         <div class="browser-bar">
           <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
           <button class="btn btn-primary btn-sm" onclick="goBrowser()">前往</button>
@@ -1475,7 +1475,7 @@ function browserSetActive(i){
   browserTabs.forEach(function(t, k){ t.frame.className = 'browser-frame-item' + (k === i ? ' on' : ''); });
   const t = browserTabs[i];
   document.getElementById('browser-url').value = t.raw;
-  browserSetSub(t.raw ? '经本机代理：'+t.raw : '');
+  browserSetSub('');
   browserRenderTabs();
   browserUpdateNav();
 }
@@ -1496,7 +1496,7 @@ function browserRenderTabs(){
   });
   box.innerHTML = h;
 }
-function browserSetSub(s){ document.getElementById('browser-sub').textContent = s || '经本机代理加载（Ctrl+滚轮缩放；链接在新标签打开，不跳外部浏览器）'; }
+function browserSetSub(s){ document.getElementById('browser-sub').textContent = s || ''; }
 /* 前进/后退：每个标签一条 URL 历史（页面内点链接也会入栈） */
 function browserPushHist(t, src){
   if(!t || !src) return;
@@ -1514,7 +1514,7 @@ function browserNavHist(){
   t.url = src; t.raw = browserFromProxy(src);
   t.frame.src = src;
   document.getElementById('browser-url').value = t.raw;
-  browserSetSub('经本机代理：'+t.raw);
+  browserSetSub('');
 }
 function browserBack(){
   const t = browserTabs[browserActive];
@@ -1561,7 +1561,7 @@ function browserOpenURL(u, newTab){
   browserPushHist(t, src);   // 入栈：地址栏跳转/新标签打开都算一次导航
   t.frame.src = src;
   document.getElementById('browser-url').value = raw;
-  browserSetSub('经本机代理：'+raw);
+  browserSetSub('');
   browserRenderTabs();
   browserUpdateNav();
 }
@@ -1678,16 +1678,17 @@ if(window.addEventListener) window.addEventListener('message', function(e){
   for(let i = 0; i < browserTabs.length; i++){ if(browserTabs[i].frame && browserTabs[i].frame.contentWindow === e.source){ from = true; break; } }
   if(!from) return;                       // 只接受本面板代理页的消息
   const u = (d.url||'').trim();
-  if(d.type === 'jserr'){                 // 代理页面的脚本错误上报（定位"登录按钮等不渲染"类问题）
-    // 附带出错文件（同源代理脚本才能拿到真实文件名；内联脚本的 s 是文档地址，不显示）
+  if(d.type === 'jserr'){                 // 代理页面的脚本错误：只进「诊断」，不弹窗打扰
+    // 只记录、不 toast：绝大多数是页面自身的异步模块超时/第三方脚本报错，
+    // 与代理无关，弹窗会淹没真正的操作反馈。需要排查时打开「诊断」即可看到。
     const src = String(d.src || '');
     const file = (src && src !== String(d.url || '')) ? src.split('/').pop().split('?')[0] : '';
     const where = file ? (' [' + file + ':' + (d.line||'?') + ']') : ('（第' + (d.line||'?') + '行）');
     const line = '页面脚本错误：' + (d.msg||'未知') + where;
-    if(browserJSErrs.length < 10 && browserJSErrs.indexOf(line) < 0){
+    if(browserJSErrs.length < 20 && browserJSErrs.indexOf(line) < 0){
       browserJSErrs.push(line);
-      toast(line, 'err');
     }
+    if(browserLogOn) browserLoadLog();   // 诊断面板开着时实时刷新
     return;
   }
   if(!u || /^(about|javascript|data):/i.test(u)) return;
@@ -1743,7 +1744,7 @@ function browserOnFrameLoad(t){
     const loc = t.frame.contentWindow.location;
     const cur = (loc.pathname||'') + (loc.search||'');
     const raw = browserFromProxy(cur);
-    if(raw){ t.url = cur; t.raw = raw; document.getElementById('browser-url').value = raw; browserSetSub('经本机代理：'+raw); browserPushHist(t, cur); browserUpdateNav(); }
+    if(raw){ t.url = cur; t.raw = raw; document.getElementById('browser-url').value = raw; browserSetSub(''); browserPushHist(t, cur); browserUpdateNav(); }
   }catch(e){}
   try{ const ti = (doc.title||'').trim(); if(ti) t.title = ti.slice(0, 20); }catch(e){}
   browserRenderTabs();

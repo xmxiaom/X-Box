@@ -409,13 +409,17 @@ func browserWriteStatus(w http.ResponseWriter, code int) {
 	}
 }
 
-// browserKeepCharset 保留原始 charset：原 Content-Type 已含 charset 原样返回；
-// 缺失时仅补 text/html（不强制 utf-8，交由页面 meta/浏览器探测）。
+// browserKeepCharset 原样保留目标的 Content-Type。
+// 绝不能"没有 charset 就改成 text/html"：那会把 application/javascript 变成
+// text/html，而 <script type="module"> 对 MIME 严格校验（HTML 规范要求
+// JavaScript MIME），整个模块图直接被拒 —— 实测 fnOS 前端（Vite/ESM）全白，
+// 报 "Expected a JavaScript-or-Wasm module script but ... text/html"。
+// charset 缺失也不补：HTTP 头优先级高于 <meta>，擅自补 utf-8 会让 GBK 页面乱码。
 func browserKeepCharset(ct string) string {
-	if strings.Contains(strings.ToLower(ct), "charset") {
-		return ct
+	if ct == "" {
+		return "text/html"
 	}
-	return "text/html"
+	return ct
 }
 
 // browserWriteText 文本类响应回写：客户端支持 gzip 且压缩确有收益时压缩回传。
