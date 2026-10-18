@@ -182,6 +182,15 @@ class BH(BaseHTTPRequestHandler):
             self.wfile.write(('COOKIE:' + (self.headers.get('Cookie') or '')).encode())
         else:
             self.send_response(404); self.end_headers()
+    def do_POST(self):
+        # 回显请求体长度与传输方式：用来确认代理转发 POST 时带 Content-Length
+        # 而不是 chunked（嵌入式 httpd 不支持 chunked，会直接断连）
+        n = self.headers.get('Content-Length')
+        te = self.headers.get('Transfer-Encoding') or ''
+        ln = int(n) if (n and n.isdigit()) else 0
+        body = self.rfile.read(ln) if ln else b''
+        self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.end_headers()
+        self.wfile.write(('CL=%s;TE=%s;LEN=%d' % (n, te, len(body))).encode())
     def log_message(self, *a): pass
 bh = HTTPServer(('127.0.0.1', 8898), BH)
 threading.Thread(target=bh.serve_forever, daemon=True).start()
@@ -264,6 +273,11 @@ check("浏览器代理赋值表达式边界", st == 200
 st, body = get(B + "/v.js")
 check("浏览器代理变量同名赋值不改写", st == 200
       and 'location=window.location' in body and 'boot(location.href)' in body, body[:220])
+# POST 必须带 Content-Length（chunked 会被光猫/路由器这类 httpd 直接断连 → EOF）
+st, body = get(urllib.request.Request(B + "/postecho", data=b"action=login&x=1",
+               headers={"Content-Type": "application/x-www-form-urlencoded"}))
+check("浏览器代理POST带Content-Length", st == 200 and "CL=16;" in body and "TE=;" in body
+      and "LEN=16" in body, body)
 st, body = get(B + "/style.css")
 check("浏览器代理CSS文件重写", st == 200 and BP + '/pic.png' in body, body[:120])
 st, body = get(B + "/pic.png")

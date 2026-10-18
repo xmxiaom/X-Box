@@ -18,8 +18,8 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.58"
+	version = "1.2.59"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -119,6 +119,20 @@ func main() {
 		go func(a string, ln net.Listener) {
 			if err := http.Serve(ln, handler); err != nil {
 				log.Printf("HTTP 服务(%s)退出: %v", a, err)
+			}
+		}(a, ln)
+	}
+	// 直通模式端口（路径不加前缀）：供按 pathname 路由的单页应用使用
+	directHandler := http.HandlerFunc(srv.handleDirectProxy)
+	for _, a := range directAddrs() {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			log.Printf("直通端口 %s 未监听（跳过）：%v", a, err)
+			continue
+		}
+		go func(a string, ln net.Listener) {
+			if err := http.Serve(ln, directHandler); err != nil {
+				log.Printf("直通服务(%s)退出: %v", a, err)
 			}
 		}(a, ln)
 	}
@@ -215,6 +229,13 @@ func tunnelBridge(next http.Handler) http.Handler {
 // 下游 handler 零改动。
 func formBridge(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 代理请求的表单体必须原样转发，不能被中间件解析掉：ParseForm 会
+		// 消费 r.Body，转发时就没有请求体了（实测光猫点"登录"提交后目标侧
+		// 只收到空体 → 直接断连，代理报 EOF）
+		if strings.HasPrefix(r.URL.Path, "/b/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodPost && strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
 			_ = r.ParseForm()
 			if b := r.PostFormValue("_body"); b != "" {

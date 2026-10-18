@@ -408,6 +408,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           <button class="btn btn-outline btn-sm" id="btn-browser-back" onclick="browserBack()" disabled title="后退">←</button>
           <button class="btn btn-outline btn-sm" id="btn-browser-fwd" onclick="browserForward()" disabled title="前进">→</button>
           <button class="btn btn-outline btn-sm" onclick="browserNewTab('')">＋ 新标签页</button>
+          <button class="btn btn-outline btn-sm" onclick="browserDirectMode()" title="按根路径打开当前站点（适用于自带桌面的管理界面）">桌面模式</button>
           <button class="btn btn-outline btn-sm" id="btn-browser-log" onclick="browserToggleLog()">诊断</button>
         </div>
         <div class="browser-tabs" id="browser-tabs"></div>
@@ -1452,6 +1453,33 @@ function browserInit(){
   if(browserTabs.length) return;
   browserNewTab('');
 }
+// 直通模式端口：路径不加前缀，供按 pathname 路由的单页应用使用（仅局域网可达）
+const BROWSER_DIRECT_PORT = '8900';
+
+// 当前标签的站点是否已经在直通端口上（逃逸检测要放行这种地址）
+function browserIsDirectURL(u){
+  try{ return new URL(u, location.href).port === BROWSER_DIRECT_PORT; }catch(e){ return false; }
+}
+
+// 用直通模式重新打开当前站点：目标站点写入 Cookie，新标签指到直通端口根路径
+function browserDirectMode(){
+  const t = browserTabs[browserActive];
+  if(!t || !t.raw){ toast('请先打开一个网址','err'); return; }
+  const m = String(t.raw).match(/^(https?):\/\/([^\/?#]+)/);
+  if(!m){ toast('该地址不支持直通模式','err'); return; }
+  const site = m[1] + '://' + m[2];
+  document.cookie = 'xbox_site=' + encodeURIComponent(site) + '; path=/; SameSite=Lax';
+  const url = 'http://' + location.hostname + ':' + BROWSER_DIRECT_PORT + '/';
+  const nt = browserNewTab(url);
+  if(nt){
+    nt.raw = site + '/';
+    nt.title = (m[2] || '').slice(0, 20);
+    document.getElementById('browser-url').value = site + '/';
+    browserRenderTabs();
+  }
+  toast('已用桌面模式打开：' + site, 'ok');
+}
+
 function browserNewTab(url){
   if(browserTabs.length >= 10){ toast('最多 10 个标签页','err'); return null; }
   const f = document.createElement('iframe');
@@ -1706,7 +1734,7 @@ function browserOnFrameLoad(t){
   try{ href = t.frame.contentWindow.location.href || ''; }catch(e){ href = ''; }
   const blank = href.indexOf('about:') === 0;
   if(blank) return;                                   // 中间态：什么也不做
-  const escaped = href === '' || href.indexOf('/b/') < 0;
+  const escaped = href === '' || (href.indexOf('/b/') < 0 && !browserIsDirectURL(href));
   if(escaped){
     const now = Date.now();
     if(now - (t.escT0 || 0) > 5000){ t.escT0 = now; t.esc = 0; }

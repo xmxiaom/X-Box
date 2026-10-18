@@ -152,6 +152,7 @@ func handleBrowserSnap(w http.ResponseWriter, r *http.Request) {
 const (
 	browserMaxText   = 8 << 20  // 需文本重写（HTML/CSS/JS）的读取上限 8MB
 	browserMaxStream = 64 << 20 // 其他内容流式透传上限 64MB
+	browserMaxPost   = 32 << 20 // POST 请求体上限（读入内存以便带 Content-Length）
 	browserTimeout   = 30 * time.Second
 	browserGzipMin   = 1024 // 文本类响应超过该体积才压缩回传
 )
@@ -205,7 +206,13 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "目标地址非法")
 		return
 	}
+	s.proxyCore(w, r, target, tu, false)
+}
 
+// proxyCore 代理主体：取回目标响应、改写并回写。
+// direct=true 为直通模式（独立端口、路径不加前缀），供 pathname 路由的 SPA 使用。
+func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string, tu *url.URL, direct bool) {
+	scheme, host := tu.Scheme, tu.Host
 	// 请求日志（诊断用）：无论成功失败都记录，供面板「诊断」面板查看
 	rec := &browserLogItem{Time: time.Now().Format("15:04:05"), Method: r.Method, Target: target, Status: 502}
 	cw := &countWriter{w: w}
@@ -226,9 +233,26 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		panelHost = tu.Host
 	}
 
+	// POST 请求体必须先读入内存再转发：直接用 r.Body（io.Reader）时 Go 无法
+	// 得知长度，会改用 chunked 传输编码；路由器/光猫这类嵌入式 httpd 普遍不支持
+	// chunked，收到就断连 → 代理侧报 EOF（实测点"登录"提交表单即 502）。
+	// bytes.Reader 让 net/http 自动带上 Content-Length，与浏览器直连一致。
 	var body io.Reader
 	if r.Method == http.MethodPost && r.Body != nil {
-		body = r.Body // POST 表单体原样转发（登录等场景）
+		data, rerr := io.ReadAll(io.LimitReader(r.Body, browserMaxPost))
+		if rerr != nil {
+			rec.Err = "读取请求体失败：" + rerr.Error()
+			fail(w, 400, "读取请求体失败")
+			return
+		}
+		if len(data) > 0 {
+			body = bytes.NewReader(data)
+		}
+	}
+	// WebSocket 升级：常驻主通道（管理面板/桌面类应用），不转发会一直提示"连接已断开"
+	if browserIsWSUpgrade(r) {
+		s.browserProxyWS(w, r, target, tu)
+		return
 	}
 	// 每请求独立 cookiejar：本请求（含目标站 Set-Cookie）种下的会话随响应回写。
 	jar, _ := cookiejar.New(nil)
@@ -305,14 +329,17 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if h == "Refresh" {
-			w.Header().Set(h, browserRewriteRefreshValue(v, tu))
+			w.Header().Set(h, browserRewriteRefreshValue(v, tu, direct))
 			continue
 		}
-		w.Header().Set(h, browserProxyURL(v, tu))
+		w.Header().Set(h, browserProxyURL(v, tu, direct))
 	}
 	// 出向 Cookie 回写：显式 Path 限本站点代理子树（浏览器默认"当前请求目录"
 	// 在无子路径时会抬到 /b/，导致跨站点串 cookie）
 	cookiePath := "; Path=" + browserPathPrefix() + scheme + "/" + host + "/"
+	if direct {
+		cookiePath = "; Path=/"
+	}
 	for _, c := range jar.Cookies(tu) {
 		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePath)
 	}
@@ -362,7 +389,7 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		rec.Snippet = browserSnippet(data)
 		browserSnapSave(target, ct, data) // 保存原始响应（重写前），供「查看源码」诊断
 		lastSite.Store(scheme + "://" + host)
-		browserWriteText(cw, w, r, browserRewriteHTML(string(data), tu, panelScheme, panelHost))
+		browserWriteText(cw, w, r, browserRewriteHTML(string(data), tu, panelScheme, panelHost, direct))
 	case strings.Contains(low, "text/css"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
@@ -374,7 +401,7 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		browserWriteStatus(w, resp.StatusCode)
 		rec.Snippet = browserSnippet(data)
 		browserSnapSave(target, ct, data)
-		browserWriteText(cw, w, r, []byte(browserRewriteCSS(string(data), tu)))
+		browserWriteText(cw, w, r, []byte(browserRewriteCSS(string(data), tu, direct)))
 	case strings.Contains(low, "javascript") || strings.Contains(low, "ecmascript"):
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, browserMaxText))
 		if rerr != nil {
@@ -563,7 +590,7 @@ func browserURLPath(u *url.URL) string {
 // 根相对（"/wolfman/x.css"）必须在这里就改写：它不经过 <base>（以 "/" 开头的
 // URL 一律从站点根解析），落到面板根下只能靠孤儿重定向兜底，而孤儿重定向依赖
 // "最近访问的站点"，多站点/自代理时会把路径指错（百度地图的 CSS 就是这么丢的）。
-func browserProxyURL(s string, cur *url.URL) string {
+func browserProxyURL(s string, cur *url.URL, direct bool) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return s
@@ -581,6 +608,27 @@ func browserProxyURL(s string, cur *url.URL) string {
 	if strings.HasPrefix(s, "/b/") {
 		return s
 	}
+	// 直通模式（独立端口、路径不加前缀）：同站绝对 URL 压成根相对，
+	// 根相对原样，跨站绝对 URL 保持原样（由浏览器直连）。
+	if direct {
+		if strings.HasPrefix(s, "//") {
+			s = cur.Scheme + ":" + s
+		}
+		if du, derr := url.Parse(s); derr == nil && du.Host != "" {
+			if !strings.EqualFold(du.Host, cur.Host) {
+				return s
+			}
+			dp := du.EscapedPath()
+			if dp == "" {
+				dp = "/"
+			}
+			if du.RawQuery != "" {
+				dp += "?" + du.RawQuery
+			}
+			return dp
+		}
+		return s
+	}
 	if strings.HasPrefix(s, "//") { // 协议相对
 		s = cur.Scheme + ":" + s
 	} else if strings.HasPrefix(s, "/") && cur.Host != "" { // 根相对
@@ -594,7 +642,7 @@ func browserProxyURL(s string, cur *url.URL) string {
 }
 
 // browserRewriteAttr 整体匹配形式：" name=value"（含引号/无引号）。
-func browserRewriteAttr(m string, tu *url.URL) string {
+func browserRewriteAttr(m string, tu *url.URL, direct bool) string {
 	eq := strings.Index(m, "=")
 	if eq < 0 {
 		return m
@@ -609,9 +657,9 @@ func browserRewriteAttr(m string, tu *url.URL) string {
 	name := strings.ToLower(strings.TrimSpace(left))
 	var nv string
 	if name == "srcset" {
-		nv = browserRewriteSrcset(val, tu)
+		nv = browserRewriteSrcset(val, tu, direct)
 	} else {
-		nv = browserProxyURL(val, tu)
+		nv = browserProxyURL(val, tu, direct)
 	}
 	if nv == val {
 		return m
@@ -623,20 +671,20 @@ func browserRewriteAttr(m string, tu *url.URL) string {
 }
 
 // browserRewriteSrcset "a.png 1x, b.png 2x" 逐项重写首字段。
-func browserRewriteSrcset(v string, tu *url.URL) string {
+func browserRewriteSrcset(v string, tu *url.URL, direct bool) string {
 	parts := strings.Split(v, ",")
 	for i, p := range parts {
 		m := browserReSrcsetPart.FindStringSubmatch(p)
 		if m == nil {
 			continue
 		}
-		parts[i] = m[1] + browserProxyURL(m[2], tu) + m[3]
+		parts[i] = m[1] + browserProxyURL(m[2], tu, direct) + m[3]
 	}
 	return strings.Join(parts, ",")
 }
 
 // browserRewriteCSS 重写 CSS 里的绝对 url()。
-func browserRewriteCSS(css string, tu *url.URL) string {
+func browserRewriteCSS(css string, tu *url.URL, direct bool) string {
 	return browserReCSSURL.ReplaceAllStringFunc(css, func(m string) string {
 		inner := m[strings.Index(m, "(")+1 : strings.LastIndex(m, ")")]
 		inner = strings.TrimSpace(inner)
@@ -645,7 +693,7 @@ func browserRewriteCSS(css string, tu *url.URL) string {
 			q = string(inner[0])
 			inner = inner[1 : len(inner)-1]
 		}
-		nv := browserProxyURL(inner, tu)
+		nv := browserProxyURL(inner, tu, direct)
 		if nv == inner {
 			return m
 		}
@@ -662,20 +710,20 @@ func browserRewriteCSS(css string, tu *url.URL) string {
 // browserRewriteCSSOutsideScripts 只改写 <script> 之外的 CSS url()。
 // 页面 JS 字符串里常出现 "url(/x.gif) no-repeat" 这类赋值，一并改写会破坏
 // JS 字符串（v1.2.55 起的实测故障：整段脚本 SyntaxError）。
-func browserRewriteCSSOutsideScripts(doc string, tu *url.URL) string {
+func browserRewriteCSSOutsideScripts(doc string, tu *url.URL, direct bool) string {
 	locs := browserReScriptBlk.FindAllStringIndex(doc, -1)
 	if locs == nil {
-		return browserRewriteCSS(doc, tu)
+		return browserRewriteCSS(doc, tu, direct)
 	}
 	var b strings.Builder
 	b.Grow(len(doc) + 128)
 	last := 0
 	for _, loc := range locs {
-		b.WriteString(browserRewriteCSS(doc[last:loc[0]], tu))
+		b.WriteString(browserRewriteCSS(doc[last:loc[0]], tu, direct))
 		b.WriteString(doc[loc[0]:loc[1]]) // <script> 块原样保留
 		last = loc[1]
 	}
-	b.WriteString(browserRewriteCSS(doc[last:], tu))
+	b.WriteString(browserRewriteCSS(doc[last:], tu, direct))
 	return b.String()
 }
 
@@ -683,14 +731,14 @@ func browserRewriteCSSOutsideScripts(doc string, tu *url.URL) string {
 // 引号只在原文有引号时才补：meta 的 content 本身已被一层引号包着，
 // 再补一层会变成 content="0; URL="cgi-bin/luci/"" —— 浏览器解析成"0 秒刷新到
 // 空地址"，于是无限刷新自己（实测 192.168.1.50 的 LuCI 首页循环卡死）。
-func browserRewriteRefreshValue(v string, tu *url.URL) string {
+func browserRewriteRefreshValue(v string, tu *url.URL, direct bool) string {
 	return browserReRefreshU.ReplaceAllStringFunc(v, func(m string) string {
 		sub := browserReRefreshU.FindStringSubmatch(m)
 		if sub == nil {
 			return m
 		}
 		q := sub[2]
-		nv := browserProxyURL(sub[3], tu)
+		nv := browserProxyURL(sub[3], tu, direct)
 		if q == "" {
 			return sub[1] + nv
 		}
@@ -759,14 +807,18 @@ func (s *Server) handleOrphan(w http.ResponseWriter, r *http.Request) {
 }
 
 // browserRewriteHTML 全量重写 + 注入 base 与运行时脚本。
-func browserRewriteHTML(doc string, tu *url.URL, panelScheme, panelHost string) []byte {
-	doc = browserReAttr.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteAttr(m, tu) })
-	doc = browserRewriteCSSOutsideScripts(doc, tu) // <style>/style 属性里的 url()，跳过 <script>
-	doc = browserReRefresh.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteRefreshValue(m, tu) })
+func browserRewriteHTML(doc string, tu *url.URL, panelScheme, panelHost string, direct bool) []byte {
+	doc = browserReAttr.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteAttr(m, tu, direct) })
+	doc = browserRewriteCSSOutsideScripts(doc, tu, direct) // <style>/style 属性里的 url()，跳过 <script>
+	doc = browserReRefresh.ReplaceAllStringFunc(doc, func(m string) string { return browserRewriteRefreshValue(m, tu, direct) })
 	doc = browserRewriteScriptBlocks(doc, panelScheme, panelHost) // JS 改写只作用于 <script> 块内部
 	doc = browserReBase.ReplaceAllString(doc, "")
 	doc = browserReCSPMeta.ReplaceAllString(doc, "")
-	inject := `<base href="` + html.EscapeString(browserURLPath(tu)) + `">` + browserPatchScript(tu)
+	basePath := browserURLPath(tu)
+	if direct {
+		basePath = "/"
+	}
+	inject := `<base href="` + html.EscapeString(basePath) + `">` + browserPatchScript(tu, direct)
 	if m := browserReHead.FindStringIndex(doc); m != nil {
 		pos := m[1]
 		return []byte(doc[:pos] + inject + doc[pos:])
@@ -781,7 +833,11 @@ func browserRewriteHTML(doc string, tu *url.URL, panelScheme, panelHost string) 
 // browserPatchScript 运行时接管脚本（注入点越靠前越好：必须在页面脚本执行前）。
 // 作用：把 JS 动态发起的绝对 URL 一律改写为同源代理路径，并把新窗口/新标签请求
 // 通过 postMessage 交给面板宿主（新建面板标签页），杜绝跳出到外部浏览器或直连目标。
-func browserPatchScript(tu *url.URL) string {
+func browserPatchScript(tu *url.URL, direct bool) string {
+	directFlag := "0"
+	if direct {
+		directFlag = "1"
+	}
 	// 目标值以字面量注入（ASCII 安全）；脚本内不出现 </script> 字面串
 	hostLit := `"` + tu.Hostname() + `"`
 	originLit := `"` + tu.Scheme + "://" + tu.Host + `"`
@@ -789,13 +845,18 @@ func browserPatchScript(tu *url.URL) string {
 		// 脚本错误上报（最先安装）：页面 JS 崩溃（如跨源访问抛 SecurityError 导致
 		// 登录表单等后续渲染中断）时，面板能直接看到错误位置
 		`window.onerror=function(m,s,l){try{parent.postMessage({__xbox:1,type:"jserr",url:location.href,msg:String(m).slice(0,200),line:l,src:String(s||"")},"*");}catch(e){}return false;};` +
-		`var P="` + browserPathPrefix() + `",H=` + hostLit + `,O=` + originLit + `;` +
+		`var P="` + browserPathPrefix() + `",H=` + hostLit + `,O=` + originLit + `,M=` + directFlag + `;` +
 		// px: 任意 URL → 代理路径（相对/非 http 原样）
 		`function px(u){try{if(typeof u!=="string")return u;var s=u.replace(/^\s+|\s+$/g,"");if(!s)return u;` +
 		`var l=s.toLowerCase();if(l.indexOf("javascript:")===0||l.indexOf("data:")===0||l.indexOf("mailto:")===0||l.indexOf("#")===0)return u;` +
 		// 幂等：已经是代理路径（服务端已改写过的属性值）绝不能再套一层，
 		// 否则 MutationObserver 每轮都会看到"属性又变了"→ 无限嵌套 → 卡死
 		`if(s.indexOf("/b/")===0)return u;` +
+		`if(M){if(s.charAt(0)==="/"&&s.charAt(1)!=="/")return s;` +
+		`if(s.indexOf("//")===0)s=location.protocol+s;` +
+		`var d=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!d)return u;` +
+		`if(d[2].toLowerCase()!==H.toLowerCase())return u;` +
+		`return (d[3]&&d[3].charAt(0)==="/")?d[3]:"/"+(d[3]||"");}` +
 		// 根相对（"/res/x.js"）：<base> 管不到，必须显式拼上目标站点根，
 		// 否则落到面板根下 → 孤儿重定向 → 站点错位（百度地图 CSS/Worker 全丢）
 		`if(s.charAt(0)==="/"&&s.charAt(1)!=="/"){var g=/^(https?):\/\/([\s\S]+)$/.exec(O);if(g)return P+g[1]+"/"+g[2]+s;}` +
@@ -830,6 +891,20 @@ func browserPatchScript(tu *url.URL) string {
 		// 是根相对，不改写会落到面板根下（百度地图的 wasm worker 就这么丢的）。
 		`try{var OW=window.Worker;if(OW){var NW=function(u,o){return new OW(px(u),o);};` +
 		`NW.prototype=OW.prototype;window.Worker=NW;}}catch(e){}` +
+		// WebSocket：页面用面板 host 拼 ws 地址（location.host 已被替换为面板）时
+		// 改写为代理路径；否则连到面板根 → 307 → 前端常驻提示"连接已断开"。
+		`function wsz(u){try{var s=String(u),m=/^(wss?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!m)return s;` +
+		`var o=/^(https?):\/\/([\s\S]+)$/.exec(O);if(!o)return s;` +
+		`var h=m[2].toLowerCase();` +
+		`if(M){if(h===location.host.toLowerCase())return s;` +
+		`if(h===o[2].toLowerCase()){var pm=location.protocol==="https:"?"wss:":"ws:";` +
+		`return pm+"//"+location.host+(m[3]||"/");}return s;}` +
+		`if(h!==location.host.toLowerCase()&&h!==o[2].toLowerCase())return s;` +
+		`var pr=location.protocol==="https:"?"wss:":"ws:";` +
+		`return pr+"//"+location.host+P+o[1]+"/"+o[2]+(m[3]||"/");}catch(e){return u;}}` +
+		`try{var OWS=window.WebSocket;if(OWS){var NWS=function(u,p){var s=u;try{s=wsz(u);}catch(e){}` +
+		`return p===undefined?new OWS(s):new OWS(s,p);};NWS.prototype=OWS.prototype;` +
+		`NWS.CONNECTING=0;NWS.OPEN=1;NWS.CLOSING=2;NWS.CLOSED=3;window.WebSocket=NWS;}}catch(e){}` +
 		// 原型级 setter 拦截：地图瓦片/懒加载图片大量使用 new Image()、
 		// createElement('img') 且**不插入 DOM**（MutationObserver 观察不到），
 		// 只能通过原型上的 src/href setter 兜住，否则这类资源直连目标必然失败。
