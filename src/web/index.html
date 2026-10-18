@@ -429,11 +429,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub"></span><div class="spacer"></div></div>
         <div class="browser-bar">
           <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
-          <button class="btn btn-primary btn-sm" onclick="goBrowser()">前往</button>
-          <button class="btn btn-outline btn-sm" id="btn-browser-back" onclick="browserBack()" disabled title="后退">←</button>
-          <button class="btn btn-outline btn-sm" id="btn-browser-fwd" onclick="browserForward()" disabled title="前进">→</button>
-          <button class="btn btn-outline btn-sm" onclick="browserNewTab('')">＋ 新标签页</button>
-          <button class="btn btn-outline btn-sm" id="btn-browser-log" onclick="browserToggleLog()">诊断</button>
+          <button class="btn btn-primary btn-sm" id="btn-go" onclick="goBrowser()">前往</button>
+          <div class="browser-bar2">
+            <button class="btn btn-outline btn-sm" id="btn-browser-back" onclick="browserBack()" disabled title="后退">←</button>
+            <button class="btn btn-outline btn-sm" id="btn-browser-fwd" onclick="browserForward()" disabled title="前进">→</button>
+            <button class="btn btn-outline btn-sm" onclick="browserNewTab('')" title="新标签页">＋<span class="nav-lbl"> 新标签页</span></button>
+            <button class="btn btn-outline btn-sm" id="btn-browser-log" onclick="browserToggleLog()">诊断</button>
+          </div>
         </div>
         <div class="browser-tabs" id="browser-tabs"></div>
         <div class="browser-frame-wrap" id="browser-frames"></div>
@@ -1959,8 +1961,23 @@ async function enterApp(){
 detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe），随后直接进入面板
 </script>
 <style>
-.browser-bar{display:flex;gap:8px;margin-bottom:10px;flex-shrink:0}
-.browser-bar input{flex:1}
+.browser-bar{display:flex;gap:8px;margin-bottom:10px;flex-shrink:0;flex-wrap:wrap}
+.browser-bar input{flex:1;min-width:0}
+/* 桌面：display:contents 让导航按钮与输入框同处一行 */
+.browser-bar2{display:contents}
+
+/* 手机：输入框独占一行（与"前往"并列），导航按钮另起一行等分，
+   触摸目标加高到 40px；输入框字号提到 16px 以避免 iOS 聚焦时自动放大 */
+@media(max-width:720px){
+  .browser-bar{gap:6px;margin-bottom:8px}
+  .browser-bar input{flex:1 1 0;min-width:0;height:40px;font-size:16px;padding:0 12px}
+  #btn-go{height:40px;padding:0 16px;font-size:14px;flex:0 0 auto}
+  .browser-bar2{display:flex;gap:6px;flex:1 1 100%;order:9}
+  .browser-bar2 .btn{flex:1 1 0;min-width:0;height:40px;padding:0 6px;font-size:14px}
+  .browser-bar2 .nav-lbl{display:none}
+  .browser-tabs{gap:5px;margin-bottom:8px}
+  .browser-tab{max-width:130px;padding:4px 8px}
+}
 .browser-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;flex-shrink:0}
 .browser-tab{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;color:var(--text2);cursor:pointer;max-width:180px;background:var(--card)}
 .browser-tab.on{border-color:var(--primary);color:var(--primary);font-weight:600}
