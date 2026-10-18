@@ -12,6 +12,7 @@ package main
 //   - 校验通过才 reload，reload 失败同样回滚。
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -163,12 +165,75 @@ func nginxRun(bin, mainConf string, args ...string) string {
 	if _, err := os.Stat(bin); err != nil {
 		return ""
 	}
+	// 加超时：某些设备上 nginx -t 会读全量配置（含证书），耗时可能超过网关的
+	// 转发超时；不设上限会把请求一起拖死。
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
 	a := append(args, "-c", mainConf)
-	out, err := exec.Command(bin, a...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, bin, a...).CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "nginx 命令超时（8s）：" + strings.TrimSpace(string(out))
+		}
 		return strings.TrimSpace(string(out))
 	}
 	return ""
+}
+
+// 异步应用：保存立刻返回，校验/重载在后台做，前端轮询状态。
+// 原因：同步跑 nginx -t + reload 可能超过网关转发超时，导致调用方拿到 502、
+// 而应用侧还在执行甚至回滚，表现为"提示失败而且规则也没了"。
+type applyInfo struct {
+	State string    `json:"state"` // pending / applied / failed
+	Error string    `json:"error"`
+	At    time.Time `json:"at"`
+}
+
+var applyMu sync.Mutex
+var applyState = map[string]applyInfo{}
+
+func setApply(id, state, msg string) {
+	applyMu.Lock()
+	applyState[id] = applyInfo{State: state, Error: msg, At: time.Now()}
+	applyMu.Unlock()
+}
+
+func getApply(id string) applyInfo {
+	applyMu.Lock()
+	defer applyMu.Unlock()
+	if v, ok := applyState[id]; ok {
+		return v
+	}
+	return applyInfo{State: "applied"}
+}
+
+// applyProxyAsync 后台校验并重载；失败回滚文件。
+func applyProxyAsync(id, path string, prev []byte, hadPrev bool, bin, mainConf string) {
+	go func() {
+		setApply(id, "pending", "")
+		time.Sleep(300 * time.Millisecond) // 先让保存响应发出去
+		if msg := nginxRun(bin, mainConf, "-t"); msg != "" {
+			if hadPrev {
+				_ = os.WriteFile(path, prev, 0o644)
+			} else {
+				_ = os.Remove(path)
+			}
+			setApply(id, "failed", "配置校验未通过，已回滚："+msg)
+			return
+		}
+		if msg := nginxRun(bin, mainConf, "-s", "reload"); msg != "" {
+			if hadPrev {
+				_ = os.WriteFile(path, prev, 0o644)
+			} else {
+				_ = os.Remove(path)
+			}
+			_ = nginxRun(bin, mainConf, "-s", "reload")
+			setApply(id, "failed", "网关重载失败，已回滚："+msg)
+			return
+		}
+		setApply(id, "applied", "")
+		log.Printf("[反代] 规则 %s 已生效", id)
+	}()
 }
 
 func (s *Server) handleProxyStatus(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +252,18 @@ func (s *Server) handleProxyList(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "未找到飞牛网关的 conf.d 目录，当前环境不支持")
 		return
 	}
-	ok(w, map[string]any{"rules": proxyRules(), "confDir": confDir})
+	rules := proxyRules()
+	out := make([]map[string]any, 0, len(rules))
+	for _, r := range rules {
+		st := getApply(r.ID)
+		out = append(out, map[string]any{
+			"id": r.ID, "name": r.Name, "domain": r.Domain, "pathPrefix": r.PathPrefix,
+			"stripPrefix": r.StripPrefix, "port": r.Port, "target": r.Target,
+			"tls": r.TLS, "desc": r.Desc,
+			"applyState": st.State, "applyError": st.Error,
+		})
+	}
+	ok(w, map[string]any{"rules": out, "confDir": confDir})
 }
 
 func (s *Server) handleProxySave(w http.ResponseWriter, r *http.Request) {
@@ -215,8 +291,14 @@ func (s *Server) handleProxySave(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if rule.Port < 0 || rule.Port > 65535 {
-		fail(w, 400, "端口需在 1-65535 之间，或留空使用网关 443")
+	// 80/443 被飞牛自身占用：第三方 server 块监听它们会与系统站点冲突，
+	// 证书钩子取不到域名证书时还会导致 reload 失败。因此端口必填且要求高位。
+	if rule.Port <= 0 || rule.Port > 65535 {
+		fail(w, 400, "请填写监听端口（建议 8443 以上；80/443 由飞牛占用）")
+		return
+	}
+	if rule.Port < 1024 {
+		fail(w, 400, "监听端口请使用 1024 以上（80/443 由飞牛自身占用）")
 		return
 	}
 	if !proxyReTarget.MatchString(rule.Target) {
@@ -257,19 +339,9 @@ func (s *Server) handleProxySave(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "写入配置失败："+err.Error())
 		return
 	}
-	if msg := nginxRun(bin, mainConf, "-t"); msg != "" {
-		if hadPrev {
-			_ = os.WriteFile(path, prev, 0o644)
-		} else {
-			_ = os.Remove(path)
-		}
-		fail(w, 400, "网关配置校验未通过，已回滚："+msg)
-		return
-	}
-	// 先返回结果，再延迟重载：nginx reload 会短暂切断连接（包括本请求的响应
-	// 和飞牛桌面的长连接），同步执行会让前端看到 502 / "连接已断开"。
-	ok(w, map[string]any{"saved": rule})
-	go nginxReloadLater(bin, mainConf)
+	// 立即返回，校验与重载在后台进行（避免超过网关转发超时导致 502）
+	ok(w, map[string]any{"saved": rule, "applying": true})
+	applyProxyAsync(rule.ID, path, prev, hadPrev, bin, mainConf)
 }
 
 func (s *Server) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
@@ -293,13 +365,18 @@ func (s *Server) handleProxyDelete(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "删除失败："+err.Error())
 		return
 	}
-	if msg := nginxRun(bin, mainConf, "-t"); msg != "" {
-		_ = os.WriteFile(path, prev, 0o644)
-		fail(w, 400, "删除后网关配置校验失败，已回滚："+msg)
-		return
-	}
-	ok(w, map[string]any{"deleted": id})
-	go nginxReloadLater(bin, mainConf)
+	ok(w, map[string]any{"deleted": id, "applying": true})
+	go func() {
+		setApply(id, "pending", "")
+		time.Sleep(300 * time.Millisecond)
+		if msg := nginxRun(bin, mainConf, "-t"); msg != "" {
+			_ = os.WriteFile(path, prev, 0o644)
+			setApply(id, "failed", "删除后校验失败，已回滚："+msg)
+			return
+		}
+		_ = nginxRun(bin, mainConf, "-s", "reload")
+		setApply(id, "applied", "")
+	}()
 }
 
 // handleProxyEntry 兼容旧链接：提示改用域名访问。
@@ -323,13 +400,3 @@ func (s *Server) handleProxyEntry(w http.ResponseWriter, r *http.Request) {
 		domain + `/</b></body>`))
 }
 
-// nginxReloadLater 等响应写完再重载网关。
-// reload 期间网关 worker 会短暂中断，同步执行会让调用方拿到 502。
-func nginxReloadLater(bin, mainConf string) {
-	time.Sleep(500 * time.Millisecond)
-	if msg := nginxRun(bin, mainConf, "-s", "reload"); msg != "" {
-		log.Printf("[反代] 网关重载失败：%s", msg)
-		return
-	}
-	log.Printf("[反代] 网关配置已重载")
-}
