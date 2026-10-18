@@ -405,24 +405,35 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 
       <!-- 浏览器（多标签 · 经后端 /b 同源代理加载） -->
       <div class="page" id="page-proxy">
-        <div class="page-head"><h2>反向代理</h2><span class="sub">通过本应用的飞牛网关入口访问内网服务（无需额外端口，复用飞牛账号登录态）</span><div class="spacer"></div><button class="btn btn-outline btn-sm" onclick="loadReverseProxy()">刷新</button></div>
-        <div class="card" style="margin-bottom:14px">
+        <div class="page-head"><h2>反向代理</h2><span class="sub" id="proxy-sub"></span><div class="spacer"></div><button class="btn btn-outline btn-sm" onclick="loadReverseProxy()">刷新</button></div>
+        <div class="card" id="proxy-unavail" style="display:none">
+          <div style="font-size:13px;color:var(--text2);line-height:1.9">
+            未找到飞牛网关的配置目录（<span class="mono">/usr/trim/nginx/conf/conf.d</span>），此功能不可用。<br>
+            反向代理规则写入该目录，由网关按域名监听并转发，证书沿用飞牛的证书托管。
+          </div>
+        </div>
+        <div class="card" style="margin-bottom:14px" id="proxy-form-card">
           <h3>&nbsp;<span id="proxy-form-title">新增规则</span>
             <span class="h-action"><button class="btn btn-outline btn-sm" onclick="proxyResetForm()">清空</button></span>
           </h3>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1.2fr;gap:12px 16px">
-            <label class="fld"><span>标识（访问路径）</span><input id="proxy-id" placeholder="jellyfin" maxlength="40"></label>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px 16px">
+            <label class="fld"><span>标识</span><input id="proxy-id" placeholder="jellyfin" maxlength="40"></label>
             <label class="fld"><span>名称</span><input id="proxy-name" placeholder="影视库" maxlength="40"></label>
-            <label class="fld"><span>目标地址</span><input id="proxy-target" placeholder="http://127.0.0.1:8096"></label>
+            <label class="fld"><span>域名（网关按它路由）</span><input id="proxy-domain" placeholder="media.example.com" maxlength="120"></label>
+            <label class="fld"><span>监听端口（留空 = 网关 443）</span><input id="proxy-port" type="number" min="1" max="65535" placeholder="留空"></label>
+            <label class="fld" style="grid-column:span 2"><span>目标地址</span><input id="proxy-target" placeholder="http://127.0.0.1:8096"></label>
           </div>
-          <div style="font-size:12px;color:var(--text3);margin-top:10px">
-            添加后访问 <span class="mono" id="proxy-preview">/r/&lt;标识&gt;/</span> 即可，入口在飞牛网关下，不需要开放任何端口。
+          <div style="display:flex;gap:18px;margin:12px 0 4px;font-size:13px;color:var(--text2)">
+            <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="proxy-tls" checked> 使用 HTTPS（证书由飞牛网关托管）</label>
           </div>
-          <div style="margin-top:12px"><button class="btn btn-primary btn-sm" onclick="proxySave()">保存</button></div>
+          <div style="font-size:12px;color:var(--text3);margin-top:8px;line-height:1.8">
+            规则写入网关的 <span class="mono">xbox-proxy-&lt;标识&gt;.conf</span>，保存时自动执行配置校验并重载；校验不通过会回滚，不影响现有站点。
+          </div>
+          <div style="margin-top:12px"><button class="btn btn-primary btn-sm" onclick="proxySave()">保存并应用</button></div>
         </div>
         <div class="card">
           <h3>已配置规则</h3>
-          <div class="tblwrap"><table class="tbl"><thead><tr><th>名称</th><th>标识</th><th>目标</th><th>访问地址</th><th>操作</th></tr></thead><tbody id="proxy-rules"></tbody></table></div>
+          <div class="tblwrap"><table class="tbl"><thead><tr><th>名称</th><th>域名</th><th>监听</th><th>目标</th><th>协议</th><th>操作</th></tr></thead><tbody id="proxy-rules"></tbody></table></div>
         </div>
       </div>
       <div class="page" id="page-browser">
@@ -658,31 +669,42 @@ document.getElementById('menu').addEventListener('click', e => {
   (loaders[page]||(()=>{}))();
 });
 
-/* ---------- 反向代理（走应用自身的飞牛网关入口） ---------- */
+/* ---------- 反向代理（规则写入飞牛网关，由网关监听） ---------- */
 let proxyEditing = '';
 async function loadReverseProxy(){
   try{
+    const st = await api('/api/proxy/status');
+    const sub = document.getElementById('proxy-sub');
+    if(!st.available){
+      document.getElementById('proxy-unavail').style.display = '';
+      document.getElementById('proxy-form-card').style.display = 'none';
+      if(sub) sub.textContent = '当前环境不支持';
+      return;
+    }
+    document.getElementById('proxy-unavail').style.display = 'none';
+    document.getElementById('proxy-form-card').style.display = '';
+    if(sub) sub.textContent = '规则由飞牛网关监听（' + (st.confDir||'') + '）';
     const j = await api('/api/proxy/list');
     const rows = (j.rules||[]).map(r => `<tr>
       <td>${esc(r.name||r.id)}</td>
-      <td class="mono">${esc(r.id)}</td>
+      <td class="mono">${esc(r.domain)}</td>
+      <td class="mono">${r.port ? ':'+r.port : '443（网关）'}</td>
       <td class="mono" style="max-width:240px;overflow:hidden;text-overflow:ellipsis">${esc(r.target)}</td>
-      <td class="mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis">${esc(r.url)}</td>
+      <td>${r.tls?'HTTPS':'HTTP'}</td>
       <td>
-        <button class="btn btn-outline btn-sm" onclick="proxyCopy('${esc(r.url)}')">复制地址</button>
-        <button class="btn btn-outline btn-sm" style="margin-left:6px" onclick='proxyEdit(${JSON.stringify(r).replace(/'/g,"&#39;")})'>编辑</button>
+        <button class="btn btn-outline btn-sm" onclick='proxyEdit(${JSON.stringify(r).replace(/'/g,"&#39;")})'>编辑</button>
         <button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="proxyDelete('${esc(r.id)}')">删除</button>
       </td>
     </tr>`).join('');
-    document.getElementById('proxy-rules').innerHTML = rows || '<tr><td colspan="5" class="empty">还没有规则</td></tr>';
+    document.getElementById('proxy-rules').innerHTML = rows || '<tr><td colspan="6" class="empty">还没有规则</td></tr>';
   }catch(e){ toast(e.message,'err'); }
 }
 function proxyResetForm(){
   proxyEditing = '';
   document.getElementById('proxy-form-title').textContent = '新增规则';
-  ['proxy-id','proxy-name','proxy-target'].forEach(id=>document.getElementById(id).value='');
+  ['proxy-id','proxy-name','proxy-domain','proxy-port','proxy-target'].forEach(id=>document.getElementById(id).value='');
   document.getElementById('proxy-id').disabled = false;
-  document.getElementById('proxy-preview').textContent = '/r/<标识>/';
+  document.getElementById('proxy-tls').checked = true;
 }
 function proxyEdit(r){
   proxyEditing = r.id;
@@ -690,23 +712,27 @@ function proxyEdit(r){
   document.getElementById('proxy-id').value = r.id;
   document.getElementById('proxy-id').disabled = true;
   document.getElementById('proxy-name').value = r.name||'';
+  document.getElementById('proxy-domain').value = r.domain||'';
+  document.getElementById('proxy-port').value = r.port || '';
   document.getElementById('proxy-target').value = r.target||'';
-}
-function proxyCopy(u){
-  try{ navigator.clipboard.writeText(u); toast('地址已复制','ok'); }
-  catch(e){ toast('复制失败，请手动选择地址','err'); }
+  document.getElementById('proxy-tls').checked = !!r.tls;
 }
 async function proxySave(){
+  const portRaw = document.getElementById('proxy-port').value.trim();
   const rule = {
     id: document.getElementById('proxy-id').value.trim(),
     name: document.getElementById('proxy-name').value.trim(),
+    domain: document.getElementById('proxy-domain').value.trim(),
+    port: portRaw ? parseInt(portRaw, 10) : 0,
     target: document.getElementById('proxy-target').value.trim(),
+    tls: document.getElementById('proxy-tls').checked,
   };
   if(!/^[a-zA-Z0-9_-]{1,40}$/.test(rule.id)){ toast('标识只能用字母/数字/下划线/短横线','err'); return; }
+  if(!rule.domain){ toast('请填写域名（网关按域名路由）','err'); return; }
   if(!/^https?:\/\/[^\s]+$/.test(rule.target)){ toast('目标地址需形如 http://127.0.0.1:8096','err'); return; }
   try{
     await api('/api/proxy/save', {method:'POST', body: JSON.stringify(rule)});
-    toast('已保存','ok');
+    toast('已保存并应用','ok');
     proxyResetForm();
     loadReverseProxy();
   }catch(e){ toast(e.message,'err'); }

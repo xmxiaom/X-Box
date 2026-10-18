@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.70"
+	version = "1.2.71"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -97,7 +97,8 @@ func main() {
 	mux.HandleFunc("GET /api/update/file", handleUpdateFile)
 	// 通道探测端点：登录态由 fnOS 网关校验，这里只回报已认证，
 	// 让前端不需要靠 404 判定链路可用
-	// 反向代理：通过应用自身的网关入口暴露内网服务（/r/<id>/ → 浏览器代理）
+	// 反向代理：规则写入飞牛网关 conf.d，由网关按域名监听并转发
+	mux.HandleFunc("GET /api/proxy/status", srv.handleProxyStatus)
 	mux.HandleFunc("GET /api/proxy/list", srv.handleProxyList)
 	mux.HandleFunc("POST /api/proxy/save", srv.handleProxySave)
 	mux.HandleFunc("POST /api/proxy/delete", srv.handleProxyDelete)
