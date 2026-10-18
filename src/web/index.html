@@ -667,6 +667,7 @@ async function loadSyncTasks(){
         '<div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6-1.6A4 4 0 0 1 19 17H7a3 3 0 0 1-3-2z"/></svg></div>' +
         '<div class="info"><div class="name">' + esc(t.name) + ' ' + badge +
           (t.enabled ? '' : ' <span class="badge badge-gray"><span class="dot"></span>已停用</span>') +
+          (t.realtime ? ' <span class="badge badge-green"><span class="dot"></span>实时 ' + (t.watchSec||2) + 's</span>' : '') +
           (t.mirror ? ' <span class="badge badge-blue"><span class="dot"></span>镜像删除</span>' : '') + '</div>' +
           '<div class="desc mono" style="font-size:11.5px">' + esc(t.source) + ' → ' + esc(t.target) + '</div>' +
           '<div class="desc" style="font-size:11.5px;color:var(--text3)">' + esc(when) + ' · ' + esc(detail) +
@@ -687,10 +688,12 @@ function openSyncForm(id){
     <div class="form-row"><label>名称</label><input type="text" id="sy-name" value="${esc(t?t.name:'')}" placeholder="例如 网盘备份"></div>
     <div class="form-row"><label>源目录<span style="color:var(--muted);font-weight:normal">（飞牛远程挂载出来的目录）</span></label><input type="text" id="sy-source" value="${esc(t?t.source:'')}" placeholder="/vol1/@remote/我的网盘"></div>
     <div class="form-row"><label>目标目录<span style="color:var(--muted);font-weight:normal">（本地文件夹）</span></label><input type="text" id="sy-target" value="${esc(t?t.target:'')}" placeholder="/vol1/1000/backup"></div>
-    <div class="form-row"><label>同步间隔（秒，0 = 仅手动）</label><input type="number" id="sy-interval" min="0" value="${t?t.interval:300}"></div>
+    <div class="form-row"><label>同步间隔（秒，0 = 仅手动；实时模式下忽略）</label><input type="number" id="sy-interval" min="0" value="${t?t.interval:300}"></div>
+    <div class="form-row" id="sy-watch-row" style="${t&&t.realtime?'':'display:none'}"><label>实时检测间隔（秒）</label><input type="number" id="sy-watch" min="1" max="3600" value="${t&&t.watchSec?t.watchSec:2}"></div>
     <div class="form-row"><label>排除规则<span style="color:var(--muted);font-weight:normal">（逗号分隔，如 *.tmp,.DS_Store）</span></label><input type="text" id="sy-exclude" value="${esc(t?t.exclude:'')}" placeholder="*.tmp,.DS_Store"></div>
     <label class="field-check"><input type="checkbox" id="sy-mirror" ${t&&t.mirror?'checked':''}> 镜像删除（源里删掉的，目标也删）</label>
-    <label class="field-check"><input type="checkbox" id="sy-enabled" ${(!t||t.enabled)?'checked':''}> 启用定时同步</label>
+    <label class="field-check"><input type="checkbox" id="sy-realtime" ${t&&t.realtime?'checked':''} onchange="document.getElementById('sy-watch-row').style.display=this.checked?'':'none'"> 实时变化同步（轮询检测挂载目录变化）</label>
+    <label class="field-check"><input type="checkbox" id="sy-enabled" ${(!t||t.enabled)?'checked':''}> 启用（关闭后实时与定时都停止）</label>
     <div style="font-size:12px;color:var(--text3);margin-top:6px">挂载由飞牛「文件管理 → 远程挂载」负责；这里只做文件比对与复制，不会改动网盘挂载配置。</div>`;
   confirmDialog(id?'编辑同步任务':'添加同步任务', body, async ()=>{
     const payload = {
@@ -699,6 +702,8 @@ function openSyncForm(id){
       source: (document.getElementById('sy-source').value||'').trim(),
       target: (document.getElementById('sy-target').value||'').trim(),
       interval: parseInt(document.getElementById('sy-interval').value, 10) || 0,
+      realtime: document.getElementById('sy-realtime').checked,
+      watchSec: parseInt(document.getElementById('sy-watch').value, 10) || 2,
       exclude: (document.getElementById('sy-exclude').value||'').trim(),
       mirror: document.getElementById('sy-mirror').checked,
       enabled: document.getElementById('sy-enabled').checked,

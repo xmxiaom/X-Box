@@ -34,8 +34,10 @@ type SyncTask struct {
 	Source   string `json:"source"`  // 网盘挂载路径（绝对路径）
 	Target   string `json:"target"`  // 本地目标目录（绝对路径）
 	Mirror   bool   `json:"mirror"`  // 源删除时同步删除目标
-	Interval int    `json:"interval"` // 秒；0 = 仅手动
-	Exclude  string `json:"exclude"` // 逗号分隔通配，如 *.tmp,.DS_Store
+	Interval int    `json:"interval"`  // 秒；0 = 仅手动
+	Realtime bool   `json:"realtime"`  // 实时变化同步（轮询检测，间隔 WatchSec 秒）
+	WatchSec int    `json:"watchSec"`  // 实时检测间隔秒数（默认 2）
+	Exclude  string `json:"exclude"`   // 逗号分隔通配，如 *.tmp,.DS_Store
 	Enabled  bool   `json:"enabled"`
 }
 
@@ -326,10 +328,21 @@ func (s *Server) startSyncScheduler() {
 		last := map[string]time.Time{}
 		for {
 			for _, t := range loadSyncTasks() {
-				if !t.Enabled || t.Interval <= 0 {
+				if !t.Enabled {
 					continue
 				}
-				if d := time.Since(last[t.ID]); d >= time.Duration(t.Interval)*time.Second {
+				// 实时模式：约 2 秒轮询一次（远程挂载不支持可靠的 inotify）；
+				// 普通模式：按 Interval 秒；0 = 仅手动。
+				iv := 2 * time.Second
+				if !t.Realtime {
+					if t.Interval <= 0 {
+						continue
+					}
+					iv = time.Duration(t.Interval) * time.Second
+				} else if t.WatchSec >= 1 {
+					iv = time.Duration(t.WatchSec) * time.Second
+				}
+				if d := time.Since(last[t.ID]); d >= iv {
 					last[t.ID] = time.Now()
 					go runSyncTask(t)
 				}
@@ -351,6 +364,7 @@ func (s *Server) handleSyncList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id": t.ID, "name": t.Name, "source": t.Source, "target": t.Target,
 			"mirror": t.Mirror, "interval": t.Interval, "exclude": t.Exclude,
+			"realtime": t.Realtime, "watchSec": t.WatchSec,
 			"enabled": t.Enabled,
 			"state":   st,
 			"sourceOk": sErr == nil, "targetOk": tErr == nil,
@@ -396,6 +410,9 @@ func (s *Server) handleSyncSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if t.Interval < 0 {
 		t.Interval = 0
+	}
+	if t.WatchSec < 1 || t.WatchSec > 3600 {
+		t.WatchSec = 2
 	}
 
 	tasks := loadSyncTasks()
