@@ -951,6 +951,14 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`try{sessionStorage.setItem(nk,JSON.stringify(na));}catch(ee){}` +
 		`if(na.length>8){document.documentElement.innerHTML='<body style="font:14px system-ui,sans-serif;padding:24px;color:#666">此页面在代理下反复跳转，已停止加载。请改用站点自身的入口打开。</body>';return;}}catch(ee){}` +
 		`window.onerror=function(m,s,l){try{parent.postMessage({__xbox:1,type:"jserr",url:location.href,msg:String(m).slice(0,200),line:l,src:String(s||"")},"*");}catch(e){}return false;};` +
+		// 表单 target="_top" 接管：光猫等设备的菜单表单提交到最顶层框架，
+		// 在 fnOS 桌面的 iframe 沙箱里会被静默拦截（点击菜单"没反应"）。
+		// 劫持 HTMLFormElement.prototype.submit（程序化提交不触发 submit 事件），
+		// 并在捕获阶段兜底处理事件提交——一律去掉 _top，让提交发生在当前代理页内。
+		`try{var fsub=HTMLFormElement.prototype.submit;` +
+		`HTMLFormElement.prototype.submit=function(){try{if(String(this.target).toLowerCase()==="_top"){this.removeAttribute("target");}}catch(e){}return fsub.apply(this,arguments);};` +
+		`document.addEventListener("submit",function(ev){try{var f=ev.target;if(f&&f.tagName==="FORM"&&String(f.target).toLowerCase()==="_top"){f.removeAttribute("target");}}catch(e){}},true);` +
+		`}catch(e){}` +
 		`var B="` + appBase + `",P="` + browserPathPrefix() + `",H=` + hostLit + `,O=` + originLit + `,M=` + directFlag + `;` +
 		// px: 任意 URL → 代理路径（相对/非 http 原样）
 		// spfx：把地址里"已编码的自身代理前缀"剥掉（登录回跳参数常见），
