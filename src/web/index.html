@@ -664,7 +664,8 @@ async function loadSyncTasks(){
       if(st.running && st.total > 0){
         const pct = Math.min(100, Math.round((st.done||0) * 100 / st.total));
         detail = '<div class="bar" style="margin-top:6px"><i style="width:' + pct + '%"></i></div>' +
-          '<span style="font-size:12px;color:var(--text2)">正在复制 ' + (st.done||0) + ' / ' + st.total + '（' + pct + '%）</span>';
+          '<span style="font-size:12px;color:var(--text2)">正在复制 ' + (st.done||0) + ' / ' + st.total + '（' + pct + '%）' +
+          (st.speed ? ' · ' + esc(st.speed) : '') + '</span>';
       } else if(st.lastAt){
         detail = '结果：复制 ' + (st.files||0) + ' 个 / ' + fmtB(st.bytes||0) +
           (st.deleted ? (' · 删除 ' + st.deleted + ' 个') : '') +

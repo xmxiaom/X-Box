@@ -52,6 +52,7 @@ type SyncState struct {
 	Scanned  int       `json:"scanned"`  // 上次扫描的文件数
 	Total    int       `json:"total"`    // 本轮待处理文件数
 	Done     int       `json:"done"`     // 已处理数（运行中实时更新）
+	Speed    string    `json:"speed"`    // 运行中实时网速（如 12.3 MB/s）
 	Duration string    `json:"duration"` // 上次耗时
 }
 
@@ -318,7 +319,8 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	st.Total = len(pending)
 	setSyncState(task.ID, func(x *SyncState) { x.Total = st.Total; x.Done = 0; x.Running = true })
 
-	// 阶段二：逐个复制，实时上报进度
+	// 阶段二：逐个复制，实时上报进度与网速
+	copyStart := time.Now()
 	for i, f := range pending {
 		dst := filepath.Join(task.Target, f.rel)
 		if sameFileInfo(f, dst) {
@@ -335,7 +337,14 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			st.Files++
 			st.Bytes += n
 		}
-		setSyncState(task.ID, func(x *SyncState) { x.Done = done })
+		setSyncState(task.ID, func(x *SyncState) {
+			x.Done = done
+			// 网速：按已复制字节 / 复制耗时（剔除前 300ms 抖动窗口）
+			if el := time.Since(copyStart); el > 300*time.Millisecond && st.Bytes > 0 {
+				bps := float64(st.Bytes) / el.Seconds()
+				x.Speed = fmtBytesRate(bps)
+			}
+		})
 	}
 
 	// 镜像删除：源里已删除的文件删掉（源里已不存在）
@@ -364,6 +373,10 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	st.LastAt = time.Now()
 	st.LastOK = st.LastErr == ""
 	st.Duration = time.Since(start).Round(time.Millisecond).String()
+	// 完成后记录平均速度（运行中已由复制循环实时更新瞬时速度）
+	if el := time.Since(start).Seconds(); el > 0 && st.Bytes > 0 {
+		st.Speed = fmtBytesRate(float64(st.Bytes) / el)
+	}
 	return st, nil
 }
 
@@ -559,4 +572,16 @@ func (s *Server) handleSyncDirs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ok(w, map[string]any{"dirs": out})
+}
+
+func fmtBytesRate(bps float64) string {
+	units := []string{"B/s", "KB/s", "MB/s", "GB/s"}
+	v := bps
+	for _, u := range units {
+		if v < 1024 || u == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", v, u)
+		}
+		v /= 1024
+	}
+	return fmt.Sprintf("%.1f B/s", bps)
 }
