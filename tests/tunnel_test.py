@@ -106,7 +106,7 @@ check("下载状态端点", st == 200 and j.get("ok") and "running" in j and "do
 # 13) 浏览器代理 /b/{scheme}/{host}/{path}：本地起迷你 HTTP 服务，验证
 #     base 注入、绝对 URL 全量重写、CSS/meta/JS 重写、跳转重写、Cookie 隔离
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 H = "127.0.0.1:8898"
 PAGE = (b'<html><head><base href="http://old.example/"><title>t</title>'
         b'<style>body{background:url(http://' + H.encode() + b'/pic.png)}</style>'
@@ -166,6 +166,10 @@ class BH(BaseHTTPRequestHandler):
             # 绝不能当成导航改写
             self.send_response(200); self.send_header('Content-Type', 'application/javascript'); self.end_headers()
             self.wfile.write(b'var a=typeof undefined,location=window.location,doc=window.document;boot(location.href);')
+        elif self.path.startswith('/slow'):
+            time.sleep(1.5)
+            self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.end_headers()
+            self.wfile.write(b'SLOW')
         elif self.path == '/style.css':
             self.send_response(200); self.send_header('Content-Type', 'text/css'); self.end_headers()
             self.wfile.write(b'.x{background:url("http://' + H.encode() + b'/pic.png")}')
@@ -192,7 +196,7 @@ class BH(BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Type', 'text/plain'); self.end_headers()
         self.wfile.write(('CL=%s;TE=%s;LEN=%d' % (n, te, len(body))).encode())
     def log_message(self, *a): pass
-bh = HTTPServer(('127.0.0.1', 8898), BH)
+bh = ThreadingHTTPServer(('127.0.0.1', 8898), BH)  # 多线程：并发限流用例需要
 threading.Thread(target=bh.serve_forever, daemon=True).start()
 
 B = "http://127.0.0.1:8899/b/http/" + H
@@ -342,6 +346,26 @@ check("孤儿路径兜底回代理", ocode == 307 and oloc == BP + "/cgi-bin/x?a
 # 形成每秒几十条的自环（实测百度地图 worker_wasm 请求）
 st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1:8899/")
 check("浏览器代理拒绝代理自身", st == 400 and "面板自身" in body, "%s %s" % (st, body[:80]))
+# 代理防护：自激/自环会拖垮整机，服务端必须有硬边界
+st, body = get("http://127.0.0.1:8899/b/http/" + H + "/page?x=" + ("a" * 5000))
+check("防护-超长地址拒绝", st == 400 and "过长" in body, body[:60])
+st, body = get("http://127.0.0.1:8899/b/v9999/http/" + H + "/b/v9999/http/" + H + "/page")
+check("防护-嵌套代理拒绝", st == 400 and "嵌套" in body, body[:60])
+st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1/")
+check("防护-本机网关拒绝", st == 400 and "自环" in body, body[:60])
+# 并发闸门：24 个槽 + 1.5s 慢响应，40 并发里必须出现 429
+import concurrent.futures as _cf
+def _hit(_i):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8899/b/http/" + H + "/slow", timeout=20) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        return 0
+with _cf.ThreadPoolExecutor(max_workers=40) as ex:
+    codes = list(ex.map(_hit, range(40)))
+check("防护-并发限流生效", codes.count(429) > 0 and codes.count(200) > 0, str(sorted(set(codes))))
 # 旧路径（不带版本段）与任意版本段都要能正常服务（面板里写死的 /b/... 仍可用）
 st, body = get("http://127.0.0.1:8899/b/v9999/http/" + H + "/page")
 check("浏览器代理版本段兼容", st == 200 and ('<base href="' + BP + '/page">') in body, body[:100])

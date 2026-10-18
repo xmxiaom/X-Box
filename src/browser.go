@@ -41,6 +41,7 @@ import (
 	"crypto/tls"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -166,6 +167,7 @@ var browserTransport = &http.Transport{
 	ForceAttemptHTTP2:   true,
 	MaxIdleConns:        64,
 	MaxIdleConnsPerHost: 8,
+	MaxConnsPerHost:     16, // 单目标并发连接上限，防止把目标或本机连接表打满
 	IdleConnTimeout:     90 * time.Second,
 }
 
@@ -177,6 +179,28 @@ func (s *Server) handleBrowserRoot(w http.ResponseWriter, r *http.Request) {
 // handleBrowserProxy GET/POST /b/{scheme}/{host}/{path}?{query}：同源网页代理。
 func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.RequestURI() // 保留原始编码（含查询串）
+
+	// 防护 1：地址长度上限。改写若陷入自激，URL 会一轮比一轮长，先挡住。
+	if len(raw) > 4096 {
+		fail(w, 400, "代理地址过长（疑似循环），已阻止")
+		return
+	}
+	// 防护 2：同一 URL 里出现多段 /b/vNNN/ 说明发生了代理嵌套，直接拒绝
+	if browserProxyDepth(raw) > 1 {
+		fail(w, 400, "检测到代理嵌套循环，已阻止")
+		return
+	}
+	// 防护 3：普通请求的并发上限。页面若自激，浏览器会瞬间发大量请求，
+	// 限流保证 NAS 不会被拖垮（表现为整机卡死、只能重启）。
+	// WebSocket 是长连接，不占用普通请求的并发额度，否则几十条 WS 会把闸门占满
+	if !browserIsWSUpgrade(r) {
+		if !browserAcquireSlot() {
+			fail(w, 429, "代理并发请求过多，请稍后再试")
+			return
+		}
+		defer browserReleaseSlot()
+	}
+
 	rest := browserStripVerSeg(strings.TrimPrefix(raw, "/b/"))
 	parts := strings.SplitN(rest, "/", 3)
 	scheme := parts[0]
@@ -194,6 +218,11 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	// 连带把别的站点的孤儿路径也带偏。
 	if browserIsPanelHost(host, r) {
 		fail(w, 400, "不能通过代理访问面板自身（会造成自环）")
+		return
+	}
+	// 本机的 80/443 就是 fnOS 网关入口：代理它 → 网关 → 又回到本应用，必然成环
+	if browserIsLocalGateway(host) {
+		fail(w, 400, "不能代理本机的网关端口（会形成自环）")
 		return
 	}
 	sub := "/"
@@ -849,6 +878,8 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		// px: 任意 URL → 代理路径（相对/非 http 原样）
 		`function px(u){try{if(typeof u!=="string")return u;var s=u.replace(/^\s+|\s+$/g,"");if(!s)return u;` +
 		`var l=s.toLowerCase();if(l.indexOf("javascript:")===0||l.indexOf("data:")===0||l.indexOf("mailto:")===0||l.indexOf("#")===0)return u;` +
+		// 保险：地址异常长或已含多段代理路径，说明改写出现了自激，直接放弃改写
+		`if(s.length>2048||s.split("/b/").length>3)return u;` +
 		// 幂等：已经是代理路径（服务端已改写过的属性值）绝不能再套一层，
 		// 否则 MutationObserver 每轮都会看到"属性又变了"→ 无限嵌套 → 卡死
 		`if(s.indexOf(B+"\/b\/")===0)return u;` +
@@ -924,7 +955,7 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`var s2=sv.replace(/url\(\s*(['"]?)([^)'"]+)\1\s*\)/g,function(m,q,u){return "url("+q+px(u)+q+")";});` +
 		`if(s2!==sv){n.setAttribute("style",s2);}}}catch(e){}` +
 		`for(var i=0;i<ATTR.length;i++){var a=ATTR[i];if(!n.hasAttribute(a))continue;var v=n.getAttribute(a);if(!v)continue;` +
-		`var nv=(a==="srcset")?sx(v):px(v);if(nv!==v){try{n.setAttribute(a,nv);}catch(e){}}}}` +
+		`var nv=(a==="srcset")?sx(v):px(v);if(nv!==v&&nv.length<1500){try{n.setAttribute(a,nv);}catch(e){}}}}` +
 		`function scan(root){if(!root||!root.querySelectorAll)return;try{var ns=root.querySelectorAll("a[href],img[src],script[src],link[href],form[action],iframe[src],frame[src],source[src],video[poster],area[href],input[formaction],button[formaction],embed[src],object[data],track[src]");` +
 		`for(var i=0;i<ns.length;i++){fixEl(ns[i]);}}catch(e){}}` +
 		`try{new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var m=ms[i];` +
@@ -1000,4 +1031,95 @@ func tu_host(target string) string {
 		return u.Hostname()
 	}
 	return target
+}
+
+// browserProxyDepth 统计 URL 里代理路径段的数量：正常为 1，嵌套会递增。
+func browserProxyDepth(raw string) int {
+	n := 0
+	for i := 0; i+3 < len(raw); i++ {
+		if raw[i] != '/' || raw[i+1] != 'b' || raw[i+2] != '/' || raw[i+3] != 'v' {
+			continue
+		}
+		j := i + 4
+		digits := 0
+		for j < len(raw) && raw[j] >= '0' && raw[j] <= '9' {
+			j++
+			digits++
+		}
+		if digits > 0 && j < len(raw) && raw[j] == '/' {
+			n++
+			i = j
+		}
+	}
+	return n
+}
+
+// proxySlots 普通代理请求的并发闸门（WebSocket 长连接不占用）。
+var proxySlots = make(chan struct{}, 24)
+
+func browserAcquireSlot() bool {
+	select {
+	case proxySlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func browserReleaseSlot() { <-proxySlots }
+
+// browserSplitHostPort 拆分主机与端口（IPv6 方括号安全）。
+func browserSplitHostPort(host string) (string, string) {
+	h := strings.TrimSpace(host)
+	if strings.HasPrefix(h, "[") {
+		if i := strings.Index(h, "]"); i > 0 {
+			addr := h[1:i]
+			if i+1 < len(h) && h[i+1] == ':' {
+				return addr, h[i+2:]
+			}
+			return addr, ""
+		}
+	}
+	if i := strings.LastIndex(h, ":"); i > 0 && !strings.Contains(h[i:], "]") {
+		return h[:i], h[i+1:]
+	}
+	return h, ""
+}
+
+// browserIsLocalAddr 判断主机是否属于本机（回环或本机网卡地址）。
+func browserIsLocalAddr(h string) bool {
+	h = strings.ToLower(strings.Trim(h, "[]"))
+	if h == "" {
+		return false
+	}
+	if h == "localhost" || h == "0.0.0.0" || h == "::" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok && ipn.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// browserIsLocalGateway 本机的 80/443（含无端口）就是 fnOS 网关入口，
+// 代理它必然形成"应用→网关→应用"的环。
+func browserIsLocalGateway(host string) bool {
+	h, port := browserSplitHostPort(host)
+	if !browserIsLocalAddr(h) {
+		return false
+	}
+	return port == "" || port == "80" || port == "443"
 }
