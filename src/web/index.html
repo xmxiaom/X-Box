@@ -280,6 +280,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
         DDNS服务
       </div>
+      <div class="menu-item" data-page="proxy">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h11a3 3 0 0 1 3 3v0M4 17h11a3 3 0 0 0 3-3v0"/><path d="M15 4l3 3-3 3M15 14l3 3-3 3"/></svg>
+        反向代理
+      </div>
       <div class="menu-item" data-page="browser">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>
         浏览器
@@ -400,6 +404,27 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       </div>
 
       <!-- 浏览器（多标签 · 经后端 /b 同源代理加载） -->
+      <div class="page" id="page-proxy">
+        <div class="page-head"><h2>反向代理</h2><span class="sub">通过本应用的飞牛网关入口访问内网服务（无需额外端口，复用飞牛账号登录态）</span><div class="spacer"></div><button class="btn btn-outline btn-sm" onclick="loadReverseProxy()">刷新</button></div>
+        <div class="card" style="margin-bottom:14px">
+          <h3>&nbsp;<span id="proxy-form-title">新增规则</span>
+            <span class="h-action"><button class="btn btn-outline btn-sm" onclick="proxyResetForm()">清空</button></span>
+          </h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1.2fr;gap:12px 16px">
+            <label class="fld"><span>标识（访问路径）</span><input id="proxy-id" placeholder="jellyfin" maxlength="40"></label>
+            <label class="fld"><span>名称</span><input id="proxy-name" placeholder="影视库" maxlength="40"></label>
+            <label class="fld"><span>目标地址</span><input id="proxy-target" placeholder="http://127.0.0.1:8096"></label>
+          </div>
+          <div style="font-size:12px;color:var(--text3);margin-top:10px">
+            添加后访问 <span class="mono" id="proxy-preview">/r/&lt;标识&gt;/</span> 即可，入口在飞牛网关下，不需要开放任何端口。
+          </div>
+          <div style="margin-top:12px"><button class="btn btn-primary btn-sm" onclick="proxySave()">保存</button></div>
+        </div>
+        <div class="card">
+          <h3>已配置规则</h3>
+          <div class="tblwrap"><table class="tbl"><thead><tr><th>名称</th><th>标识</th><th>目标</th><th>访问地址</th><th>操作</th></tr></thead><tbody id="proxy-rules"></tbody></table></div>
+        </div>
+      </div>
       <div class="page" id="page-browser">
         <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub"></span><div class="spacer"></div></div>
         <div class="browser-bar">
@@ -620,7 +645,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, proxy:loadReverseProxy, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -630,6 +655,68 @@ document.getElementById('menu').addEventListener('click', e => {
   document.getElementById('page-'+page).classList.add('active');
   (loaders[page]||(()=>{}))();
 });
+
+/* ---------- 反向代理（走应用自身的飞牛网关入口） ---------- */
+let proxyEditing = '';
+async function loadReverseProxy(){
+  try{
+    const j = await api('/api/proxy/list');
+    const rows = (j.rules||[]).map(r => `<tr>
+      <td>${esc(r.name||r.id)}</td>
+      <td class="mono">${esc(r.id)}</td>
+      <td class="mono" style="max-width:240px;overflow:hidden;text-overflow:ellipsis">${esc(r.target)}</td>
+      <td class="mono" style="max-width:300px;overflow:hidden;text-overflow:ellipsis">${esc(r.url)}</td>
+      <td>
+        <button class="btn btn-outline btn-sm" onclick="proxyCopy('${esc(r.url)}')">复制地址</button>
+        <button class="btn btn-outline btn-sm" style="margin-left:6px" onclick='proxyEdit(${JSON.stringify(r).replace(/'/g,"&#39;")})'>编辑</button>
+        <button class="btn btn-danger btn-sm" style="margin-left:6px" onclick="proxyDelete('${esc(r.id)}')">删除</button>
+      </td>
+    </tr>`).join('');
+    document.getElementById('proxy-rules').innerHTML = rows || '<tr><td colspan="5" class="empty">还没有规则</td></tr>';
+  }catch(e){ toast(e.message,'err'); }
+}
+function proxyResetForm(){
+  proxyEditing = '';
+  document.getElementById('proxy-form-title').textContent = '新增规则';
+  ['proxy-id','proxy-name','proxy-target'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('proxy-id').disabled = false;
+  document.getElementById('proxy-preview').textContent = '/r/<标识>/';
+}
+function proxyEdit(r){
+  proxyEditing = r.id;
+  document.getElementById('proxy-form-title').textContent = '编辑规则：' + (r.name||r.id);
+  document.getElementById('proxy-id').value = r.id;
+  document.getElementById('proxy-id').disabled = true;
+  document.getElementById('proxy-name').value = r.name||'';
+  document.getElementById('proxy-target').value = r.target||'';
+}
+function proxyCopy(u){
+  try{ navigator.clipboard.writeText(u); toast('地址已复制','ok'); }
+  catch(e){ toast('复制失败，请手动选择地址','err'); }
+}
+async function proxySave(){
+  const rule = {
+    id: document.getElementById('proxy-id').value.trim(),
+    name: document.getElementById('proxy-name').value.trim(),
+    target: document.getElementById('proxy-target').value.trim(),
+  };
+  if(!/^[a-zA-Z0-9_-]{1,40}$/.test(rule.id)){ toast('标识只能用字母/数字/下划线/短横线','err'); return; }
+  if(!/^https?:\/\/[^\s]+$/.test(rule.target)){ toast('目标地址需形如 http://127.0.0.1:8096','err'); return; }
+  try{
+    await api('/api/proxy/save', {method:'POST', body: JSON.stringify(rule)});
+    toast('已保存','ok');
+    proxyResetForm();
+    loadReverseProxy();
+  }catch(e){ toast(e.message,'err'); }
+}
+async function proxyDelete(id){
+  if(!confirm('确定删除该反向代理规则？')) return;
+  try{
+    await api('/api/proxy/delete?id=' + encodeURIComponent(id), {method:'POST'});
+    toast('已删除','ok');
+    loadReverseProxy();
+  }catch(e){ toast(e.message,'err'); }
+}
 
 /* ---------- 仪表盘 ---------- */
 async function loadOverview(){
