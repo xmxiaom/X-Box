@@ -242,7 +242,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
   .net-detail{font-size:11.5px}
   .section-title{font-size:14px;margin:18px 0 10px}
 }
-.proxy-hint{font-size:12.5px;color:var(--text2);background:var(--primary-light);border-radius:6px;padding:8px 12px;margin-bottom:10px;line-height:1.6}
 </style>
 </head>
 <body>
@@ -280,10 +279,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       <div class="menu-item" data-page="ddns">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
         DDNS服务
-      </div>
-      <div class="menu-item" data-page="proxy">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h11a3 3 0 0 1 3 3v0M4 17h11a3 3 0 0 0 3-3v0"/><path d="M15 4l3 3-3 3M15 14l3 3-3 3"/></svg>
-        反向代理
       </div>
       <div class="menu-item" data-page="browser">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>
@@ -405,10 +400,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       </div>
 
       <!-- 浏览器（多标签 · 经后端 /b 同源代理加载） -->
-      <div class="page" id="page-proxy">
-        <div class="page-head"><h2>反向代理</h2><span class="sub" id="proxy-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadReverseProxy()">刷新</button></div>
-        <div class="rows" id="proxy-rows"></div>
-      </div>
       <div class="page" id="page-browser">
         <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub"></span><div class="spacer"></div></div>
         <div class="browser-bar">
@@ -631,7 +622,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, proxy:loadReverseProxy, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -641,72 +632,6 @@ document.getElementById('menu').addEventListener('click', e => {
   document.getElementById('page-'+page).classList.add('active');
   (loaders[page]||(()=>{}))();
 });
-
-/* ---------- 反向代理（应用自带的独立 nginx 实例） ---------- */
-let proxyCache = [], proxyRunning = false, proxyLog = '';
-async function loadReverseProxy(){
-  try{
-    const st = await api('/api/proxy/status');
-    if(!st.available){
-      document.getElementById('proxy-sub').textContent = '当前环境不支持';
-      document.getElementById('proxy-rows').innerHTML = '<div class="proxy-hint">未找到 nginx 可执行文件，此功能不可用。</div>';
-      return;
-    }
-    const j = await api('/api/proxy/list');
-    proxyCache = j.rules||[]; proxyRunning = !!j.running; proxyLog = j.log||'';
-    document.getElementById('proxy-sub').textContent = '共 ' + proxyCache.length + ' 个站点 · 实例' + (proxyRunning?'运行中':'未运行');
-    const c = document.getElementById('proxy-rows');
-    c.innerHTML = '<div class="proxy-hint">由本应用启动一个<b>独立的 nginx 实例</b>（自有配置/日志/端口），改规则只重载它，<b>不触碰飞牛网关</b>；面板本身仍只走飞牛网关、不监听端口。请使用 8443 以上端口。</div>' +
-      '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openProxyForm(null)">+ 添加站点</button>' +
-      '<button class="btn btn-outline btn-sm" style="margin-left:8px" onclick="proxyShowLog()">查看日志</button></div>' +
-      (proxyCache.map(x=>`<div class="row">
-          <div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v4M16 3v4M4 7h16M4 7v13a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V7"/></svg></div>
-          <div class="info">
-            <div class="name">${esc(x.name||x.id)}
-              <span class="badge badge-blue"><span class="dot"></span>端口 ${x.port}</span>
-              ${x.domain?`<span class="badge badge-gray"><span class="dot"></span>${esc(x.domain)}</span>`:''}
-            </div>
-            <div class="desc mono" style="font-size:11.5px">→ ${esc(x.target)}</div>
-          </div>
-          <div class="actions">
-            <button class="btn btn-text btn-sm" onclick="openProxyForm('${esc(x.id)}')">编辑</button>
-            <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="proxyDelete('${esc(x.id)}')">删除</button>
-          </div>
-        </div>`).join('') || '<div class="empty">还没有站点，点右上角「添加站点」</div>');
-  }catch(e){ toast(e.message,'err'); }
-}
-function proxyShowLog(){
-  confirmDialog('反代实例日志', '<pre style="max-height:320px;overflow:auto;font-size:11.5px;white-space:pre-wrap">' + esc(proxyLog||'（暂无日志）') + '</pre>', async ()=>{}, '关闭');
-}
-function openProxyForm(id){
-  const s = id ? proxyCache.find(x=>x.id===id) : null;
-  const body = `
-    <div class="form-row"><label>标识</label><input type="text" id="px-id" value="${esc(s?s.id:'')}" placeholder="jellyfin" ${s?'disabled':''}></div>
-    <div class="form-row"><label>名称</label><input type="text" id="px-name" value="${esc(s?s.name:'')}" placeholder="影视库"></div>
-    <div class="form-row"><label>监听端口<span style="color:var(--muted);font-weight:normal">（8443 以上；80/443 由飞牛占用）</span></label><input type="number" id="px-port" min="1024" max="65535" value="${s&&s.port?s.port:8443}" placeholder="8443"></div>
-    <div class="form-row"><label>域名<span style="color:var(--muted);font-weight:normal">（可选，留空接受任意 Host）</span></label><input type="text" id="px-domain" value="${esc(s?s.domain:'')}" placeholder="media.example.com"></div>
-    <div class="form-row"><label>目标地址</label><input type="text" id="px-target" value="${esc(s?s.target:'')}" placeholder="http://192.168.1.20:8096"></div>`;
-  confirmDialog(id?'编辑站点':'添加站点', body, async ()=>{
-    const payload = {
-      id: (document.getElementById('px-id').value||'').trim(),
-      name: (document.getElementById('px-name').value||'').trim(),
-      port: parseInt(document.getElementById('px-port').value, 10),
-      domain: (document.getElementById('px-domain').value||'').trim(),
-      target: (document.getElementById('px-target').value||'').trim(),
-    };
-    if(!/^[a-zA-Z0-9_-]{1,40}$/.test(payload.id)){ toast('标识只能用字母/数字/下划线/短横线','err'); return; }
-    if(!payload.port || payload.port < 1024){ toast('端口请填 1024 以上（建议 8443）','err'); return; }
-    if(!/^https?:\/\/[^\s]+$/.test(payload.target)){ toast('目标地址需形如 http://192.168.1.20:8096','err'); return; }
-    try{ await api('/api/proxy/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存并应用','ok'); loadReverseProxy(); }
-    catch(e){ toast(e.message,'err'); }
-  }, id?'保存':'添加');
-}
-async function proxyDelete(id){
-  confirmDialog('删除站点','确认删除该反向代理站点？对应监听会立即停止。', async ()=>{
-    try{ await api('/api/proxy/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除','ok'); loadReverseProxy(); }
-    catch(e){ toast(e.message,'err'); }
-  });
-}
 
 /* ---------- 仪表盘 ---------- */
 async function loadOverview(){
