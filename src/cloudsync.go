@@ -22,9 +22,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -172,6 +175,7 @@ func scanSource(root string, excludes []string, onProg func(int)) ([]srcEntry, e
 		}
 		out = append(out, srcEntry{rel: rel, size: info.Size(), mtime: info.ModTime()})
 		if onProg != nil && len(out)%500 == 0 {
+			syncYield() // 扫描同样让路
 			onProg(len(out))
 		}
 		if len(out) > syncMaxFiles {
@@ -401,6 +405,7 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		}
 		localBase := doneBytes
 		n, cerr := copyFileWithMtime(filepath.Join(task.Source, f.rel), dst, f.mtime, func(w int64) {
+			syncYield() // 动态优先级：面板忙/系统负载高时让路
 			setSyncState(task.ID, func(x *SyncState) {
 				x.DoneBytes = localBase + w
 				// 网速：按已复制字节 / 复制耗时（剔除前 300ms 抖动窗口）
@@ -709,6 +714,57 @@ func (s *Server) handleSyncDirs(w http.ResponseWriter, r *http.Request) {
 }
 
 // fmtBytesRate 速度固定用 KB/s 或 MB/s 显示（用户偏好，不用 B/s / GB/s）。
+// ---------------- 动态优先级：面板忙/系统负载高时，同步自动让路 ----------------
+
+var panelLastReq int64 // 最近一次面板请求的 UnixNano（atomic）
+
+// panelActivity HTTP 入口包装：为每个面板请求打活跃度时间戳。
+func panelActivity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.StoreInt64(&panelLastReq, time.Now().UnixNano())
+		next.ServeHTTP(w, r)
+	})
+}
+
+// systemLoadHigh 读取 /proc/loadavg，1 分钟负载超过核数×0.8 视为系统忙。
+func systemLoadHigh() bool {
+	b, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return false
+	}
+	f := strings.Fields(string(b))
+	if len(f) == 0 {
+		return false
+	}
+	l1, perr := strconv.ParseFloat(f[0], 64)
+	if perr != nil {
+		return false
+	}
+	return l1 > float64(runtime.NumCPU())*0.8
+}
+
+var syncLastYield int64 // 上次让路时间（atomic，限制让路频率）
+
+// syncYield 动态优先级：面板 2 秒内有请求，或系统负载偏高时，
+// 同步让出 120ms。空闲时立即返回（全速）。至少间隔 120ms 才让一次。
+func syncYield() {
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&syncLastYield)
+	if now-last < int64(120*time.Millisecond) {
+		return
+	}
+	panelBusy := now-atomic.LoadInt64(&panelLastReq) < int64(2*time.Second)
+	if panelBusy {
+		atomic.StoreInt64(&syncLastYield, now)
+		time.Sleep(120 * time.Millisecond)
+		return
+	}
+	if systemLoadHigh() {
+		atomic.StoreInt64(&syncLastYield, now)
+		time.Sleep(80 * time.Millisecond)
+	}
+}
+
 func fmtBytesRate(bps float64) string {
 	if bps >= 1024*1024 {
 		return fmt.Sprintf("%.1f MB/s", bps/1024/1024)

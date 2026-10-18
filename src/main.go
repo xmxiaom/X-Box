@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.2.96"
+	version = "1.2.97"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -120,7 +120,7 @@ func main() {
 	initAppBase()
 	srv.startSyncScheduler() // 网盘同步定时任务
 	cleanupLegacyReverseProxy() // 反向代理功能已移除，清掉早期版本留下的实例
-	handler := formBridge(tunnelBridge(mux))
+	handler := formBridge(tunnelBridge(panelActivity(mux)))
 	if appBase != "" {
 		// 网关入口：先剥前缀，再交给正常路由
 		inner := handler
