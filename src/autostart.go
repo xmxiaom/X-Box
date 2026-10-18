@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,8 +23,29 @@ type AutostartItem struct {
 	Running bool   `json:"running"`
 }
 
+// 自启扫描要遍历 systemd 单元、cron、init.d 等，单次约 1 秒以上（单元多的设备更久）。
+// 结果变化很慢，缓存 60 秒：切页立即出结果，避免每次进来都等一遍。
+var autoCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	data []AutostartItem
+}
+
 func (s *Server) handleAutostart(w http.ResponseWriter, r *http.Request) {
-	ok(w, map[string]any{"items": listAutostart()})
+	autoCache.mu.Lock()
+	if autoCache.data != nil && time.Since(autoCache.at) < 60*time.Second {
+		items := autoCache.data
+		autoCache.mu.Unlock()
+		ok(w, map[string]any{"items": items, "cached": true})
+		return
+	}
+	autoCache.mu.Unlock()
+
+	items := listAutostart() // 锁外扫描，避免阻塞并发请求
+	autoCache.mu.Lock()
+	autoCache.at, autoCache.data = time.Now(), items
+	autoCache.mu.Unlock()
+	ok(w, map[string]any{"items": items})
 }
 
 func listAutostart() []AutostartItem {

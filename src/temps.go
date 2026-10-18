@@ -74,18 +74,36 @@ func readCPUTemps() []TempSensor {
 		}
 	}
 	if len(out) == 0 {
-		// 回退：thermal_zone（x86_pkg_temp / cpu-thermal 等）
+		// 回退 1：thermal_zone 里 type 明确属于 CPU 的（x86_pkg_temp / cpu-thermal / soc）
 		zones, _ := filepath.Glob("/sys/class/thermal/thermal_zone*")
+		type zoneVal struct {
+			typ string
+			val float64
+		}
+		var valid []zoneVal
 		for _, z := range zones {
 			typ := strings.ToLower(readSmall(filepath.Join(z, "type")))
-			if !strings.Contains(typ, "cpu") && !strings.Contains(typ, "pkg") && !strings.Contains(typ, "x86") {
-				continue
-			}
 			v, err := strconv.ParseFloat(readSmall(filepath.Join(z, "temp")), 64)
 			if err != nil || v <= 0 || v >= 150000 {
 				continue
 			}
-			out = append(out, TempSensor{Label: typ, TempC: v / 1000})
+			if strings.Contains(typ, "cpu") || strings.Contains(typ, "pkg") ||
+				strings.Contains(typ, "x86") || strings.Contains(typ, "soc") {
+				out = append(out, TempSensor{Label: typ, TempC: v / 1000})
+			}
+			valid = append(valid, zoneVal{typ, v / 1000})
+		}
+		// 回退 2：没有任何 CPU 类型的热区（部分设备只暴露 acpitz 等），
+		// 取有效热区中的最高值作为参考值，并在标签上标明来源，
+		// 让界面显示一个可用的温度而不是"—"。
+		if len(out) == 0 && len(valid) > 0 {
+			best := valid[0]
+			for _, z := range valid[1:] {
+				if z.val > best.val {
+					best = z
+				}
+			}
+			out = append(out, TempSensor{Label: best.typ + " (参考)", TempC: best.val})
 		}
 	}
 	return out

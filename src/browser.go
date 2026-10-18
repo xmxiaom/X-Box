@@ -605,7 +605,7 @@ func browserProxyURL(s string, cur *url.URL, direct bool) string {
 	// v1.2.55 的根相对改写引入过死循环：属性值被改成 /b/v1255/...（根相对形式），
 	// 运行时的原型 setter / MutationObserver 再拿它调一次改写 → /b/…/b/… 无限增长
 	// → 每轮属性都变、观察器再触发 → 浏览器卡死。
-	if strings.HasPrefix(s, "/b/") {
+	if strings.HasPrefix(s, browserPathPrefix()) || strings.HasPrefix(s, "/b/") {
 		return s
 	}
 	// 直通模式（独立端口、路径不加前缀）：同站绝对 URL 压成根相对，
@@ -845,13 +845,13 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		// 脚本错误上报（最先安装）：页面 JS 崩溃（如跨源访问抛 SecurityError 导致
 		// 登录表单等后续渲染中断）时，面板能直接看到错误位置
 		`window.onerror=function(m,s,l){try{parent.postMessage({__xbox:1,type:"jserr",url:location.href,msg:String(m).slice(0,200),line:l,src:String(s||"")},"*");}catch(e){}return false;};` +
-		`var P="` + browserPathPrefix() + `",H=` + hostLit + `,O=` + originLit + `,M=` + directFlag + `;` +
+		`var B="` + appBase + `",P="` + browserPathPrefix() + `",H=` + hostLit + `,O=` + originLit + `,M=` + directFlag + `;` +
 		// px: 任意 URL → 代理路径（相对/非 http 原样）
 		`function px(u){try{if(typeof u!=="string")return u;var s=u.replace(/^\s+|\s+$/g,"");if(!s)return u;` +
 		`var l=s.toLowerCase();if(l.indexOf("javascript:")===0||l.indexOf("data:")===0||l.indexOf("mailto:")===0||l.indexOf("#")===0)return u;` +
 		// 幂等：已经是代理路径（服务端已改写过的属性值）绝不能再套一层，
 		// 否则 MutationObserver 每轮都会看到"属性又变了"→ 无限嵌套 → 卡死
-		`if(s.indexOf("/b/")===0)return u;` +
+		`if(s.indexOf(B+"\/b\/")===0)return u;` +
 		`if(M){if(s.charAt(0)==="/"&&s.charAt(1)!=="/")return s;` +
 		`if(s.indexOf("//")===0)s=location.protocol+s;` +
 		`var d=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!d)return u;` +
