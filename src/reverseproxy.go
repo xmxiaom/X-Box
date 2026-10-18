@@ -24,17 +24,32 @@ import (
 )
 
 type ProxyRule struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Domain string `json:"domain"` // server_name，必填
-	Port   int    `json:"port"`   // 0 = 由网关 443 托管
-	Target string `json:"target"`
-	TLS    bool   `json:"tls"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Domain      string `json:"domain"`      // 支持多个，空格/逗号分隔
+	PathPrefix  string `json:"pathPrefix"`  // 可选，如 /app
+	StripPrefix bool   `json:"stripPrefix"` // 转发时去掉路径前缀
+	Port        int    `json:"port"`        // 0 = 由网关 443 托管
+	Target      string `json:"target"`
+	TLS         bool   `json:"tls"`
+	Desc        string `json:"desc"`
 }
 
 var proxyReID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,40}$`)
 var proxyReDomain = regexp.MustCompile(`^[a-zA-Z0-9.*_-]{1,120}$`)
 var proxyReTarget = regexp.MustCompile(`^https?://[^\s;{}]+$`)
+
+// splitDomains 把 "a.com, b.com" 拆成 ["a.com","b.com"]。
+func splitDomains(v string) []string {
+	f := strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+	out := make([]string, 0, len(f))
+	for _, x := range f {
+		if x = strings.TrimSpace(x); x != "" {
+			out = append(out, x)
+		}
+	}
+	return out
+}
 
 // nginxPaths 探测飞牛网关位置。XBOX_NGINX_ROOT 仅供测试。
 func nginxPaths() (bin, mainConf, confDir string, ok bool) {
@@ -111,10 +126,19 @@ func renderProxyConf(r ProxyRule) string {
 		}
 		b.WriteString(fmt.Sprintf("\tlisten %d;\n", port))
 	}
-	b.WriteString("\tserver_name " + r.Domain + ";\n")
+	domains := splitDomains(r.Domain)
+	b.WriteString("\tserver_name " + strings.Join(domains, " ") + ";\n")
 	b.WriteString("\tclient_max_body_size 0;\n")
-	b.WriteString("\tlocation / {\n")
-	b.WriteString("\t\tproxy_pass " + r.Target + ";\n")
+	loc := "/"
+	if r.PathPrefix != "" {
+		loc = "/" + strings.Trim(r.PathPrefix, "/") + "/"
+	}
+	target := r.Target
+	if r.StripPrefix {
+		target = strings.TrimSuffix(target, "/") + "/"
+	}
+	b.WriteString("\tlocation " + loc + " {\n")
+	b.WriteString("\t\tproxy_pass " + target + ";\n")
 	b.WriteString("\t\tproxy_http_version 1.1;\n")
 	b.WriteString("\t\tproxy_set_header Host $host;\n")
 	b.WriteString("\t\tproxy_set_header X-Real-IP $remote_addr;\n")
@@ -178,9 +202,16 @@ func (s *Server) handleProxySave(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "标识只能用字母/数字/下划线/短横线")
 		return
 	}
-	if rule.Domain == "" || !proxyReDomain.MatchString(rule.Domain) {
+	rule.Domain = strings.Join(splitDomains(rule.Domain), " ")
+	if rule.Domain == "" {
 		fail(w, 400, "请填写域名（网关按域名路由）")
 		return
+	}
+	for _, d := range splitDomains(rule.Domain) {
+		if !proxyReDomain.MatchString(d) {
+			fail(w, 400, "域名格式不合法："+d)
+			return
+		}
 	}
 	if rule.Port < 0 || rule.Port > 65535 {
 		fail(w, 400, "端口需在 1-65535 之间，或留空使用网关 443")
@@ -201,9 +232,16 @@ func (s *Server) handleProxySave(w http.ResponseWriter, r *http.Request) {
 	}
 	// 同域名冲突：两条规则抢同一 server_name，网关只会命中其一
 	for _, x := range proxyRules() {
-		if x.ID != rule.ID && strings.EqualFold(x.Domain, rule.Domain) {
-			fail(w, 400, "域名 "+rule.Domain+" 已被规则「"+x.Name+"」使用")
-			return
+		if x.ID == rule.ID {
+			continue
+		}
+		for _, d1 := range splitDomains(rule.Domain) {
+			for _, d2 := range splitDomains(x.Domain) {
+				if strings.EqualFold(d1, d2) {
+					fail(w, 400, "域名 "+d1+" 已被规则「"+x.Name+"」使用")
+					return
+				}
+			}
 		}
 	}
 
