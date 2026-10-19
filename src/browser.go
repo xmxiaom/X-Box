@@ -198,6 +198,17 @@ var browserTransport4 = &http.Transport{
 	},
 }
 
+// isMobileUA 判断是否为移动端浏览器标识。
+func isMobileUA(ua string) bool {
+	l := strings.ToLower(ua)
+	for _, k := range []string{"mobile", "android", "iphone", "ipad", "ipod", "micromessenger", "harmonyos", "phone"} {
+		if strings.Contains(l, k) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleBrowserRoot GET /b（无子路径）：提示用法。
 func (s *Server) handleBrowserRoot(w http.ResponseWriter, r *http.Request) {
 	fail(w, 400, "用法：/b/http/<主机>/<路径> 或 /b/https/<主机>/<路径>")
@@ -351,13 +362,18 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 		browserFail(w, target, err)
 		return
 	}
-	// UA 透传客户端真实值：部分设备（光猫等）按 UA 返回不同界面，硬编码 Linux UA
-	// 会让它给出缺帧/404 的降级页面。
-	if ua := r.Header.Get("User-Agent"); ua != "" {
-		req.Header.Set("User-Agent", ua)
-	} else {
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	// UA 策略：移动端一律改用桌面标识。
+	// 原因：移动版站点在代理下层出不穷——按 UA 302 到 m.* 域名、接口路径不同、
+	// 资源域走 http、页面脚本用 location.host 拼地址等，都是 502/白屏/点不动的来源；
+	// 桌面版页面结构稳定，与电脑端表现一致。设备管理页（光猫等）用桌面 UA 也会返回
+	// 完整界面而不是简化版。
+	// 例外：XBOX_MOBILE_UA=keep 可保留原 UA（排查移动版专用问题时用）。
+	const desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	ua := r.Header.Get("User-Agent")
+	if ua == "" || (isMobileUA(ua) && os.Getenv("XBOX_MOBILE_UA") != "keep") {
+		ua = desktopUA
 	}
+	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	if ct := r.Header.Get("Content-Type"); ct != "" && r.Method == http.MethodPost {
@@ -459,12 +475,40 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 	if os.Getenv("XBOX_DEBUG_COOKIE") == "1" {
 		log.Printf("[cookie] %s respSet=%d jarHit=%d", target, len(resp.Cookies()), len(jar.Cookies(tu)))
 	}
+	// 浏览器已带有的同值 Cookie 不再重复下发：站点一次下发十几个 Cookie 时，
+	// 「每个写两份（带/不带版本段）」会让响应头成倍膨胀，越过网关（nginx）的
+	// 响应头缓冲上限后上游直接 502（表现为整页打不开，刷新无效）。
+	have := map[string]string{}
+	for _, part := range strings.Split(r.Header.Get("Cookie"), ";") {
+		part = strings.TrimSpace(part)
+		if k, v, ok := strings.Cut(part, "="); ok {
+			have[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	// 只有入口地址（路径不含版本段）才需要补一份"无版本段 Path"：
+	// 带版本段的页面及其资源请求没必要重复下发，能显著缩小响应头。
+	needNPath := cookiePathN != "" && cookiePathN != cookiePathV &&
+		!browserReVerSeg.MatchString(r.URL.Path)
+	const cookieBudget = 6144 // Set-Cookie 总字节上限，超了宁可不发也不让网关 502
+	used := 0
 	for _, c := range jar.Cookies(tu) {
+		if v, ok := have[c.Name]; ok && v == c.Value && !needNPath {
+			continue
+		}
+		sz := len(c.Name) + len(c.Value) + len(cookiePathV)
+		if used+sz > cookieBudget {
+			continue
+		}
+		used += sz
 		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePathV)
 		// 入口页面地址不带版本段，Cookie 若只写带版本段的 Path，登录等表单提交
 		// （发往无版本段路径）时浏览器不会携带——会话丢失导致光猫提示"密码错误"。
 		// 同一站点回写两份（值相同），两种地址都能携带。
-		if cookiePathN != "" && cookiePathN != cookiePathV {
+		if needNPath {
+			if used+sz > cookieBudget {
+				continue
+			}
+			used += sz
 			w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePathN)
 		}
 	}
@@ -963,6 +1007,9 @@ var lastSite atomic.Value // string
 
 // browserReProxySite 从任意地址里提取代理路径中的站点段（scheme/host）。
 var browserReProxySite = regexp.MustCompile(`/b/(?:v\d+/)?(https?)/([^/?#]+)`)
+
+// browserReVerSeg 路径里是否带代理版本段（/b/v1315/…）。
+var browserReVerSeg = regexp.MustCompile(`(?i)/b/v\d+/`)
 
 // browserCollapseDupPrefix 折叠同一站点的重复代理前缀。
 // 输入形如 /b/v1312/https/map.baidu.com/mobile/webapp/b/v1312/https/map.baidu.comindex/index&x=1
