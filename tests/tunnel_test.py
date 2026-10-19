@@ -253,7 +253,7 @@ check("浏览器代理top.location中和", st == 200 and 'top.location' not in b
 check("浏览器代理document.domain中和", st == 200 and 'document.domain=' not in body, body[:160])
 # location 赋值必须经 __xbp 走代理（v1.2.50 未包装导致跳转直连 → 逃逸 → 无限重载循环）
 check("浏览器代理location赋值走代理", st == 200 and body.count('__xbp(') == 2
-      and 'self.location.href=(window.__xbp?__xbp("http://x/y"):("http://x/y"));' in body
+      and 'self.parent.location.href=(window.__xbp?__xbp("http://x/y"):("http://x/y"));' in body
       and 'self.location.href=(window.__xbp?__xbp("/a.html"):("/a.html"));' in body, body[:220])
 # 字符串/注释里的 location.* 绝不能替换（否则 SyntaxError，实测 music.taihe.com、
 # image.baidu.com 整页脚本报废："Uncaught SyntaxError: Unexpected string"）

@@ -303,6 +303,23 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 3 && parts[2] != "" {
 		sub += parts[2]
 	}
+	// 兜底纠正：目标路径若以面板前缀开头（appBase），说明某个相对路径被误当成
+	// 站点路径拼接（实测会产出 目标域名/app/X-Box/ 这种畸形地址 → 整页 404）。
+	// 剥掉前缀后 307 到正确地址。
+	if appBase != "" && strings.HasPrefix(sub, appBase+"/") {
+		fixed := appBase + "/b/" + strings.TrimPrefix(raw, "/b/")
+		if i := strings.Index(fixed, appBase+"/b/"); i >= 0 {
+			if j := strings.Index(fixed[i+len(appBase)+3:], appBase+"/"); j >= 0 {
+				cut := i + len(appBase) + 3 + j
+				fixed = fixed[:cut] + strings.TrimPrefix(fixed[cut:], appBase)
+				if r.URL.RawQuery != "" {
+					fixed += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, fixed, http.StatusTemporaryRedirect)
+				return
+			}
+		}
+	}
 	target := scheme + "://" + host + sub
 	tu, terr := url.Parse(target)
 	if terr != nil || tu.Host == "" {
@@ -1213,6 +1230,10 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		// 幂等：已经是代理路径（服务端已改写过的属性值）绝不能再套一层，
 		// 否则 MutationObserver 每轮都会看到"属性又变了"→ 无限嵌套 → 卡死
 		`if(s.indexOf(B+"\/b\/")===0)return u;` +
+		// 面板自身路径（appBase 开头、但不是 /b/ 代理路径）：原样返回，绝不能当
+		// 目标站路径去包装，否则会拼出 目标域名/app/X-Box/… 这种畸形地址
+		// （实测：站点里残留的面板相对路径被改写后整页 404）。
+		`if(B&&s.indexOf(B+"\/")===0)return u;` +
 		// 幂等补：页面 JS 读已改写属性（a.href）时浏览器会解析成"面板域名绝对
 		// URL"（https://面板/b/vNNN/https/目标/...），上面只拦相对前缀拦不住，
 		// 走通用分支会再包一层 → 服务端 depth 检测 400 → 按钮点击无反应。

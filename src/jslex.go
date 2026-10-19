@@ -429,7 +429,14 @@ func browserRewriteJSLex(js, panelScheme, panelHost string) string {
 				// 包装成导航等于"把当前 URL 再导航一次" → iframe 里自己刷自己 → 白屏
 				add(s, e, "void 0"+term)
 			} else {
-				add(s, e, "self.location.href=(window.__xbp?__xbp("+rhs+"):("+rhs+"))"+term)
+				dst := "self.location.href"
+				// top.location = x 表达"整页跳转"（退出登录等）：必须让框架页整体导航，
+				// 只导航当前子框架会出现"顶栏进了登录页、主体还在"的假退出。
+				// self.parent 的三连限定符不会被本规则再次命中，正好绕开自身改写。
+				if jsIsIdent(js, toks, k, "top") {
+					dst = "self.parent.location.href"
+				}
+				add(s, e, dst+"=(window.__xbp?__xbp("+rhs+"):("+rhs+"))"+term)
 			}
 			continue
 		}
@@ -459,6 +466,16 @@ func browserRewriteJSLex(js, panelScheme, panelHost string) string {
 			jsIsIdent(js, toks, k+2, "top") &&
 			jsIsPunct(js, toks, k+3, ".") && k+4 < len(toks) && toks[k+4].kind == jsIdent {
 			add(toks[k].start, toks[k+4].start, "parent.")
+			continue
+		}
+		// 规则 3b：top.location → self.parent.location
+		// 页面用 top.location 表达"整页跳转"（退出登录等）。若改写成 parent.location，
+		// 后面规则 1 会把它降级成"只导航当前子框架"——顶栏跳到登录页、主体还在，
+		// 表现就是点了退出没反应。用 self.parent.location 绕开规则 1（三连限定符不匹配），
+		// 让框架页整体导航，仍在代理 iframe 内。
+		if jsIsIdent(js, toks, k, "top") && !jsIsDotLike(js, toks, k-1) &&
+			jsIsPunct(js, toks, k+1, ".") && jsIsIdent(js, toks, k+2, "location") {
+			add(toks[k].start, toks[k+2].end, "self.parent.location")
 			continue
 		}
 		// 规则 3：top.X → parent.X

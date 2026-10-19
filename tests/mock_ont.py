@@ -47,6 +47,7 @@ PAGE = """<!DOCTYPE html><html><head><meta charset="gb2312"><title>{title}</titl
 
 MENU_JS = """function ReplaceDemo(ss){return String(ss).replace(/ /g,"&nbsp;");}
 function getObj(id){return document.getElementById(id);}
+function doLogout(){ top.location.href = "/logout.gch"; }
 function openLink(pageurl){
   var tag=getObj("IF_UPLOADING").value;
   if(tag=="1"){top.mainFrame.location.href="#";return;}
