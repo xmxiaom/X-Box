@@ -1585,7 +1585,7 @@ function renderUpdate(u){
   const status = document.getElementById('upd-status');
   const body = document.getElementById('upd-body');
   if(u.hasUpdate){
-    latest.textContent = 'v'+(u.latest||'—');
+    latest.textContent = u.latest||'—';
     latest.style.color = 'var(--success)';
     latest.style.fontWeight = '700';
     status.innerHTML = '<span class="badge badge-green">有新版本</span>';
@@ -1597,7 +1597,7 @@ function renderUpdate(u){
       </div>
       <div class="warn-box" style="margin-top:10px">下载完成后，请到<b>飞牛 应用中心 → 手动安装</b>选择下载的 fpk 文件完成覆盖安装（配置与数据保留）。应用不会自动替换自身运行中的程序，这是为了防止升级中断连。</div>`;
   }else{
-    latest.textContent = u.latest?('v'+u.latest):'—';
+    latest.textContent = u.latest||'—';
     latest.style.color = '';
     latest.style.fontWeight = '';
     status.innerHTML = '<span class="badge badge-green">已是最新版本</span>';
