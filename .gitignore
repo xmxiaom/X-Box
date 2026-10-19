@@ -20,3 +20,7 @@ data/
 _msg.txt
 _*.py
 _rel*.py
+
+# 临时构建产物 / 发布说明草稿
+.ab-*
+_notes.json
