@@ -6,23 +6,26 @@ package main
 //   1. 不开新端口：端点全挂主 mux（/api/speedtest/*），经 fnOS 网关/隧道可达。
 //   2. 大流量不出网关：下载/上传在「NAS 后端 ↔ 外网测速节点」之间进行，
 //      浏览器只经网关回传结果 JSON（几 KB），不占中转带宽。
-//   3. 节点三层来源（用户 2026-10-19 确认「预置+拉取」）：
-//        内置预置（实测可用教育网节点兜底）
-//        → 上游 LibreSpeed 清单实时拉取（i-abc/Speedtest node 分支 china-education.json，
-//          双源：GitHub raw + asset.bash.icu 镜像；缓存 24h，可手动刷新）
+//   3. 节点三层来源（用户 2026-10-19 确认「预置+拉取」，2026-10-20 明确远程保留 ≤20）：
+//        内置预置（实测可用节点兜底：教育网 2 个 + 测速网电信云测 1 个）
+//        → 上游清单实时拉取（LibreSpeed 教育网 JSON + Ookla 三网/广电 txt
+//          + speedtest.cn 节点库 CSV，来源 spiritLHLS/speedtest.cn-CN-ID 每日自动更新；
+//          缓存 24h，可手动刷新）
 //        → 用户自定义节点（speedtest_nodes.json 持久化）
-//      合并去重后全部参与竞速；节点可手动选择，也可自动选延迟最低。
+//      远程节点合并去重后自动探活，按延迟排序裁剪至 ≤20 个，
+//      电信/联通/移动/广电各保底 1 个；全部参与竞速，失败自动回退次优。
 //   4. 探活升级：TCP 握手 + HTTP GET pingURL 校验（非 2xx/3xx 视为死节点）。
 //      根治「TCP 通但后端已坏（如 HTTP 500）仍被选中 → 下载 0」的问题。
 //   5. 阶段化进度 + 实时速率：前端 1s 轮询 /api/speedtest/status，
 //      down/up 阶段状态里带瞬时速率与累计流量。
 
 import (
+	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -82,70 +85,11 @@ func hostFromServer(server string) string {
 
 // 内置预置节点（2026-10 实测可用；作为上游拉取失败时的兜底）。
 // neu/shu 曾在列但实测已下线，已移除；ustc/sjtu 按来源 IP 过滤（家宽 500/302）不入列。
-// local：本机回环节点（NAS 内部自测）——打向启动时随机端口的专用回环监听，
-// 量的是 NAS 本机协议栈基线（不含外网瓶颈），用于与外网测速对比判断宽带是否跑满。
-// Server 在 initSpeedtest 里由 startLocalSpeedtest 填实际端口。
+// stcn-nj：2026-10-20 实测 /hello 200、/download 4s 拉 324MB；jsinfo 系其余节点（镇江/苏州等）已下线。
 var stBuiltin = []stNode{
-	{ID: "local", Name: "本机基线（回环）", Group: "本地", Down: "/speedtest-local/garbage", Up: "/speedtest-local/upload", Ping: "/speedtest-local/ping", Source: "builtin"},
 	{ID: "nuaa", Name: "南京航空航天大学", Group: "教育网", Server: "http://speed.nuaa.edu.cn", Down: "/backend/garbage.php", Up: "/backend/empty.php", Ping: "/backend/empty.php", Source: "builtin"},
 	{ID: "seu", Name: "东南大学", Group: "教育网", Server: "https://xnfz.seu.edu.cn", Down: "/speed/garbage.php", Up: "/speed/empty.php", Ping: "/speed/empty.php", Source: "builtin"},
-}
-
-// stLocalAddr 专用回环监听地址（127.0.0.1:随机端口），startLocalSpeedtest 赋值。
-var stLocalAddr string
-
-// startLocalSpeedtest 启动本机基线测速专用监听（仅回环，随机端口，进程内私有）。
-// 生产面板只走 fnOS 网关 unix socket 不监听 TCP，回环节点必须有自己的 TCP 入口。
-func startLocalSpeedtest() {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		log.Printf("本机基线测速监听启动失败（本机基线节点不可用）: %v", err)
-		return
-	}
-	stLocalAddr = ln.Addr().String()
-	go func() {
-		if err := http.Serve(ln, http.HandlerFunc(handleSpeedtestLocal)); err != nil {
-			log.Printf("本机基线测速服务退出: %v", err)
-		}
-	}()
-	for i := range stBuiltin {
-		if stBuiltin[i].ID == "local" {
-			stBuiltin[i].Server = "http://" + stLocalAddr
-		}
-	}
-}
-
-// handleSpeedtestLocal 本机回环测速端点（监听本身只绑 127.0.0.1，天然不对外）。
-// /speedtest-local/ping     — 延迟探测（固定小文本）
-// /speedtest-local/garbage  — 无限下载流（读侧按测速窗口自行停止）
-// /speedtest-local/upload   — 上传接收（读丢弃）
-func handleSpeedtestLocal(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-	switch r.URL.Path {
-	case "/speedtest-local/ping":
-		w.Header().Set("Content-Type", "text/plain")
-		_, _ = io.WriteString(w, "pong")
-	case "/speedtest-local/garbage":
-		// 无限流：stDownload 的 12s 超时窗口到期后 phaseCtx 取消，读侧断开，本循环随之退出
-		w.Header().Set("Content-Type", "application/octet-stream")
-		block := make([]byte, 256*1024)
-		for i := range block {
-			block[i] = byte(i % 251)
-		}
-		flusher, _ := w.(http.Flusher)
-		for r.Context().Err() == nil {
-			if _, err := w.Write(block); err != nil {
-				return
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-	case "/speedtest-local/upload":
-		_, _ = io.Copy(io.Discard, r.Body)
-	default:
-		fail(w, 404, "未知端点")
-	}
+	{ID: "stcn-nj", Name: "南京电信云测", Group: "电信", Server: "http://5gnanjing.speedtest.jsinfo.net:8080", Down: "/download", Up: "/upload", Ping: "/hello", Source: "builtin"},
 }
 
 // 上游清单镜像模板（i-abc/Speedtest node 分支维护，三源互备：GitHub 原站 + 两个镜像）
@@ -155,19 +99,27 @@ var stMirrors = []string{
 	"https://cdn.jsdelivr.net/gh/i-abc/Speedtest@node/%s",
 }
 
-// 上游清单定义：LibreSpeed JSON（教育网）+ Ookla speedtest-cli 清单（运营商线路）。
+// 上游清单定义：LibreSpeed JSON（教育网）+ Ookla speedtest-cli 清单（运营商线路）
+// + speedtest.cn 节点库 CSV（spiritLHLS/speedtest.cn-CN-ID，每日自动更新；
+// CN.csv 为全量超集——2026-10-20 实测三网/广电子集 CSV 无独有 host——
+// 只拉这一个文件，按 operator 列归组，不必再拉四个子集 CSV）。
 // 运营商 txt 格式："speedtest-cli,电信 天津           ,-o tjrate.tjtele.com"，
 // -o 后为 Ookla 服务器域名（默认端口 8080，标准路径 /speedtest/*）。
 var stListSources = []struct {
-	File  string // node 分支文件名
-	Group string // 运营商/地区分组
-	Kind  string // librespeed | ookla
+	File    string   // 清单文件名
+	Group   string   // 运营商/地区分组（cnid 按 operator 列取组，忽略此字段）
+	Kind    string   // librespeed | ookla | cnid
+	Mirrors []string // 镜像模板（nil → 默认 stMirrors）
 }{
-	{"china-education.json", "教育网", "librespeed"},
-	{"china-telecom-m-thread-v4.txt", "电信", "ookla"},
-	{"china-unicom-m-thread-v4.txt", "联通", "ookla"},
-	{"china-mobile-m-thread-v4.txt", "移动", "ookla"},
-	{"china-other-m-thread-v4.txt", "广电", "ookla"},
+	{"china-education.json", "教育网", "librespeed", nil},
+	{"china-telecom-m-thread-v4.txt", "电信", "ookla", nil},
+	{"china-unicom-m-thread-v4.txt", "联通", "ookla", nil},
+	{"china-mobile-m-thread-v4.txt", "移动", "ookla", nil},
+	{"china-other-m-thread-v4.txt", "广电", "ookla", nil},
+	{"CN.csv", "", "cnid", []string{
+		"https://raw.githubusercontent.com/spiritLHLS/speedtest.cn-CN-ID/main/%s",
+		"https://cdn.jsdelivr.net/gh/spiritLHLS/speedtest.cn-CN-ID@main/%s",
+	}},
 }
 
 // LibreSpeed JSON 单条格式（librespeed/speedtest servers.json 标准）
@@ -239,7 +191,6 @@ func initSpeedtest(dataDir string) {
 	stN.cachePath = filepath.Join(dataDir, "speedtest_remote.json")
 	stN.loadCustom()
 	stN.loadRemoteCache()
-	startLocalSpeedtest() // 本机基线回环节点：起专用回环监听并回填 local 节点 Server
 	// 后台异步刷新上游清单（不阻塞启动）
 	go stN.refreshRemote(false)
 }
@@ -301,7 +252,9 @@ func (s *stNodesState) isFetching() bool {
 	return s.fetching
 }
 
-// refreshRemote 从上游拉取节点清单（教育网 JSON + 三网/广电 Ookla txt，逐清单三镜像容错）。
+// refreshRemote 从上游拉取节点清单（教育网 JSON + 三网/广电 Ookla txt + speedtest.cn
+// CN.csv，逐清单多镜像容错），随后探活裁剪：去重 → 轻量探活 → 按延迟排序 →
+// 电信/联通/移动/广电各保底 1 个 → 裁剪至 ≤20 个写入 s.remote 并缓存。
 // force=true 由用户手动触发；false 时缓存未满 24h 直接跳过。
 func (s *stNodesState) refreshRemote(force bool) {
 	s.mu.Lock()
@@ -321,16 +274,20 @@ func (s *stNodesState) refreshRemote(force bool) {
 	var got []stNode
 	var errs []string
 	for _, ls := range stListSources {
-		// 单清单：三镜像依次尝试，拿到非空结果即止
+		mirrors := ls.Mirrors
+		if mirrors == nil {
+			mirrors = stMirrors
+		}
+		// 单清单：多镜像依次尝试，拿到非空结果即止
 		var body []byte
 		var lastErr error
-		for _, tpl := range stMirrors {
+		for _, tpl := range mirrors {
 			resp, err := client.Get(fmt.Sprintf(tpl, ls.File))
 			if err != nil {
 				lastErr = err
 				continue
 			}
-			b, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 			resp.Body.Close()
 			if err != nil {
 				lastErr = err
@@ -344,14 +301,21 @@ func (s *stNodesState) refreshRemote(force bool) {
 			break
 		}
 		if len(body) == 0 {
-			errs = append(errs, ls.File+"："+lastErr.Error())
+			if lastErr != nil {
+				errs = append(errs, ls.File+"："+lastErr.Error())
+			} else {
+				errs = append(errs, ls.File+"：无内容")
+			}
 			continue
 		}
 		// 解析为节点（按清单类型）
 		var nodes []stNode
-		if ls.Kind == "librespeed" {
+		switch ls.Kind {
+		case "librespeed":
 			nodes = stParseLibrespeed(body, ls.Group)
-		} else {
+		case "cnid":
+			nodes = stParseCnIDCsv(body)
+		default:
 			nodes = stParseOoklaTxt(body, ls.Group)
 		}
 		if len(nodes) == 0 {
@@ -360,26 +324,130 @@ func (s *stNodesState) refreshRemote(force bool) {
 		}
 		got = append(got, nodes...)
 	}
+	got = stDedupe(got)
+
+	// 探活裁剪：远程候选全量探活 → 按延迟排序 → 四运营商各保底 1 个 → 总数 ≤20。
+	// 原始清单动辄数百节点，直接进列表会拖慢竞速与页面渲染；
+	// 探活只做 TCP+HEAD 轻量校验，20 并发约几秒完成。调用点均为异步，可给足预算。
+	alive, lats := stProbeBatch(got)
+	if len(alive) > 0 {
+		alive = stTrimRemote(alive, lats, 20)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fetching = false
-	if len(got) > 0 {
-		s.remote = got
+	if len(alive) > 0 {
+		s.remote = alive
 		s.remoteAt = time.Now()
 		s.saveRemoteLocked()
 		if len(errs) > 0 {
 			s.fetchErr = fmt.Sprintf("部分清单拉取失败（%d/%d 成功）：%s", len(stListSources)-len(errs), len(stListSources), strings.Join(errs, "; "))
-			if len(s.remote) > 0 {
-				// 有成功清单时失败清单只提示，不算整体错误——截断避免 toast 过长
-				if len(s.fetchErr) > 120 {
-					s.fetchErr = s.fetchErr[:120] + "…"
-				}
-			} 
+			// 有成功清单时失败清单只提示，不算整体错误——截断避免 toast 过长
+			if len(s.fetchErr) > 120 {
+				s.fetchErr = s.fetchErr[:120] + "…"
+			}
 		}
+	} else if len(got) > 0 {
+		// 清单拉到了但全军覆没（探活全死）：仍写入缓存供列表展示探活状态，
+		// 下次 24h 刷新前用户至少能看到节点而不会以为列表为空
+		s.remote = got
+		s.remoteAt = time.Now()
+		s.saveRemoteLocked()
+		s.fetchErr = "清单已拉取但探活全部失败，可能是当前网络出口受限"
 	} else {
 		s.fetchErr = "上游清单拉取失败：" + strings.Join(errs, "; ")
 	}
+}
+
+// stDedupe 同 Server+Down 去重（保留先出现的，来源优先级由调用方保证）。
+func stDedupe(list []stNode) []stNode {
+	seen := map[string]bool{}
+	out := make([]stNode, 0, len(list))
+	for _, n := range list {
+		key := strings.ToLower(hostFromServer(n.Server)) + "|" + n.Down
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, n)
+	}
+	return out
+}
+
+// stProbeBatch 并发探活（20 路并发，单节点 ~5s 上限），返回活节点切片及
+// 与切片一一对应的延迟值（ms，供排序裁剪用）。
+func stProbeBatch(list []stNode) ([]stNode, []float64) {
+	if len(list) == 0 {
+		return nil, nil
+	}
+	sem := make(chan struct{}, 20)
+	var wg sync.WaitGroup
+	results := make([]float64, len(list))
+	for i := range list {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			results[i] = stProbeNode(ctx, list[i])
+		}(i)
+	}
+	wg.Wait()
+	out := make([]stNode, 0, len(list))
+	lats := make([]float64, 0, len(list))
+	for i := range list {
+		if results[i] <= 0 {
+			continue
+		}
+		n := list[i]
+		v := true
+		n.Alive = &v
+		out = append(out, n)
+		lats = append(lats, results[i])
+	}
+	return out, lats
+}
+
+// stTrimRemote 按探活延迟升序裁剪至 cap 个：电信/联通/移动/广电各保留最快的
+// 1 个作为保底（避免裁剪后某运营商节点全部缺席、竞速无从谈起），其余按
+// 延迟序填充。
+func stTrimRemote(list []stNode, lats []float64, cap int) []stNode {
+	if len(list) != len(lats) || len(list) <= cap {
+		return list
+	}
+	idx := make([]int, len(list))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return lats[idx[a]] < lats[idx[b]] })
+	// 保底：四大运营商各取延迟最快的一个
+	keep := map[int]bool{}
+	bottom := map[string]bool{"电信": false, "联通": false, "移动": false, "广电": false}
+	for _, i := range idx {
+		g := list[i].Group
+		if !bottom[g] {
+			bottom[g] = true
+			keep[i] = true
+		}
+	}
+	out := make([]stNode, 0, cap)
+	for _, i := range idx {
+		if keep[i] {
+			out = append(out, list[i])
+		}
+	}
+	for _, i := range idx {
+		if len(out) >= cap {
+			break
+		}
+		if !keep[i] {
+			out = append(out, list[i])
+		}
+	}
+	return out
 }
 
 // stParseLibrespeed 解析 LibreSpeed servers.json 标准格式（教育网清单）。
@@ -448,6 +516,90 @@ func stParseOoklaTxt(body []byte, group string) []stNode {
 			Down:   "/speedtest/backend/garbage.php",
 			Up:     "/speedtest/upload.php",
 			Ping:   "/speedtest/latency.txt",
+			Source: "remote",
+		})
+	}
+	return out
+}
+
+// stParseCnIDCsv 解析 speedtest.cn 节点库 CSV（spiritLHLS/speedtest.cn-CN-ID，每日更新）。
+// 23 列（0 基）：1=active 5=host 6=country_code 8=city 10=operator 15=sponsor
+// 19=pingUrl 20=downloadUrl 21=uploadUrl——URL 三列为完整地址（含 scheme+端口+路径），
+// 需拆成 base+path。过滤：表头、active!=1、非 CN、IPv6 节点、URL 缺失行。
+func stParseCnIDCsv(body []byte) []stNode {
+	rd := csv.NewReader(bytes.NewReader(body))
+	rd.FieldsPerRecord = -1 // 行字段数容错（个别行 websocketUrl 列可能缺省）
+	rd.TrimLeadingSpace = true
+	rows, err := rd.ReadAll()
+	if err != nil && len(rows) == 0 {
+		return nil
+	}
+	groupOf := func(op string) string {
+		for _, g := range []string{"电信", "联通", "移动", "广电"} {
+			if strings.Contains(op, g) {
+				return g
+			}
+		}
+		if strings.Contains(op, "教育") {
+			return "教育网"
+		}
+		return op
+	}
+	splitURL := func(raw string) (base, path string) {
+		raw = strings.TrimSpace(raw)
+		i := strings.Index(raw, "://")
+		if i < 0 {
+			return "", raw
+		}
+		slash := strings.Index(raw[i+3:], "/")
+		if slash < 0 {
+			return raw, "/"
+		}
+		return raw[:i+3+slash], raw[i+3+slash:]
+	}
+	var out []stNode
+	for _, rec := range rows {
+		if len(rec) < 22 {
+			continue
+		}
+		if strings.TrimSpace(rec[0]) == "id" { // 表头
+			continue
+		}
+		if strings.TrimSpace(rec[1]) != "1" || strings.TrimSpace(rec[6]) != "CN" {
+			continue
+		}
+		host := strings.TrimSpace(rec[5])
+		pingURL := strings.TrimSpace(rec[19])
+		downURL := strings.TrimSpace(rec[20])
+		upURL := strings.TrimSpace(rec[21])
+		if host == "" || downURL == "" || upURL == "" || pingURL == "" {
+			continue
+		}
+		// IPv6 字面量：host 含 [ 或冒号数 >1（host 列本身可含 ":端口"，单个冒号正常）
+		if strings.Contains(host, "[") || strings.Count(host, ":") > 1 {
+			continue
+		}
+		srv, dPath := splitURL(downURL)
+		_, uPath := splitURL(upURL)
+		_, pPath := splitURL(pingURL)
+		if srv == "" {
+			continue
+		}
+		op := strings.TrimSpace(rec[10])
+		city := strings.TrimSpace(rec[8])
+		sponsor := strings.TrimSpace(rec[15])
+		if sponsor == "" {
+			sponsor = host
+		}
+		name := strings.TrimSpace(city + " " + sponsor)
+		out = append(out, stNode{
+			ID:     "cnid-" + fmt.Sprintf("%x", fnv32(srv+dPath)),
+			Name:   name,
+			Group:  groupOf(op),
+			Server: srv,
+			Down:   dPath,
+			Up:     uPath,
+			Ping:   pPath,
 			Source: "remote",
 		})
 	}
@@ -767,98 +919,126 @@ func (s *stState) run(ctx context.Context, wantID string) {
 		return
 	}
 	sort.Slice(probes, func(i, j int) bool { return probes[i].ms < probes[j].ms })
-	best := probes[0]
-	// 同运营商优先竞速：probes 已按延迟升序，取首个与本机 ISP 同组的活节点；
-	// 同组无活节点（或线路未知）则保持全局最优兜底。跨网测速点常屏蔽异网
-	// 访问，强行选延迟低的异网站点会导致下载/上传阶段整体失败。
+
+	// 候选序列：同运营商优先（probes 已按延迟升序，同 ISP 组排前），其余按延迟
+	// 跟随。跨网测速点常屏蔽异网访问；而同网节点也可能探活通过但下载不可用，
+	// 因此下载失败时沿候选序列自动回退次优节点重测（最多尝试 3 个）。
+	cands := make([]stProbe, 0, len(probes))
+	inCands := map[string]bool{}
 	if myISP := ispNormalize(stIsp.snapshotISP()); myISP != "" && myISP != "未知" {
 		for _, p := range probes {
 			if ispNormalize(p.node.Group) == myISP {
-				best = p
-				break
+				cands = append(cands, p)
+				inCands[p.node.ID] = true
 			}
 		}
+	}
+	for _, p := range probes {
+		if !inCands[p.node.ID] {
+			cands = append(cands, p)
+			inCands[p.node.ID] = true
+		}
+	}
+	maxTry := len(cands)
+	if maxTry > 3 {
+		maxTry = 3
 	}
 
 	// 探活结果缓存给节点列表展示
 	stN.rememberAlive(probes, nodes)
-
-	// 延迟/抖动/丢包：对选定节点连续 TCP 握手 12 次
-	s.setPhase("ping", 0, "测试延迟（"+best.node.Name+"）")
-	var lat []float64
-	lostCnt := 0
-	const rounds = 12
-	for i := 0; i < rounds; i++ {
-		if ctx.Err() != nil {
-			s.fail(ctx, "已中止")
-			return
-		}
-		t0 := time.Now()
-		c, err := net.DialTimeout("tcp", hostFromServer(best.node.Server), 2*time.Second)
-		if err != nil {
-			lostCnt++
-		} else {
-			c.Close()
-			lat = append(lat, float64(time.Since(t0).Microseconds())/1000.0)
-		}
-		s.mu.Lock()
-		s.progress = (i + 1) * 100 / rounds
-		s.mu.Unlock()
-		time.Sleep(60 * time.Millisecond)
-	}
-	var pingMs, jitterMs float64
-	if len(lat) > 0 {
-		var sum float64
-		for _, v := range lat {
-			sum += v
-		}
-		pingMs = sum / float64(len(lat))
-		var jd float64
-		for i := 1; i < len(lat); i++ {
-			jd += absf(lat[i] - lat[i-1])
-		}
-		jitterMs = jd / float64(len(lat)-1)
-	}
-	lossPct := float64(lostCnt) * 100 / float64(rounds)
-	s.mu.Lock()
-	s.server = best.node.Name
-	s.pingMs, s.jitterMs, s.lossPct = r1(pingMs), r1(jitterMs), r1(lossPct)
-	s.mu.Unlock()
 
 	client := &http.Client{
 		Timeout:   0,
 		Transport: &http.Transport{DisableCompression: true, MaxIdleConnsPerHost: 6},
 	}
 
-	// ---- 阶段 2：下载（多连接 8s，取后 60% 平均速率） ----
-	s.setPhase("down", 0, "下载测速（"+best.node.Name+"）")
-	downMbps, downMB, derr := stDownload(ctx, client, best.node, s)
-	if derr != nil && ctx.Err() == nil {
-		s.fail(ctx, "下载测速失败："+derr.Error())
-		return
-	}
-	if ctx.Err() != nil {
-		s.fail(ctx, "已中止")
-		return
-	}
-	s.mu.Lock()
-	s.downMbps, s.downMB, s.liveMbps = r1(downMbps), r1(downMB), 0
-	s.mu.Unlock()
+	for attempt := 0; attempt < maxTry; attempt++ {
+		best := cands[attempt]
+		fb := ""
+		if attempt > 0 {
+			fb = "回退重测 · "
+		}
 
-	// ---- 阶段 3：上传（多连接 8s） ----
-	s.setPhase("up", 0, "上传测速（"+best.node.Name+"）")
-	upMbps, upMB, uerr := stUpload(ctx, client, best.node, s)
-	if uerr != nil && ctx.Err() == nil {
-		s.fail(ctx, "上传测速失败："+uerr.Error())
-		return
+		// ---- 阶段 1：延迟/抖动/丢包（对当前节点连续 TCP 握手 12 次） ----
+		s.setPhase("ping", 0, fb+"测试延迟（"+best.node.Name+"）")
+		var lat []float64
+		lostCnt := 0
+		const rounds = 12
+		for i := 0; i < rounds; i++ {
+			if ctx.Err() != nil {
+				s.fail(ctx, "已中止")
+				return
+			}
+			t0 := time.Now()
+			c, err := net.DialTimeout("tcp", hostFromServer(best.node.Server), 2*time.Second)
+			if err != nil {
+				lostCnt++
+			} else {
+				c.Close()
+				lat = append(lat, float64(time.Since(t0).Microseconds())/1000.0)
+			}
+			s.mu.Lock()
+			s.progress = (i + 1) * 100 / rounds
+			s.mu.Unlock()
+			time.Sleep(60 * time.Millisecond)
+		}
+		var pingMs, jitterMs float64
+		if len(lat) > 0 {
+			var sum float64
+			for _, v := range lat {
+				sum += v
+			}
+			pingMs = sum / float64(len(lat))
+			var jd float64
+			for i := 1; i < len(lat); i++ {
+				jd += absf(lat[i] - lat[i-1])
+			}
+			jitterMs = jd / float64(len(lat)-1)
+		}
+		lossPct := float64(lostCnt) * 100 / float64(rounds)
+		s.mu.Lock()
+		s.server = best.node.Name
+		s.pingMs, s.jitterMs, s.lossPct = r1(pingMs), r1(jitterMs), r1(lossPct)
+		s.mu.Unlock()
+
+		// ---- 阶段 2：下载（多连接 8s，取后 60% 平均速率）；失败自动回退次优节点 ----
+		s.setPhase("down", 0, fb+"下载测速（"+best.node.Name+"）")
+		downMbps, downMB, derr := stDownload(ctx, client, best.node, s)
+		if derr != nil {
+			if ctx.Err() != nil {
+				s.fail(ctx, "已中止")
+				return
+			}
+			if attempt+1 < maxTry {
+				continue // 沿候选序列回退到下一个节点重测
+			}
+			s.fail(ctx, "下载测速失败："+derr.Error())
+			return
+		}
+		if ctx.Err() != nil {
+			s.fail(ctx, "已中止")
+			return
+		}
+		s.mu.Lock()
+		s.downMbps, s.downMB, s.liveMbps = r1(downMbps), r1(downMB), 0
+		s.mu.Unlock()
+
+		// ---- 阶段 3：上传（多连接 8s） ----
+		s.setPhase("up", 0, fb+"上传测速（"+best.node.Name+"）")
+		upMbps, upMB, uerr := stUpload(ctx, client, best.node, s)
+		if uerr != nil && ctx.Err() == nil {
+			s.fail(ctx, "上传测速失败："+uerr.Error())
+			return
+		}
+		if ctx.Err() != nil {
+			s.fail(ctx, "已中止")
+			return
+		}
+		s.mu.Lock()
+		s.upMbps, s.upMB, s.liveMbps = r1(upMbps), r1(upMB), 0
+		s.mu.Unlock()
+		break
 	}
-	if ctx.Err() != nil {
-		s.fail(ctx, "已中止")
-		return
-	}
-	s.mu.Lock()
-	s.upMbps, s.upMB, s.liveMbps = r1(upMbps), r1(upMB), 0
-	s.mu.Unlock()
 
 	// ---- 完成：写历史 ----
 	s.mu.Lock()
@@ -1198,7 +1378,9 @@ func (c *countReader) Read(p []byte) (int, error) {
 // stISP 运营商线路识别结果（24h 缓存，手动可强刷）。
 type stISP struct {
 	mu       sync.Mutex
-	ip       string
+	ip       string // 请求实际走的出口地址（v4 或 v6）
+	ip4      string // IPv4 出口地址（无 v4 出口/探测失败为空）
+	ip6      string // IPv6 出口地址（无 v6 出口/探测失败为空）
 	isp      string // 联通/电信/移动/广电/教育网/其他…
 	region   string // 省 市
 	checkedAt time.Time
@@ -1231,7 +1413,7 @@ func handleSpeedtestISP(w http.ResponseWriter, r *http.Request) {
 	stIsp.mu.Lock()
 	defer stIsp.mu.Unlock()
 	ok(w, map[string]any{
-		"ip": stIsp.ip, "isp": stIsp.isp, "region": stIsp.region,
+		"ip": stIsp.ip, "ip4": stIsp.ip4, "ip6": stIsp.ip6, "isp": stIsp.isp, "region": stIsp.region,
 		"checked_at": func() string {
 			if stIsp.checkedAt.IsZero() {
 				return ""
@@ -1241,9 +1423,66 @@ func handleSpeedtestISP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// detect 依次尝试多源识别（ipip.net 主源结构化最好，ip-api.com 备源字段直给 ISP）。
+// detect 双栈识别：分别强制 IPv4 / IPv6 出口各探测一次（请求走哪条栈就返回哪个 IP），
+// 缺栈或该栈探测失败时对应字段留空不报错。ISP/归属地主源取「能成功的那一栈」的结果。
 func (d *stISP) detect() {
-	client := &http.Client{Timeout: 6 * time.Second}
+	// 并发探测双栈
+	type probeRes struct {
+		ip, isp, region string
+		ok              bool
+	}
+	var v4, v6 probeRes
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); v4 = stDetectOne(true) }()
+	go func() { defer wg.Done(); v6 = stDetectOne(false) }()
+	wg.Wait()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.checkedAt = time.Now()
+	// 出口地址分栈落盘
+	d.ip4, d.ip6 = v4.ip, v6.ip
+	// 主展示 IP：优先探测成功的那一栈（与旧行为一致——请求走哪条算哪条）
+	if v4.ok {
+		d.ip, d.isp, d.region = v4.ip, v4.isp, v4.region
+	} else if v6.ok {
+		d.ip, d.isp, d.region = v6.ip, v6.isp, v6.region
+	}
+	// v4 失败但 v6 成功时补齐 ISP 信息；反之亦然（任一栈拿到 ISP 即用）
+	if d.isp == "" {
+		if v4.ok || v6.ok {
+			r := v4
+			if !r.ok {
+				r = v6
+			}
+			d.isp, d.region = r.isp, r.region
+		}
+		if d.isp == "" {
+			d.isp = "未知"
+		}
+	}
+	// 双源皆败：保留旧 IP 字段（若有），只更新时间戳，等下次触发重试
+}
+
+// stDetectOne 单栈探测：v4=true 强制 IPv4 出口，false 强制 IPv6。
+// 依次尝试 ipip.net（主源，结构化 ISP/归属地）→ ip-api.com（备源，字段直给）。
+func stDetectOne(v4 bool) (res struct {
+	ip, isp, region string
+	ok              bool
+}) {
+	network := "tcp6"
+	if v4 {
+		network = "tcp4"
+	}
+	// 自定义 Transport：DialContext 固定 network，强制该栈出口
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 6 * time.Second}).DialContext(ctx, network, addr)
+		},
+	}
+	client := &http.Client{Timeout: 8 * time.Second, Transport: tr}
+
 	// 主源：ipip.net（location 数组：国家/省/市/区县/ISP）
 	if req, err := http.NewRequest("GET", "https://myip.ipip.net/json", nil); err == nil {
 		if resp, err := client.Do(req); err == nil {
@@ -1257,22 +1496,20 @@ func (d *stISP) detect() {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 			if json.Unmarshal(b, &j) == nil && j.Ret == "ok" && j.Data.IP != "" {
-				isp, region := "", ""
+				res.ip = j.Data.IP
 				loc := j.Data.Location
 				if len(loc) >= 3 {
-					region = strings.TrimSpace(loc[1]) + " " + strings.TrimSpace(loc[2])
+					res.region = strings.TrimSpace(loc[1]) + " " + strings.TrimSpace(loc[2])
 				} else if len(loc) >= 2 {
-					region = strings.TrimSpace(loc[1])
+					res.region = strings.TrimSpace(loc[1])
 				}
 				if len(loc) >= 5 {
-					isp = strings.TrimSpace(loc[4])
+					res.isp = strings.TrimSpace(loc[4])
 				}
-				if isp == "" {
-					isp = "未知"
+				if res.isp == "" {
+					res.isp = "未知"
 				}
-				d.mu.Lock()
-				d.ip, d.isp, d.region, d.checkedAt = j.Data.IP, isp, region, time.Now()
-				d.mu.Unlock()
+				res.ok = true
 				return
 			}
 		}
@@ -1289,17 +1526,16 @@ func (d *stISP) detect() {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		if json.Unmarshal(b, &j) == nil && j.Status == "success" && j.Query != "" {
-			isp := strings.TrimSpace(j.ISP)
-			if isp == "" {
-				isp = "未知"
+			res.ip = j.Query
+			res.isp = strings.TrimSpace(j.ISP)
+			if res.isp == "" {
+				res.isp = "未知"
 			}
-			d.mu.Lock()
-			d.ip, d.isp, d.region, d.checkedAt = j.Query, isp, strings.TrimSpace(j.RegionName)+" "+strings.TrimSpace(j.City), time.Now()
-			d.mu.Unlock()
-			return
+			res.region = strings.TrimSpace(j.RegionName) + " " + strings.TrimSpace(j.City)
+			res.ok = true
 		}
 	}
-	// 双源皆败：保留旧结果（若有），只更新时间戳外不覆盖，等下次触发重试
+	return
 }
 
 // ispNormalize 归一 ISP 名到节点分组口径（电信/联通/移动/广电），

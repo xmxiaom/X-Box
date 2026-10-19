@@ -563,7 +563,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       <!-- 终端 -->
       <div class="page" id="page-terminal">
         <div class="page-head"><h2>终端</h2><span class="sub" id="term-sub">命令执行控制台（保持 cd 会话目录；以 root 运行；单命令上限 60s，长任务用 nohup 任务 >/tmp/x.log 2>&1 &amp; 转后台）</span><div class="spacer"></div><button class="btn btn-primary btn-sm" id="term-btn-conn" onclick="termConnect()">连接</button><button class="btn btn-outline btn-sm" id="term-btn-disc" onclick="termDisconnect()" disabled>断开</button><button class="btn btn-outline btn-sm" onclick="termClear()">清屏</button></div>
-        <div class="term-warn">⚠️ 此终端以 <b>root</b> 身份在 NAS 上执行任意命令，仅经飞牛账号可访问。请谨慎操作。</div>
         <div class="term-out" id="term-out"><span class="t-sys">未连接 · 点击「连接」开始终端会话</span></div>
         <div class="term-input-row">
           <span class="term-prompt" id="term-prompt"><span class="tp-user">root@xbox</span><span class="tp-path">:~</span><span class="tp-sig">$</span></span>
@@ -995,9 +994,14 @@ async function stLoadISP(refresh){
         '<button class="btn btn-outline btn-sm" onclick="stLoadISP(true)">重新识别</button>';
       return;
     }
+    // 双栈展示：v4/v6 都有则并列；只有一栈则只显示该栈；全无回退主 ip 字段
+    let ipParts = [];
+    if(j.ip4) ipParts.push('<span>IPv4 ' + esc(j.ip4) + '</span>');
+    if(j.ip6) ipParts.push('<span>IPv6 ' + esc(j.ip6) + '</span>');
+    if(!ipParts.length) ipParts.push('<span>IP ' + esc(j.ip || '—') + '</span>');
     box.innerHTML =
       '<span class="tag">' + esc(j.isp) + '</span>' +
-      '<span>IP ' + esc(j.ip || '—') + '</span>' +
+      ipParts.join('') +
       (j.region ? '<span>' + esc(j.region) + '</span>' : '') +
       '<span class="meta">识别于 ' + esc(j.checked_at || '—') + '</span>' +
       '<button class="btn btn-outline btn-sm" onclick="stLoadISP(true)">重新识别</button>';
@@ -1024,7 +1028,7 @@ function stRenderNodes(meta){
     '<button class="btn btn-outline btn-sm" onclick="stAddNode()">+ 添加节点</button>' +
   '</div><div class="st-node-grid">';
   html += `<div class="st-node ${stSel===''?'sel':''}" onclick="stPick('')">` +
-    '<span class="nm">⚡ 自动竞速</span><span class="src">全节点探活选最快</span></div>';
+    '<span class="nm">⚡ 自动竞速</span><span class="src">外网节点探活选最快</span></div>';
   stNodes.forEach(n => {
     const dead = n.alive === false;
     const gp = n.group ? `<span class="gp" style="${stGpColor[n.group]?'color:'+stGpColor[n.group]+';':''}">${esc(n.group)}</span>` : '';
@@ -1044,11 +1048,9 @@ function stPick(id){
   if(stSel === id) return;
   stSel = id;
   stRenderNodes();
-  if(id) toast('已选节点，点「开始测速」生效', 'ok');
 }
 async function stRefreshNodes(){
   try{
-    toast('正在拉取在线节点…', 'ok');
     await apiRetry('/api/speedtest/nodes/refresh', {method:'POST'});
     // 后端异步拉取：立即返回的是「当前列表 + fetching=true」，必须轮询 /api/speedtest/nodes
     // 直到 fetching=false 再渲染最终结果。之前直接用响应覆盖 stNodes，会把预置节点清空。
@@ -1061,10 +1063,8 @@ async function stRefreshNodes(){
     }
     stNodes = (last && last.nodes) ? last.nodes : stNodes; // 轮询全失败则保留原列表
     stRenderNodes(last);
-    if(last && !last.fetching){
-      toast(last.fetch_err ? last.fetch_err : '在线节点已更新（' + stNodes.filter(n=>n.source==='remote').length + ' 个在线候选）', last.fetch_err ? 'err' : 'ok');
-    }else{
-      toast('上游拉取超时，稍后列表会自动更新', 'err');
+    if(last && !last.fetching && last.fetch_err){
+      toast(last.fetch_err, 'err'); // 仅失败时提示；成功由列表刷新本身呈现，不再弹 toast
     }
   }catch(e){ toast(e.message, 'err'); }
 }
@@ -1089,7 +1089,6 @@ function stAddNode(){
           ping: document.getElementById('stn-ping').value.trim()})});
       stNodes = j.nodes || [];
       stRenderNodes(j);
-      toast('节点已添加', 'ok');
     }catch(e){ toast(e.message, 'err'); return false; }
     return true;
   }, '添加');
@@ -1102,7 +1101,6 @@ async function stDelNode(id, name){
       if(stSel === id) stSel = '';
       stNodes = j.nodes || [];
       stRenderNodes(j);
-      toast('已删除', 'ok');
     }catch(e){ toast(e.message, 'err'); }
   });
 }
@@ -1178,17 +1176,16 @@ async function stStart(){
     const body = stSel ? JSON.stringify({node_id: stSel}) : '{}';
     await apiRetry('/api/speedtest/start', {method:'POST', headers:{'Content-Type':'application/json'}, body});
     stErrToasted = false;   // 新一轮测速：失败 toast 重新允许弹出
-    toast(stSel ? '开始测速（指定节点）' : '开始测速（自动竞速）', 'ok');
   }
   catch(e){ toast(e.message, 'err'); }
 }
 async function stStop(){
-  try{ await apiRetry('/api/speedtest/stop', {method:'POST'}); toast('已中止','ok'); }
+  try{ await apiRetry('/api/speedtest/stop', {method:'POST'}); }
   catch(e){ toast(e.message, 'err'); }
 }
 async function stClear(){
   confirmDialog('清空测速记录','确认清空全部历史记录？', async ()=>{
-    try{ await apiRetry('/api/speedtest/clear', {method:'POST'}); toast('已清空','ok'); }
+    try{ await apiRetry('/api/speedtest/clear', {method:'POST'}); }
     catch(e){ toast(e.message, 'err'); }
   });
 }
@@ -1514,8 +1511,8 @@ function renderPorts(){
     const st = p.state==='LISTEN'?'badge-green':(p.state==='ESTABLISHED'?'badge-blue':'badge-gray');
     return `<tr>
       <td><span class="badge badge-purple">${p.proto.toUpperCase()}</span></td>
-      <td class="mono" style="font-weight:600">${esc(p.local)}</td>
-      <td class="mono" style="color:var(--text3)">${esc(p.remote||'—')}</td>
+      <td class="mono" style="font-weight:600;word-break:break-all;min-width:110px;max-width:220px">${esc(p.local)}</td>
+      <td class="mono" style="color:var(--text3);word-break:break-all;min-width:110px;max-width:220px">${esc(p.remote||'—')}</td>
       <td><span class="badge ${st}"><span class="dot"></span>${esc(p.state)}</span></td>
       <td>${esc(p.process)}${p.pid?` <span style="color:var(--text3);font-size:12px">(${p.pid})</span>`:''}</td>
       <td>${esc(p.user)}</td>
@@ -1604,7 +1601,7 @@ function renderUpdate(u){
     latest.style.color = '';
     latest.style.fontWeight = '';
     status.innerHTML = '<span class="badge badge-green">已是最新版本</span>';
-    body.innerHTML = `<div class="empty" style="padding:18px 0">${esc(u.note||'当前已是最新版本')}</div>`;
+    body.innerHTML = ''; // 版本状态行已有绿 badge，下方不再重复显示灰色文字
   }
 }
 async function downloadUpdate(url, name){
@@ -1909,8 +1906,8 @@ function renderDDNSRecords(){
     return `<tr><td class="mono" style="font-weight:600">${esc(r.domain)}</td>
       <td><span class="badge badge-blue">${esc(r.recordType||'A')}</span></td>
       <td>${esc(IPSOURCE_LABEL[r.ipSource]||r.ipSource)}${r.ipSourceArg?` <span class="mono" style="font-size:11px;color:var(--text3)">(${esc(r.ipSourceArg)})</span>`:''}</td>
-      <td class="mono">${esc(r.lastIP||'—')}</td>
-      <td><span class="badge ${st[0]}"><span class="dot"></span>${st[1]}</span>${r.lastMessage?`<div style="font-size:11px;color:var(--text3);margin-top:2px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.lastMessage)}">${esc(r.lastMessage)}</div>`:''}</td>
+      <td class="mono" style="word-break:break-all">${esc(r.lastIP||'—')}</td>
+      <td><span class="badge ${st[0]}"><span class="dot"></span>${st[1]}</span>${r.lastMessage?`<div style="font-size:11px;color:var(--text3);margin-top:2px;word-break:break-all" title="${esc(r.lastMessage)}">${esc(r.lastMessage)}</div>`:''}</td>
       <td><button class="btn btn-text btn-sm" onclick="syncOneDDNS(${r.id})">同步</button>
           <button class="btn btn-text btn-sm" onclick="openRecordForm(${r.id})">编辑</button>
           <button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="delRecord(${r.id})">删除</button></td></tr>`;
@@ -2533,8 +2530,6 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
 .browser-snap .sx:hover{color:var(--danger)}
 .browser-snap pre{margin:0;padding:8px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Consolas,monospace;color:var(--text2)}
 .copy-ta{display:block;width:100%;height:220px;border:none;border-top:1px solid var(--border);padding:8px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--text2);background:var(--card)}
-.term-warn{background:var(--warning-light);color:var(--warning);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px;flex-shrink:0}
-.term-warn b{color:var(--danger)}
 /* 终端外观：输出区与命令栏同底色拼成一块终端（上圆下直/下圆上直），深色专属滚动条 */
 .term-out{flex:1;min-height:0;overflow-y:auto;background:#0D1117;color:#D6DEE8;border:1px solid #232A33;border-bottom:none;border-radius:var(--radius) var(--radius) 0 0;padding:14px 16px 10px;font-family:ui-monospace,'Cascadia Mono','JetBrains Mono',Consolas,Menlo,'Courier New',monospace;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-all;letter-spacing:.2px;scrollbar-width:thin;scrollbar-color:#3A424E transparent}
 .term-out::-webkit-scrollbar{width:8px}

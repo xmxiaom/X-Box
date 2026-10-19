@@ -242,7 +242,7 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 	// systemd 服务
 	services = listSystemdServices()
 
-	// fnOS 应用（@appdata 目录 + 是否有进程在跑）
+	// fnOS 应用（程序/数据目录合并 + 进程判活）
 	fnosApps = listFnosApps()
 
 	// Docker（存在才展示）
@@ -288,7 +288,7 @@ func listSystemdServices() []ServiceEntry {
 	return out
 }
 
-// FnosApp fnOS 应用：@appdata 下的目录 + 是否有进程在运行
+// FnosApp fnOS 应用：程序/数据目录 + 是否有进程在运行
 type FnosApp struct {
 	Name    string `json:"name"`
 	Path    string `json:"path"`
@@ -296,36 +296,122 @@ type FnosApp struct {
 	PIDs    []int  `json:"pids"`
 }
 
+// listFnosApps 汇总 fnOS 应用清单与运行状态。
+//
+// fnOS 的 fpk 应用分两处存放，二者无包含关系：
+//   - 程序目录：/usr/local/apps/<名>/（/var/apps/<名> 多为其符号链接）
+//   - 数据目录：/vol*/@appdata/<名>/ 或 /usr/local/apps/@appdata/<名>/
+//
+// 旧实现只扫数据目录、且只按「cmdline 含 /@appdata/<名>/」判活，
+// 导致装在程序目录的应用整条缺失、运行中的应用被误判为未运行。
+// 现合并两类目录建清单，判活改为三重匹配：
+// cmdline 命中路径别名 / cwd 落在应用目录下 / exe 落在应用目录下。
 func listFnosApps() []FnosApp {
-	appsDirs, _ := filepath.Glob("/vol*/@appdata/*")
-	var allProcs []struct {
-		pid     int
-		cmdline string
+	type appInfo struct {
+		name    string   // 首次出现的原始名
+		progDir string   // 程序目录
+		dataDir string   // 数据目录
+		markers []string // 判活用路径前缀（均带尾斜杠）
+		running bool
+		pids    []int
 	}
-	pids, _ := filepath.Glob("/proc/[0-9]*")
-	for _, pdir := range pids {
-		pid, _ := strconv.Atoi(filepath.Base(pdir))
-		if b, err := os.ReadFile(filepath.Join(pdir, "cmdline")); err == nil {
-			allProcs = append(allProcs, struct {
-				pid     int
-				cmdline string
-			}{pid, strings.ReplaceAll(string(b), "\x00", " ")})
+	apps := map[string]*appInfo{}
+	get := func(name string) *appInfo {
+		k := strings.ToLower(name)
+		a, ok := apps[k]
+		if !ok {
+			a = &appInfo{name: name}
+			apps[k] = a
+		}
+		return a
+	}
+	add := func(dir string, prog bool) {
+		name := filepath.Base(dir)
+		if name == "" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "@") {
+			return // @appdata 等非应用目录
+		}
+		a := get(name)
+		if prog {
+			if a.progDir == "" {
+				a.progDir = dir
+			}
+		} else if a.dataDir == "" {
+			a.dataDir = dir
 		}
 	}
 
-	var out []FnosApp
-	for _, dir := range appsDirs {
-		name := filepath.Base(dir)
-		if name == "" || strings.HasPrefix(name, ".") {
-			continue
+	// 程序目录（/usr/local/apps 优先；/var/apps 符号链接按名去重）
+	if dirs, err := filepath.Glob("/usr/local/apps/*"); err == nil {
+		for _, d := range dirs {
+			add(d, true)
 		}
-		app := FnosApp{Name: name, Path: dir}
-		marker := "/@appdata/" + name + "/"
-		for _, p := range allProcs {
-			if strings.Contains(p.cmdline, marker) {
-				app.Running = true
-				app.PIDs = append(app.PIDs, p.pid)
+	}
+	if dirs, err := filepath.Glob("/var/apps/*"); err == nil {
+		for _, d := range dirs {
+			add(d, true)
+		}
+	}
+	// 数据目录
+	if dirs, err := filepath.Glob("/vol*/@appdata/*"); err == nil {
+		for _, d := range dirs {
+			add(d, false)
+		}
+	}
+	if dirs, err := filepath.Glob("/usr/local/apps/@appdata/*"); err == nil {
+		for _, d := range dirs {
+			add(d, false)
+		}
+	}
+
+	// 每个应用的判活标记：程序目录 + /var/apps 别名 + 数据目录
+	for _, a := range apps {
+		if a.progDir != "" {
+			a.markers = append(a.markers, a.progDir+"/", "/var/apps/"+a.name+"/")
+		}
+		if a.dataDir != "" {
+			a.markers = append(a.markers, a.dataDir+"/")
+		}
+	}
+
+	// 扫描 /proc，按标记判活
+	pids, _ := filepath.Glob("/proc/[0-9]*")
+	for _, pdir := range pids {
+		pid, _ := strconv.Atoi(filepath.Base(pdir))
+		cmdline := ""
+		if b, err := os.ReadFile(filepath.Join(pdir, "cmdline")); err == nil {
+			cmdline = strings.ReplaceAll(string(b), "\x00", " ")
+		}
+		cwd, _ := os.Readlink(filepath.Join(pdir, "cwd"))
+		exe, _ := os.Readlink(filepath.Join(pdir, "exe"))
+		for _, a := range apps {
+			hit := false
+			for _, m := range a.markers {
+				dir := strings.TrimSuffix(m, "/")
+				if strings.Contains(cmdline, m) ||
+					(cwd != "" && (cwd == dir || strings.HasPrefix(cwd, m))) ||
+					(exe != "" && strings.HasPrefix(exe, m)) {
+					hit = true
+					break
+				}
 			}
+			if hit {
+				a.running = true
+				a.pids = append(a.pids, pid)
+			}
+		}
+	}
+
+	out := make([]FnosApp, 0, len(apps))
+	for _, a := range apps {
+		app := FnosApp{Name: a.name, Running: a.running}
+		if a.dataDir != "" {
+			app.Path = a.dataDir // 有数据目录时优先展示数据目录（沿用旧展示）
+		} else {
+			app.Path = a.progDir
+		}
+		app.PIDs = a.pids
+		if len(app.PIDs) > 1 {
+			sort.Ints(app.PIDs)
 		}
 		out = append(out, app)
 	}
