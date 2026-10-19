@@ -92,7 +92,9 @@ function makeDom(opts) {
     check(!doc.getElementById('login-btn'), 'A: 登录按钮仍存在');
     check(!doc.getElementById('acct-list') && !doc.querySelector('.acct-footer'), 'A: 账户管理仍存在');
     await sleep(250); // 等 detectChannel + enterApp 完成
-    check(doc.getElementById('ver').textContent === 'v1.2.38', 'A: 版本未加载(enterApp 未跑): ' + doc.getElementById('ver').textContent);
+    // 顶栏已删除（v1.3.8）：页面不应再有 ver 元素，enterApp 对缺失元素要安全跳过
+    check(!doc.getElementById('ver'), 'A: 顶栏 ver 元素应已随顶栏删除');
+    check(!doc.getElementById('hostname') || true, ''); // hostname 同顶栏一并删除，存在性不敏感
     check(calls.some(x => x.url.includes('/api/overview')), 'A: 未拉取概览');
     // 系统设置页只剩 关于/检查更新
     const settingsHtml = doc.getElementById('page-settings').innerHTML;

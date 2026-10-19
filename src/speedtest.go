@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -81,16 +82,92 @@ func hostFromServer(server string) string {
 
 // 内置预置节点（2026-10 实测可用；作为上游拉取失败时的兜底）。
 // neu/shu 曾在列但实测已下线，已移除；ustc/sjtu 按来源 IP 过滤（家宽 500/302）不入列。
+// local：本机回环节点（NAS 内部自测）——打向启动时随机端口的专用回环监听，
+// 量的是 NAS 本机协议栈基线（不含外网瓶颈），用于与外网测速对比判断宽带是否跑满。
+// Server 在 initSpeedtest 里由 startLocalSpeedtest 填实际端口。
 var stBuiltin = []stNode{
+	{ID: "local", Name: "本机基线（回环）", Group: "本地", Down: "/speedtest-local/garbage", Up: "/speedtest-local/upload", Ping: "/speedtest-local/ping", Source: "builtin"},
 	{ID: "nuaa", Name: "南京航空航天大学", Group: "教育网", Server: "http://speed.nuaa.edu.cn", Down: "/backend/garbage.php", Up: "/backend/empty.php", Ping: "/backend/empty.php", Source: "builtin"},
 	{ID: "seu", Name: "东南大学", Group: "教育网", Server: "https://xnfz.seu.edu.cn", Down: "/speed/garbage.php", Up: "/speed/empty.php", Ping: "/speed/empty.php", Source: "builtin"},
 }
 
-// 上游 LibreSpeed 节点清单（i-abc/Speedtest 维护，三源互备：GitHub 原站 + 两个镜像）
-var stRemoteSources = []string{
-	"https://raw.githubusercontent.com/i-abc/speedtest/node/china-education.json",
-	"https://asset.bash.icu/https://raw.githubusercontent.com/i-abc/speedtest/node/china-education.json",
-	"https://cdn.jsdelivr.net/gh/i-abc/Speedtest@node/china-education.json",
+// stLocalAddr 专用回环监听地址（127.0.0.1:随机端口），startLocalSpeedtest 赋值。
+var stLocalAddr string
+
+// startLocalSpeedtest 启动本机基线测速专用监听（仅回环，随机端口，进程内私有）。
+// 生产面板只走 fnOS 网关 unix socket 不监听 TCP，回环节点必须有自己的 TCP 入口。
+func startLocalSpeedtest() {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Printf("本机基线测速监听启动失败（本机基线节点不可用）: %v", err)
+		return
+	}
+	stLocalAddr = ln.Addr().String()
+	go func() {
+		if err := http.Serve(ln, http.HandlerFunc(handleSpeedtestLocal)); err != nil {
+			log.Printf("本机基线测速服务退出: %v", err)
+		}
+	}()
+	for i := range stBuiltin {
+		if stBuiltin[i].ID == "local" {
+			stBuiltin[i].Server = "http://" + stLocalAddr
+		}
+	}
+}
+
+// handleSpeedtestLocal 本机回环测速端点（监听本身只绑 127.0.0.1，天然不对外）。
+// /speedtest-local/ping     — 延迟探测（固定小文本）
+// /speedtest-local/garbage  — 无限下载流（读侧按测速窗口自行停止）
+// /speedtest-local/upload   — 上传接收（读丢弃）
+func handleSpeedtestLocal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	switch r.URL.Path {
+	case "/speedtest-local/ping":
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "pong")
+	case "/speedtest-local/garbage":
+		// 无限流：stDownload 的 12s 超时窗口到期后 phaseCtx 取消，读侧断开，本循环随之退出
+		w.Header().Set("Content-Type", "application/octet-stream")
+		block := make([]byte, 256*1024)
+		for i := range block {
+			block[i] = byte(i % 251)
+		}
+		flusher, _ := w.(http.Flusher)
+		for r.Context().Err() == nil {
+			if _, err := w.Write(block); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	case "/speedtest-local/upload":
+		_, _ = io.Copy(io.Discard, r.Body)
+	default:
+		fail(w, 404, "未知端点")
+	}
+}
+
+// 上游清单镜像模板（i-abc/Speedtest node 分支维护，三源互备：GitHub 原站 + 两个镜像）
+var stMirrors = []string{
+	"https://raw.githubusercontent.com/i-abc/speedtest/node/%s",
+	"https://asset.bash.icu/https://raw.githubusercontent.com/i-abc/speedtest/node/%s",
+	"https://cdn.jsdelivr.net/gh/i-abc/Speedtest@node/%s",
+}
+
+// 上游清单定义：LibreSpeed JSON（教育网）+ Ookla speedtest-cli 清单（运营商线路）。
+// 运营商 txt 格式："speedtest-cli,电信 天津           ,-o tjrate.tjtele.com"，
+// -o 后为 Ookla 服务器域名（默认端口 8080，标准路径 /speedtest/*）。
+var stListSources = []struct {
+	File  string // node 分支文件名
+	Group string // 运营商/地区分组
+	Kind  string // librespeed | ookla
+}{
+	{"china-education.json", "教育网", "librespeed"},
+	{"china-telecom-m-thread-v4.txt", "电信", "ookla"},
+	{"china-unicom-m-thread-v4.txt", "联通", "ookla"},
+	{"china-mobile-m-thread-v4.txt", "移动", "ookla"},
+	{"china-other-m-thread-v4.txt", "广电", "ookla"},
 }
 
 // LibreSpeed JSON 单条格式（librespeed/speedtest servers.json 标准）
@@ -162,6 +239,7 @@ func initSpeedtest(dataDir string) {
 	stN.cachePath = filepath.Join(dataDir, "speedtest_remote.json")
 	stN.loadCustom()
 	stN.loadRemoteCache()
+	startLocalSpeedtest() // 本机基线回环节点：起专用回环监听并回填 local 节点 Server
 	// 后台异步刷新上游清单（不阻塞启动）
 	go stN.refreshRemote(false)
 }
@@ -223,7 +301,7 @@ func (s *stNodesState) isFetching() bool {
 	return s.fetching
 }
 
-// refreshRemote 从上游拉取 LibreSpeed 节点清单（双源依次尝试）。
+// refreshRemote 从上游拉取节点清单（教育网 JSON + 三网/广电 Ookla txt，逐清单三镜像容错）。
 // force=true 由用户手动触发；false 时缓存未满 24h 直接跳过。
 func (s *stNodesState) refreshRemote(force bool) {
 	s.mu.Lock()
@@ -241,45 +319,46 @@ func (s *stNodesState) refreshRemote(force bool) {
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	var got []stNode
-	var lastErr error
-	for _, src := range stRemoteSources {
-		resp, err := client.Get(src)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		resp.Body.Close()
-		if err != nil || resp.StatusCode != 200 {
-			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-			continue
-		}
-		var list []lsServer
-		if err := json.Unmarshal(body, &list); err != nil {
-			lastErr = err
-			continue
-		}
-		for _, it := range list {
-			name := strings.TrimSpace(it.Name)
-			server := strings.TrimSpace(it.Server)
-			// 过滤：v6 节点（家用宽带基本无 v6 出口）、空地址
-			if server == "" || it.DlURL == "" || strings.Contains(name, "v6") {
+	var errs []string
+	for _, ls := range stListSources {
+		// 单清单：三镜像依次尝试，拿到非空结果即止
+		var body []byte
+		var lastErr error
+		for _, tpl := range stMirrors {
+			resp, err := client.Get(fmt.Sprintf(tpl, ls.File))
+			if err != nil {
+				lastErr = err
 				continue
 			}
-			got = append(got, stNode{
-				ID:     "r-" + fmt.Sprintf("%x", fnv32(server)),
-				Name:   name,
-				Group:  "上游",
-				Server: server,
-				Down:   it.DlURL,
-				Up:     it.UlURL,
-				Ping:   it.PingURL,
-				Source: "remote",
-			})
-		}
-		if len(got) > 0 {
+			b, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			resp.Body.Close()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if resp.StatusCode != 200 {
+				lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+				continue
+			}
+			body = b
 			break
 		}
+		if len(body) == 0 {
+			errs = append(errs, ls.File+"："+lastErr.Error())
+			continue
+		}
+		// 解析为节点（按清单类型）
+		var nodes []stNode
+		if ls.Kind == "librespeed" {
+			nodes = stParseLibrespeed(body, ls.Group)
+		} else {
+			nodes = stParseOoklaTxt(body, ls.Group)
+		}
+		if len(nodes) == 0 {
+			errs = append(errs, ls.File+"：无有效节点")
+			continue
+		}
+		got = append(got, nodes...)
 	}
 
 	s.mu.Lock()
@@ -289,9 +368,90 @@ func (s *stNodesState) refreshRemote(force bool) {
 		s.remote = got
 		s.remoteAt = time.Now()
 		s.saveRemoteLocked()
-	} else if lastErr != nil {
-		s.fetchErr = "上游清单拉取失败：" + lastErr.Error()
+		if len(errs) > 0 {
+			s.fetchErr = fmt.Sprintf("部分清单拉取失败（%d/%d 成功）：%s", len(stListSources)-len(errs), len(stListSources), strings.Join(errs, "; "))
+			if len(s.remote) > 0 {
+				// 有成功清单时失败清单只提示，不算整体错误——截断避免 toast 过长
+				if len(s.fetchErr) > 120 {
+					s.fetchErr = s.fetchErr[:120] + "…"
+				}
+			} 
+		}
+	} else {
+		s.fetchErr = "上游清单拉取失败：" + strings.Join(errs, "; ")
 	}
+}
+
+// stParseLibrespeed 解析 LibreSpeed servers.json 标准格式（教育网清单）。
+func stParseLibrespeed(body []byte, group string) []stNode {
+	var list []lsServer
+	if json.Unmarshal(body, &list) != nil {
+		return nil
+	}
+	var out []stNode
+	for _, it := range list {
+		name := strings.TrimSpace(it.Name)
+		server := strings.TrimSpace(it.Server)
+		// 过滤：v6 节点（家用宽带基本无 v6 出口）、空地址
+		if server == "" || it.DlURL == "" || strings.Contains(name, "v6") {
+			continue
+		}
+		out = append(out, stNode{
+			ID:     "r-" + fmt.Sprintf("%x", fnv32(server)),
+			Name:   name,
+			Group:  group,
+			Server: server,
+			Down:   it.DlURL,
+			Up:     it.UlURL,
+			Ping:   it.PingURL,
+			Source: "remote",
+		})
+	}
+	return out
+}
+
+// stParseOoklaTxt 解析 i-abc speedtest-cli 清单行："speedtest-cli,电信 天津 ,-o 域名"。
+// Ookla 服务器默认端口 8080，标准路径 /speedtest/backend/garbage.php（下载）、
+// /speedtest/upload.php（上传）、/speedtest/latency.txt（延迟）。
+func stParseOoklaTxt(body []byte, group string) []stNode {
+	var out []stNode
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		parts := strings.Split(line, ",")
+		if len(parts) < 3 || strings.TrimSpace(parts[0]) != "speedtest-cli" {
+			continue
+		}
+		name := strings.Join(parts[1:len(parts)-1], ",") // 名称本身可能含逗号，取中间段
+		name = strings.TrimSpace(name)
+		opt := strings.TrimSpace(parts[len(parts)-1])
+		if !strings.HasPrefix(opt, "-o ") {
+			continue
+		}
+		host := strings.TrimSpace(strings.TrimPrefix(opt, "-o "))
+		if host == "" || name == "" {
+			continue
+		}
+		// 域名可能自带端口；补默认 Ookla 端口 8080
+		if !strings.Contains(host, ":") {
+			host += ":8080"
+		}
+		server := "http://" + host
+		// 过滤 v6 专项节点
+		if strings.Contains(name, "v6") {
+			continue
+		}
+		out = append(out, stNode{
+			ID:     "isp-" + fmt.Sprintf("%x", fnv32(server)),
+			Name:   name,
+			Group:  group,
+			Server: server,
+			Down:   "/speedtest/backend/garbage.php",
+			Up:     "/speedtest/upload.php",
+			Ping:   "/speedtest/latency.txt",
+			Source: "remote",
+		})
+	}
+	return out
 }
 
 // all 返回合并后的节点列表：custom > remote > builtin（自定义排最前），同 Server 去重。
@@ -573,6 +733,9 @@ func (s *stState) run(ctx context.Context, wantID string) {
 	}
 
 	// ---- 阶段 1：并发探活（TCP + HTTP 双校验），选延迟最低的活节点 ----
+	if stIsp.snapshotISP() == "" {
+		go stIsp.detect() // 线路未识别时异步补识别，探活窗口内通常能就绪
+	}
 	probes := make([]stProbe, 0, len(nodes))
 	var pmu sync.Mutex
 	var wg sync.WaitGroup
@@ -605,6 +768,17 @@ func (s *stState) run(ctx context.Context, wantID string) {
 	}
 	sort.Slice(probes, func(i, j int) bool { return probes[i].ms < probes[j].ms })
 	best := probes[0]
+	// 同运营商优先竞速：probes 已按延迟升序，取首个与本机 ISP 同组的活节点；
+	// 同组无活节点（或线路未知）则保持全局最优兜底。跨网测速点常屏蔽异网
+	// 访问，强行选延迟低的异网站点会导致下载/上传阶段整体失败。
+	if myISP := ispNormalize(stIsp.snapshotISP()); myISP != "" && myISP != "未知" {
+		for _, p := range probes {
+			if ispNormalize(p.node.Group) == myISP {
+				best = p
+				break
+			}
+		}
+	}
 
 	// 探活结果缓存给节点列表展示
 	stN.rememberAlive(probes, nodes)
@@ -1017,6 +1191,130 @@ func (c *countReader) Read(p []byte) (int, error) {
 	nn, err := c.r.Read(p)
 	*c.n += int64(nn)
 	return nn, err
+}
+
+// ---------- ISP 线路识别 ----------
+
+// stISP 运营商线路识别结果（24h 缓存，手动可强刷）。
+type stISP struct {
+	mu       sync.Mutex
+	ip       string
+	isp      string // 联通/电信/移动/广电/教育网/其他…
+	region   string // 省 市
+	checkedAt time.Time
+	checking bool
+}
+
+var stIsp = &stISP{}
+
+// snapshotISP 并发安全读取当前识别到的运营商名（测速竞速同 ISP 优先判断用）。
+func (d *stISP) snapshotISP() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.isp
+}
+
+// handleSpeedtestISP GET /api/speedtest/isp — 线路识别（带缓存；?refresh=1 强刷）。
+func handleSpeedtestISP(w http.ResponseWriter, r *http.Request) {
+	refresh := r.URL.Query().Get("refresh") == "1"
+	stIsp.mu.Lock()
+	if refresh || stIsp.isp == "" || time.Since(stIsp.checkedAt) > 24*time.Hour {
+		if !stIsp.checking {
+			stIsp.checking = true
+			stIsp.mu.Unlock()
+			stIsp.detect()
+			stIsp.mu.Lock()
+			stIsp.checking = false
+		}
+	}
+	stIsp.mu.Unlock()
+	stIsp.mu.Lock()
+	defer stIsp.mu.Unlock()
+	ok(w, map[string]any{
+		"ip": stIsp.ip, "isp": stIsp.isp, "region": stIsp.region,
+		"checked_at": func() string {
+			if stIsp.checkedAt.IsZero() {
+				return ""
+			}
+			return stIsp.checkedAt.Format("2006-01-02 15:04:05")
+		}(),
+	})
+}
+
+// detect 依次尝试多源识别（ipip.net 主源结构化最好，ip-api.com 备源字段直给 ISP）。
+func (d *stISP) detect() {
+	client := &http.Client{Timeout: 6 * time.Second}
+	// 主源：ipip.net（location 数组：国家/省/市/区县/ISP）
+	if req, err := http.NewRequest("GET", "https://myip.ipip.net/json", nil); err == nil {
+		if resp, err := client.Do(req); err == nil {
+			var j struct {
+				Ret string `json:"ret"`
+				Data struct {
+					IP       string   `json:"ip"`
+					Location []string `json:"location"`
+				} `json:"data"`
+			}
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			resp.Body.Close()
+			if json.Unmarshal(b, &j) == nil && j.Ret == "ok" && j.Data.IP != "" {
+				isp, region := "", ""
+				loc := j.Data.Location
+				if len(loc) >= 3 {
+					region = strings.TrimSpace(loc[1]) + " " + strings.TrimSpace(loc[2])
+				} else if len(loc) >= 2 {
+					region = strings.TrimSpace(loc[1])
+				}
+				if len(loc) >= 5 {
+					isp = strings.TrimSpace(loc[4])
+				}
+				if isp == "" {
+					isp = "未知"
+				}
+				d.mu.Lock()
+				d.ip, d.isp, d.region, d.checkedAt = j.Data.IP, isp, region, time.Now()
+				d.mu.Unlock()
+				return
+			}
+		}
+	}
+	// 备源：ip-api.com（ISP 字段直给；国内直连可用，免费限频 45 req/min）
+	if resp, err := client.Get("http://ip-api.com/json/?lang=zh-CN&fields=status,regionName,city,isp,query"); err == nil {
+		var j struct {
+			Status     string `json:"status"`
+			RegionName string `json:"regionName"`
+			City       string `json:"city"`
+			ISP        string `json:"isp"`
+			Query      string `json:"query"`
+		}
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		if json.Unmarshal(b, &j) == nil && j.Status == "success" && j.Query != "" {
+			isp := strings.TrimSpace(j.ISP)
+			if isp == "" {
+				isp = "未知"
+			}
+			d.mu.Lock()
+			d.ip, d.isp, d.region, d.checkedAt = j.Query, isp, strings.TrimSpace(j.RegionName)+" "+strings.TrimSpace(j.City), time.Now()
+			d.mu.Unlock()
+			return
+		}
+	}
+	// 双源皆败：保留旧结果（若有），只更新时间戳外不覆盖，等下次触发重试
+}
+
+// ispNormalize 归一 ISP 名到节点分组口径（电信/联通/移动/广电），
+// 用于竞速时同运营商节点优先。匹配不上返回原词（教育网等）。
+func ispNormalize(isp string) string {
+	for _, g := range []string{"电信", "联通", "移动", "广电"} {
+		if strings.Contains(isp, g) {
+			return g
+		}
+	}
+	// ipip.net 对教育网常给「教育网/中国教育网」；ip-api 给 CERNET
+	if strings.Contains(isp, "教育") || strings.Contains(strings.ToUpper(isp), "CERNET") {
+		return "教育网"
+	}
+	return isp
 }
 
 // ---------- 工具 ----------

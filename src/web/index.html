@@ -22,13 +22,6 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 
 /* ===== 布局骨架 ===== */
 .app{display:flex;flex-direction:column;height:100vh;height:100dvh} /* 无登录态：面板直接渲染（访问控制由 127.0.0.1 回环绑定 + fnOS 远程访问体系承担） */
-.topbar{height:52px;background:var(--card);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;flex-shrink:0}
-.topbar img.logo{width:28px;height:28px;border-radius:7px;display:block}
-.topbar .title{font-size:16px;font-weight:600}
-.topbar .ver{font-size:12px;color:var(--text3);background:var(--bg);padding:2px 8px;border-radius:10px}
-.topbar .spacer{flex:1}
-.host-badge{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);background:var(--bg);padding:5px 12px;border-radius:6px}
-.host-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--success)}
 .main{display:flex;flex:1;overflow:hidden}
 .sidebar{width:200px;background:var(--card);border-right:1px solid var(--border);padding:12px 8px;flex-shrink:0;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
 .menu-item{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:6px;cursor:pointer;color:var(--text2);transition:.15s;user-select:none;font-size:14px}
@@ -50,6 +43,9 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .sticky-page.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .sticky-head{flex:0 0 auto}
 .sticky-list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
+/* 含表格的列表页：纵向滚动交给 tblwrap，横向滚动条固定在列表区底部、始终可见（电脑端） */
+.sticky-list:has(> .tblwrap){overflow-y:hidden}
+.sticky-list:has(> .tblwrap) .tblwrap{height:100%;overflow-y:auto}
 
 /* ===== 通用组件 ===== */
 .btn{border:none;border-radius:6px;padding:8px 16px;font-size:14px;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
@@ -114,6 +110,12 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
 @media(max-width:1100px){.grid2{grid-template-columns:minmax(0,1fr)}}
 .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;max-width:100%;min-width:0;box-sizing:border-box}
+/* 电脑端表格滚动条增强：横向 12px、thumb 加深、hover 反馈（手机端 14 行媒体查询内恢复全局 8px） */
+.tblwrap::-webkit-scrollbar{width:12px;height:12px}
+.tblwrap::-webkit-scrollbar-track{background:#F7F8FA;border-radius:6px}
+.tblwrap::-webkit-scrollbar-thumb{background:#A8ABB2;border-radius:6px;border:2px solid #F7F8FA}
+.tblwrap::-webkit-scrollbar-thumb:hover{background:#86909C}
+.tblwrap::-webkit-scrollbar-corner{background:#F7F8FA}
 .card h3{font-size:14px;font-weight:600;margin-bottom:14px;display:flex;align-items:center;gap:8px}
 .card h3 .h-action{margin-left:auto}
 .kv{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F7F8FA;font-size:13.5px}
@@ -136,6 +138,11 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 #st-stats .stat-num small{font-size:13px;font-weight:500;color:var(--text2);margin-left:2px}
 #st-stats .stat-sub{font-size:12px;color:var(--text3);min-height:16px}
 .st-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.st-isp{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--text2);padding:8px 12px;background:var(--bg);border-radius:8px;margin-bottom:12px}
+.st-isp .tag{padding:2px 8px;border-radius:4px;font-size:12px;font-weight:600;background:var(--primary-light);color:var(--primary)}
+.st-isp .meta{color:var(--text3)}
+.st-isp button{margin-left:auto}
+.st-node .gp{font-size:11px;font-weight:600;padding:1px 6px;border-radius:4px;margin-left:6px;background:var(--bg);color:var(--text2)}
 .st-progressbar{flex:1;min-width:160px;height:8px;background:var(--bg);border-radius:4px;overflow:hidden}
 .st-progressbar span{display:block;height:100%;width:0;background:var(--primary);border-radius:4px;transition:width .5s}
 .st-progress-lbl{font-size:12.5px;color:var(--text2);white-space:nowrap}
@@ -236,12 +243,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 /* ===== 手机端适配（飞牛 APP 内嵌 / 窄屏） ===== */
 @media(max-width:860px){
   /* 固定页面顶端规则已提为全局（电脑端同样生效），见布局骨架段 */
-  /* 顶栏精简：隐藏版本与主机名，省出宽度 */
-  .topbar{padding:0 12px;gap:8px;height:48px}
-  .topbar .title{font-size:15px}
-  .topbar .ver{display:none}
-  .host-badge{display:none}
-  /* 侧边栏 → 底部标签栏：固定 5 项宽度，多余项左右滑出（后期加菜单不用挤） */
+        /* 侧边栏 → 底部标签栏：固定 5 项宽度，多余项左右滑出（后期加菜单不用挤） */
   .main{flex-direction:column}
   .sidebar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:58px;flex-direction:row;padding:0 4px;border-right:none;border-top:1px solid var(--border);gap:0;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;z-index:60;background:var(--card);padding-bottom:env(safe-area-inset-bottom)}
   .menu-item{flex:0 0 auto;width:calc(20% - 2px);min-width:74px;flex-direction:column;justify-content:center;gap:3px;padding:5px 4px;font-size:10px;border-radius:8px;text-align:center;letter-spacing:-.2px}
@@ -291,19 +293,24 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
   /* 网络信息纵向列表在小屏同样适用 */
   .net-detail{font-size:11.5px}
   .section-title{font-size:14px;margin:18px 0 10px}
+  /* 手机端表格滚动条恢复全局 8px（12px 粗条只给电脑端鼠标滚轮/拖拽用） */
+  .tblwrap::-webkit-scrollbar{width:8px;height:8px}
+  .tblwrap::-webkit-scrollbar-thumb{background:#C9CDD4;border-radius:4px;border:none}
+  .tblwrap::-webkit-scrollbar-track{background:transparent}
+  /* 手机端禁用全部过渡：软键盘弹出时视口 resize，transition 连续重绘让界面显得迟钝；
+     animation 不禁（加载旋转 .spin / toast 提示需要保留） */
+  *{transition:none!important}
+  /* 终端手机端：输出区/命令栏字号行距收紧，命令栏留足触屏高度 */
+  .term-out{font-size:12px;line-height:1.6;padding:10px 12px 8px;letter-spacing:0}
+  .term-input-row{padding:10px 12px;gap:8px}
+  .term-prompt{font-size:12px}
+  .term-input-row input{font-size:16px} /* ≥16px 防 iOS 聚焦自动放大 */
 }
 </style>
 </head>
 <body>
 
 <div class="app" id="app">
-  <div class="topbar">
-    <img class="logo" src="data:image/png;base64,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">
-    <span class="title">X-Box</span>
-    <span class="ver" id="ver"></span>
-    <div class="spacer"></div>
-    <div class="host-badge"><span class="dot"></span><span id="hostname">—</span></div>
-  </div>
   <div class="main">
     <div class="sidebar" id="menu">
       <div class="menu-item active" data-page="overview">
@@ -515,6 +522,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           </div>
         </div>
         <div class="card">
+          <div class="st-isp" id="st-isp">ISP 线路识别中…</div>
           <div class="st-toolbar">
             <button class="btn btn-primary" id="st-btn-start" onclick="stStart()">开始测速</button>
             <button class="btn btn-outline" id="st-btn-stop" onclick="stStop()" disabled>中止</button>
@@ -556,9 +564,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       <div class="page" id="page-terminal">
         <div class="page-head"><h2>终端</h2><span class="sub" id="term-sub">命令执行控制台（保持 cd 会话目录；以 root 运行；单命令上限 60s，长任务用 nohup 任务 >/tmp/x.log 2>&1 &amp; 转后台）</span><div class="spacer"></div><button class="btn btn-primary btn-sm" id="term-btn-conn" onclick="termConnect()">连接</button><button class="btn btn-outline btn-sm" id="term-btn-disc" onclick="termDisconnect()" disabled>断开</button><button class="btn btn-outline btn-sm" onclick="termClear()">清屏</button></div>
         <div class="term-warn">⚠️ 此终端以 <b>root</b> 身份在 NAS 上执行任意命令，仅经飞牛账号可访问。请谨慎操作。</div>
-        <div class="term-out" id="term-out">未连接 · 点击「连接」开始终端会话</div>
+        <div class="term-out" id="term-out"><span class="t-sys">未连接 · 点击「连接」开始终端会话</span></div>
         <div class="term-input-row">
-          <span class="term-prompt" id="term-prompt">root@xbox:~$</span>
+          <span class="term-prompt" id="term-prompt"><span class="tp-user">root@xbox</span><span class="tp-path">:~</span><span class="tp-sig">$</span></span>
           <input type="text" id="term-input" autocomplete="off" spellcheck="false" disabled onkeydown="if(event.key==='Enter') termExec()">
         </div>
       </div>
@@ -577,16 +585,15 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="rows" id="diskfix-rows"><div class="empty">加载中…</div></div>
       </div>
 
-      <!-- 系统设置（检查更新） -->
+      <!-- 系统设置（关于 + 版本/更新） -->
       <div class="page" id="page-settings">
-        <div class="page-head"><h2>系统设置</h2><span class="sub" id="settings-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" id="btn-upd-check" onclick="checkUpdate()">检查更新</button></div>
-        <div class="card" style="margin-bottom:14px">
+        <div class="page-head"><h2>系统设置</h2><span class="sub" id="settings-sub"></span><div class="spacer"></div><button class="btn btn-outline btn-sm" id="btn-upd-check" onclick="checkUpdate()">检查更新</button></div>
+        <div class="card">
           <h3>ℹ️ 关于</h3>
           <div class="kv"><span class="k">当前版本</span><span class="v mono" id="upd-current">—</span></div>
-        </div>
-        <div class="card" id="upd-card" style="display:none">
-          <h3>🔄 检查更新 <span class="h-action"><span class="badge badge-blue" id="upd-latest-badge"></span></span></h3>
-          <div id="upd-body"></div>
+          <div class="kv"><span class="k">最新版本</span><span class="v mono" id="upd-latest">—</span></div>
+          <div class="kv"><span class="k">版本状态</span><span class="v" id="upd-status"><span class="badge badge-gray">待检查</span></span></div>
+          <div id="upd-body" style="margin-top:12px"></div>
         </div>
       </div>
 
@@ -973,8 +980,28 @@ const stPhases = {idle:'待机', ping:'延迟测试', down:'下载测速', up:'�
 const stSrcName = {builtin:'预置', remote:'在线', custom:'自定义'};
 function stInit(){
   if(!stNodesLoaded) stLoadNodes(); // 节点列表只拉一次，之后由增删改操作后局部刷新
+  stLoadISP(); // 线路识别（后端 24h 缓存，重复拉取无成本）
   if(stTimer) return; // 已在轮询（页面切换不清轮询，避免重复起定时器）
   stPoll();
+}
+const stGpColor = {'本地':'var(--success)','电信':'#0f8ee9','联通':'#e04b3f','移动':'#1a9c8e','广电':'#a05fd6','教育网':'var(--warning)'};
+async function stLoadISP(refresh){
+  try{
+    const j = await apiRetry('/api/speedtest/isp' + (refresh ? '?refresh=1' : ''));
+    const box = document.getElementById('st-isp');
+    if(!box) return;
+    if(!j || !j.isp || j.isp === '未知' && !j.ip){
+      box.innerHTML = '<span class="meta">ISP 线路识别失败（出口 IP API 不可达），同运营商优先竞速未启用</span>' +
+        '<button class="btn btn-outline btn-sm" onclick="stLoadISP(true)">重新识别</button>';
+      return;
+    }
+    box.innerHTML =
+      '<span class="tag">' + esc(j.isp) + '</span>' +
+      '<span>IP ' + esc(j.ip || '—') + '</span>' +
+      (j.region ? '<span>' + esc(j.region) + '</span>' : '') +
+      '<span class="meta">识别于 ' + esc(j.checked_at || '—') + '</span>' +
+      '<button class="btn btn-outline btn-sm" onclick="stLoadISP(true)">重新识别</button>';
+  }catch(e){ /* 静默：ISP 条失败不阻塞测速 */ }
 }
 async function stLoadNodes(){
   try{
@@ -1000,9 +1027,10 @@ function stRenderNodes(meta){
     '<span class="nm">⚡ 自动竞速</span><span class="src">全节点探活选最快</span></div>';
   stNodes.forEach(n => {
     const dead = n.alive === false;
+    const gp = n.group ? `<span class="gp" style="${stGpColor[n.group]?'color:'+stGpColor[n.group]+';':''}">${esc(n.group)}</span>` : '';
     html += `<div class="st-node ${stSel===n.id?'sel':''} ${dead?'dead':''}" ` +
       `onclick="stPick('${esc(n.id)}')">` +
-      `<span class="nm">${esc(n.name)}</span>` +
+      `<span class="nm">${esc(n.name)}</span>` + gp +
       (n.source ? `<span class="src">${stSrcName[n.source]||esc(n.source)}</span>` : '') +
       (dead ? '<span class="src" style="color:var(--danger)">不可用</span>' : '') +
       (n.source==='custom' ? `<span class="rm" onclick="event.stopPropagation();stDelNode('${esc(n.id)}','${esc(n.name)}')" title="删除">×</span>` : '') +
@@ -1169,8 +1197,7 @@ async function stClear(){
 async function loadOverview(){
   try{
     const j = await api('/api/overview');
-    document.getElementById('hostname').textContent = j.hostname||'—';
-    document.getElementById('ver').textContent = 'v'+j.version;
+    const _hn = document.getElementById('hostname'); if(_hn) _hn.textContent = j.hostname||'—';
     const memUsed = j.memTotalKB - j.memAvailKB, memPct = j.memTotalKB>0 ? (memUsed/j.memTotalKB*100).toFixed(1) : '0';
     document.getElementById('ov-updated').textContent = '更新于 '+new Date().toLocaleTimeString();
     const _tmp = j.temps||{};
@@ -1213,7 +1240,7 @@ function renderDiskTemps(temps){
   const disks = (temps||{}).disks||[];
   if(!disks.length) return '<div style="font-size:12.5px;color:var(--text3)">硬盘温度：暂无可用传感器（部分硬盘需 smartctl 支持）</div>';
   return '<div style="display:flex;flex-wrap:wrap;gap:8px 16px;font-size:12.5px;color:var(--text2)">' +
-    disks.map(d=>`<span title="${esc(d.note||d.source||'')}">盘 ${esc(d.device)}：<b id="disk-temp-all-${esc(d.device)}" style="color:${d.tempC>0?diskTempColor(d.tempC,d.device):'var(--text3)'}">${d.tempC>0?d.tempC.toFixed(1)+'°C':'—'}</b>${d.mount?`<span style="color:var(--text3)">（${esc(d.mount)}）</span>`:''}</span>`).join('') +
+    disks.map(d=>`<span title="${esc(d.note||d.source||'')}">盘 ${esc(d.device)}：<b id="disk-temp-all-${esc(d.device)}" style="color:${d.tempC>0?diskTempColor(d.tempC,d.device):'var(--text3)'}">${d.tempC>0?d.tempC.toFixed(1)+'°C':'—'}</b>${d.mount&&d.mount!=='/'?`<span style="color:var(--text3)">（${esc(d.mount)}）</span>`:''}</span>`).join('') +
     '</div>';
 }
 function applyTemps(t){
@@ -1538,17 +1565,18 @@ async function setDiskSleep(pci, enable, name){
   }, '确认');
 }
 
-/* ---------- 系统设置（检查更新） ---------- */
+/* ---------- 系统设置（关于：版本信息 + 检查更新） ---------- */
 async function checkUpdate(){
   const btn = document.getElementById('btn-upd-check');
-  const card = document.getElementById('upd-card');
-  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin spin-dark" style="width:12px;height:12px"></span> 检查中'; }
-  card.style.display = 'block';
+  document.getElementById('upd-latest').textContent = '…';
+  document.getElementById('upd-status').innerHTML = '<span class="badge badge-blue">检查中</span>';
   document.getElementById('upd-body').innerHTML = '<div class="empty"><span class="spin spin-dark"></span> 正在连接 GitHub 查询最新版本…</div>';
   try{
     const j = await api('/api/update/check');
     renderUpdate(j.update||{});
   }catch(e){
+    document.getElementById('upd-latest').textContent = '—';
+    document.getElementById('upd-status').innerHTML = '<span class="badge badge-gray">检查失败</span>';
     document.getElementById('upd-body').innerHTML = '<div class="empty" style="color:var(--danger)">检查失败：'+esc(e.message)+'</div>';
   }finally{
     if(btn){ btn.disabled = false; btn.textContent = '检查更新'; }
@@ -1556,13 +1584,15 @@ async function checkUpdate(){
 }
 function renderUpdate(u){
   document.getElementById('upd-current').textContent = u.current||'—';
-  const badge = document.getElementById('upd-latest-badge');
+  const latest = document.getElementById('upd-latest');
+  const status = document.getElementById('upd-status');
   const body = document.getElementById('upd-body');
   if(u.hasUpdate){
-    badge.textContent = '发现新版本 v'+(u.latest||'');
-    badge.className = 'badge badge-green';
+    latest.textContent = 'v'+(u.latest||'—');
+    latest.style.color = 'var(--success)';
+    latest.style.fontWeight = '700';
+    status.innerHTML = '<span class="badge badge-green">有新版本</span>';
     body.innerHTML = `
-      <div class="kv"><span class="k">最新版本</span><span class="v" style="font-weight:700;color:var(--success)">v${esc(u.latest)}</span></div>
       <div class="kv"><span class="k">发布时间</span><span class="v">${esc(u.publishedAt||'—')}</span></div>
       ${u.notes?`<div class="kv"><span class="k">更新说明</span><span class="v" style="text-align:right;max-width:65%;font-weight:400;white-space:pre-wrap">${esc(u.notes.slice(0,600))}</span></div>`:''}
       <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
@@ -1570,9 +1600,11 @@ function renderUpdate(u){
       </div>
       <div class="warn-box" style="margin-top:10px">下载完成后，请到<b>飞牛 应用中心 → 手动安装</b>选择下载的 fpk 文件完成覆盖安装（配置与数据保留）。应用不会自动替换自身运行中的程序，这是为了防止升级中断连。</div>`;
   }else{
-    badge.textContent = u.note || '已是最新版本';
-    badge.className = 'badge badge-gray';
-    body.innerHTML = `<div class="empty" style="padding:18px 0">${esc(u.note||'当前已是最新版本')}${u.latest?`（最新 v${esc(u.latest)}）`:''}</div>`;
+    latest.textContent = u.latest?('v'+u.latest):'—';
+    latest.style.color = '';
+    latest.style.fontWeight = '';
+    status.innerHTML = '<span class="badge badge-green">已是最新版本</span>';
+    body.innerHTML = `<div class="empty" style="padding:18px 0">${esc(u.note||'当前已是最新版本')}</div>`;
   }
 }
 async function downloadUpdate(url, name){
@@ -2371,7 +2403,9 @@ function termSetConn(on){
   document.getElementById('term-btn-disc').disabled = !on;
   document.getElementById('term-input').disabled = !on;
   if(!on){
-    document.getElementById('term-out').textContent = '未连接 · 点击「连接」开始终端会话\n';
+    const o = document.getElementById('term-out');
+    o.textContent = '';
+    termAppend('未连接 · 点击「连接」开始终端会话', 't-sys');
     termCwd = '/root';
     updateTermPrompt();
   }
@@ -2382,9 +2416,10 @@ async function termConnect(){
     termCwd = j.cwd || '/root';
     updateTermPrompt();
     const o = document.getElementById('term-out');
-    o.textContent = '已连接终端 · 当前目录 '+termCwd+'\n';
-    o.scrollTop = o.scrollHeight;
+    o.textContent = '';
+    termAppend('已连接终端 · 当前目录 '+termCwd, 't-sys');
     termSetConn(true);
+    document.getElementById('term-input').focus();
   }catch(e){ toast(e.message, 'err'); }
 }
 async function termDisconnect(){
@@ -2393,20 +2428,40 @@ async function termDisconnect(){
 }
 function updateTermPrompt(){
   const base = termCwd === '/root' ? '~' : termCwd;
-  document.getElementById('term-prompt').textContent = 'root@xbox:'+base+'$';
+  // 三色分段提示符；textContent 保持 root@xbox:~$ 供逻辑/测试读取
+  document.getElementById('term-prompt').innerHTML = '<span class="tp-user">root@xbox</span><span class="tp-path">:'+esc(base)+'</span><span class="tp-sig">$</span>';
 }
-function termAppend(s){
+// 追加一行/一段文本：cls 空则纯文本（命令输出，外部数据安全优先），否则按语义类着色
+function termAppend(s, cls){
   const o = document.getElementById('term-out');
-  o.textContent += s;
+  if(cls){
+    const sp = document.createElement('span');
+    sp.className = cls;
+    sp.textContent = s;
+    o.appendChild(sp);
+  }else{
+    o.appendChild(document.createTextNode(s));
+  }
+  o.scrollTop = o.scrollHeight;
+}
+// 命令回显行：彩色提示符 + 转义后的用户输入
+function termEchoLine(cmd){
+  const base = termCwd === '/root' ? '~' : termCwd;
+  const line = document.createElement('span');
+  line.className = 't-cmd';
+  line.innerHTML = '<span class="tp-user">root@xbox</span><span class="tp-path">:'+esc(base)+'</span><span class="tp-sig">$</span> '+esc(cmd);
+  const o = document.getElementById('term-out');
+  o.appendChild(line);
+  o.appendChild(document.createTextNode('\n'));
   o.scrollTop = o.scrollHeight;
 }
 async function termExec(){
   if(!termConnected) return;
   const inp = document.getElementById('term-input');
   const cmd = inp.value;
-  if(cmd.trim() === ''){ termAppend('\n'); return; }
-  termAppend(document.getElementById('term-prompt').textContent+' '+cmd+'\n');
+  termEchoLine(cmd);
   inp.value = '';
+  if(cmd.trim() === '') return;
   try{
     // 客户端超时放宽到 65s：服务端命令上限 60s，避免长命令被 8-10s 传输超时误杀
     //（挂住型命令仍会被服务端超时终止并回显提示；更长的任务用 nohup ... & 转后台）
@@ -2416,8 +2471,8 @@ async function termExec(){
     let out = j.output || '';
     if(out && !out.endsWith('\n')) out += '\n';
     termAppend(out);
-    if(j.exitCode !== 0) termAppend('[退出码 '+j.exitCode+']\n');
-  }catch(e){ termAppend('[错误] '+(e.message||e)+'\n'); }
+    if(j.exitCode !== 0){ termAppend('[退出码 '+j.exitCode+']\n', 't-code'); }
+  }catch(e){ termAppend('[错误] '+(e.message||e)+'\n', 't-err'); }
 }
 function termClear(){ document.getElementById('term-out').textContent = ''; }
 
@@ -2426,8 +2481,7 @@ let appEntered = false, appRefreshTimer = null;
 async function enterApp(){
   if(appEntered) return;
   appEntered = true;
-  try{ const j = await api('/api/overview'); document.getElementById('ver').textContent = 'v'+j.version; }catch(e){}
-  loadOverview(); loadPorts(); loadProcs();
+    loadOverview(); loadPorts(); loadProcs();
   startTempLoop();
   if(!appRefreshTimer) appRefreshTimer = setInterval(loadOverview, 30000);
 }
@@ -2481,11 +2535,25 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
 .copy-ta{display:block;width:100%;height:220px;border:none;border-top:1px solid var(--border);padding:8px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--text2);background:var(--card)}
 .term-warn{background:var(--warning-light);color:var(--warning);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px;flex-shrink:0}
 .term-warn b{color:var(--danger)}
-.term-out{flex:1;min-height:0;overflow-y:auto;background:#0E1116;color:#E6E6E6;border-radius:var(--radius);padding:12px 14px;font-family:Consolas,Menlo,monospace;font-size:13px;line-height:1.55;white-space:pre-wrap;word-break:break-all}
-.term-input-row{display:flex;align-items:center;gap:8px;margin-top:10px;flex-shrink:0}
-.term-prompt{font-family:Consolas,monospace;font-size:13px;color:#3DDC84;white-space:nowrap}
-.term-input-row input{flex:1;background:#0E1116;color:#E6E6E6;border-color:#2A2F36}
-.term-input-row input:focus{box-shadow:0 0 0 2px rgba(61,220,132,.25)}
+/* 终端外观：输出区与命令栏同底色拼成一块终端（上圆下直/下圆上直），深色专属滚动条 */
+.term-out{flex:1;min-height:0;overflow-y:auto;background:#0D1117;color:#D6DEE8;border:1px solid #232A33;border-bottom:none;border-radius:var(--radius) var(--radius) 0 0;padding:14px 16px 10px;font-family:ui-monospace,'Cascadia Mono','JetBrains Mono',Consolas,Menlo,'Courier New',monospace;font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-all;letter-spacing:.2px;scrollbar-width:thin;scrollbar-color:#3A424E transparent}
+.term-out::-webkit-scrollbar{width:8px}
+.term-out::-webkit-scrollbar-track{background:transparent}
+.term-out::-webkit-scrollbar-thumb{background:#3A424E;border-radius:4px}
+.term-out::-webkit-scrollbar-thumb:hover{background:#4D5765}
+/* 输出内容语义色：回显命令行/系统提示/退出码/错误 */
+.t-cmd{color:#8AB4F8}
+.t-cmd .tp-user{color:#3DDC84}.t-cmd .tp-path{color:#57C7FF}.t-cmd .tp-sig{color:#5C6875}
+.t-sys{color:#5C6875;font-style:italic}
+.t-code{color:#F5A623}
+.t-err{color:#F26D6D}
+.t-echo{color:#E8EDF4}
+.term-input-row{display:flex;align-items:center;gap:10px;margin-top:0;background:#0D1117;border:1px solid #232A33;border-top:1px solid #1A2129;border-radius:0 0 var(--radius) var(--radius);padding:9px 16px;flex-shrink:0}
+.term-prompt{font-family:ui-monospace,'Cascadia Mono',Consolas,Menlo,monospace;font-size:13px;font-weight:600;letter-spacing:.2px;white-space:nowrap;user-select:none}
+.tp-user{color:#3DDC84}.tp-path{color:#57C7FF}.tp-sig{color:#5C6875;font-weight:400}
+.term-input-row input{flex:1;background:transparent;color:#D6DEE8;border:none;padding:0;caret-color:#3DDC84;box-shadow:none!important}
+.term-input-row input:focus{box-shadow:none!important}
+.term-input-row input::placeholder{color:#4D5765}
 #page-browser.active,#page-terminal.active{display:flex;flex-direction:column;height:100%}
 </style>
 
