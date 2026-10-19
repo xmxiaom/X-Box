@@ -2065,8 +2065,10 @@ function browserNewTab(url){
   if(browserTabs.length >= 10){ toast('最多 10 个标签页','err'); return null; }
   const f = document.createElement('iframe');
   f.className = 'browser-frame-item';
-  // 不给 allow-popups：target=_blank / window.open 一律不得弹到外部浏览器
-  f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals');
+  // 不加 sandbox：管理类页面靠「框架内脚本导航兄弟框架」切换子页面
+  // （如 top.frame.location.href=…），sandbox 下这种导航会被浏览器直接拒绝
+  // （Unsafe attempt to initiate navigation），表现为点菜单毫无反应。
+  // 安全性由代理侧保证：top.location 已被改写为框架内跳转，不会逃出面板。
   // 不用 no-referrer：Referer 由服务端还原成目标 URL 后转发，防盗链的图片/地图瓦片才能加载
   f.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
   document.getElementById('browser-frames').appendChild(f);

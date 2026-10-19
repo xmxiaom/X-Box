@@ -514,13 +514,15 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 			have[strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
 	}
-	// 只有入口地址（路径不含版本段）才需要补一份"无版本段 Path"：
-	// 带版本段的页面及其资源请求没必要重复下发，能显著缩小响应头。
+	// 只有入口地址（路径不含版本段）才需要补一份"无版本段 Path"
 	needNPath := cookiePathN != "" && cookiePathN != cookiePathV &&
 		!browserReVerSeg.MatchString(r.URL.Path)
-	const cookieBudget = 6144 // Set-Cookie 总字节上限，超了宁可不发也不让网关 502
+	// 只回写**本次响应**新产生的 Cookie（resp.Cookies()），不回写 jar 里的历史累积。
+	// 会话本身已由服务端共享 jar 维持，浏览器侧只需要同步最新值；
+	// 若把 jar 全量回写，站点 cookie 越积越多，响应头会撑爆网关缓冲（整页 502）。
+	const cookieBudget = 3072
 	used := 0
-	for _, c := range jar.Cookies(tu) {
+	for _, c := range resp.Cookies() {
 		if v, ok := have[c.Name]; ok && v == c.Value && !needNPath {
 			continue
 		}
@@ -532,11 +534,7 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 		w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePathV)
 		// 入口页面地址不带版本段，Cookie 若只写带版本段的 Path，登录等表单提交
 		// （发往无版本段路径）时浏览器不会携带——会话丢失导致光猫提示"密码错误"。
-		// 同一站点回写两份（值相同），两种地址都能携带。
-		if needNPath {
-			if used+sz > cookieBudget {
-				continue
-			}
+		if needNPath && used+sz <= cookieBudget {
 			used += sz
 			w.Header().Add("Set-Cookie", c.Name+"="+c.Value+cookiePathN)
 		}
@@ -1273,11 +1271,14 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`try{var LP=Object.getPrototypeOf(window.location)||null;` +
 		`if(LP&&LP.assign){var la=LP.assign;LP.assign=function(u){try{if(typeof u==="string")u=px(u);}catch(e){}return la.call(this,u);};}` +
 		`if(LP&&LP.replace){var lr=LP.replace;LP.replace=function(u){try{if(typeof u==="string")u=px(u);}catch(e){}return lr.call(this,u);};}}catch(e){}` +
-		// window.open → 宿主新建标签；但带「命名框架」目标时必须放行给浏览器：
+		// window.open → 宿主新建标签；但带「命名框架」目标且该框架确实存在时放行：
 		// 管理类页面（光猫等）常用 window.open(url,"mainFrame") 切换子页面，
-		// 一律改成新标签会导致点击后主区域毫无反应。
+		// 一律改成新标签会导致点击后主区域毫无反应。目标不存在时仍走新标签，
+		// 避免页面随意弹窗。
 		`var nowo=window.open;window.open=function(u,t){try{var nu=px(u);` +
-		`if(t&&typeof t==="string"&&t.charAt(0)!=="_"&&t!==""){return nowo.call(window,nu,t);}` +
+		`if(t&&typeof t==="string"&&t.charAt(0)!=="_"&&t!==""){var tf=null;` +
+		`try{tf=window[t];}catch(ee){}` +
+		`if(tf&&typeof tf==="object"&&tf.location){return nowo.call(window,nu,t);}}` +
 		`}catch(e){}msg("newtab",u);return null;};` +
 		`try{window.showModalDialog=function(u){msg("newtab",u);return null;};}catch(e){}` +
 		// Worker：新建时把脚本地址改写为代理路径。new Worker("/res/newui/x.js")

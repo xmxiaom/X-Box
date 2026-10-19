@@ -453,10 +453,22 @@ func browserRewriteJSLex(js, panelScheme, panelHost string) string {
 				continue
 			}
 		}
-		// 规则 3：top.location → self.location（跨源读 top 抛 SecurityError）
+		// 规则 3a：window.top.X → parent.X
+		if jsIsIdent(js, toks, k, "window") && !jsIsDotLike(js, toks, k-1) &&
+			jsIsPunct(js, toks, k+1, ".") &&
+			jsIsIdent(js, toks, k+2, "top") &&
+			jsIsPunct(js, toks, k+3, ".") && k+4 < len(toks) && toks[k+4].kind == jsIdent {
+			add(toks[k].start, toks[k+4].start, "parent.")
+			continue
+		}
+		// 规则 3：top.X → parent.X
+		// 代理页被嵌在面板 iframe 里：top 实际指向面板窗口，站点自己的帧名
+		// （如管理页的 top.mainFrame）在面板文档里并不存在 → 读到 undefined →
+		// 赋值抛 TypeError → 点菜单完全没反应（实测：管理页各级菜单点不动）。
+		// 改成 parent 指向"上一层框架页"（就是站点自己的框架页），页面按原逻辑即可工作。
 		if jsIsIdent(js, toks, k, "top") && !jsIsDotLike(js, toks, k-1) &&
-			jsIsPunct(js, toks, k+1, ".") && jsIsIdent(js, toks, k+2, "location") {
-			add(toks[k].start, toks[k].end, "self")
+			jsIsPunct(js, toks, k+1, ".") && k+2 < len(toks) && toks[k+2].kind == jsIdent {
+			add(toks[k].start, toks[k].end, "parent")
 			continue
 		}
 		// 规则 4：document.domain = "x" → 注释（现代浏览器直接抛错，中断整个脚本）
