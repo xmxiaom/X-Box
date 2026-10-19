@@ -545,17 +545,29 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       <div class="page" id="page-browser">
         <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub"></span><div class="spacer"></div></div>
         <div class="browser-bar">
-          <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
-          <button class="btn btn-primary btn-sm" id="btn-go" onclick="goBrowser()">前往</button>
-          <div class="browser-bar2">
-            <button class="btn btn-outline btn-sm" id="btn-browser-back" onclick="browserBack()" disabled title="后退">←</button>
-            <button class="btn btn-outline btn-sm" id="btn-browser-fwd" onclick="browserForward()" disabled title="前进">→</button>
+          <div class="browser-nav">
+            <button class="btn btn-outline btn-sm brw-ic" id="btn-browser-back" onclick="browserBack()" disabled title="后退"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+            <button class="btn btn-outline btn-sm brw-ic" id="btn-browser-fwd" onclick="browserForward()" disabled title="前进"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+          </div>
+          <div class="browser-omni">
+            <span class="omni-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/></svg></span>
+            <input type="text" id="browser-url" placeholder="输入网址，如 192.168.1.1 或 https://example.com" onkeydown="if(event.key==='Enter') goBrowser()">
+            <button class="btn btn-primary btn-sm" id="btn-go" onclick="goBrowser()">前往</button>
+          </div>
+          <div class="browser-acts">
             <button class="btn btn-outline btn-sm" onclick="browserNewTab('')" title="新标签页">＋<span class="nav-lbl"> 新标签页</span></button>
             <button class="btn btn-outline btn-sm" id="btn-browser-log" onclick="browserToggleLog()">诊断</button>
           </div>
         </div>
+        <div class="browser-progress" id="browser-progress"></div>
         <div class="browser-tabs" id="browser-tabs"></div>
-        <div class="browser-frame-wrap" id="browser-frames"></div>
+        <div class="browser-frame-wrap" id="browser-frames">
+          <div class="browser-empty" id="browser-empty" style="display:none">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z"/></svg>
+            <b>在上方输入网址开始浏览</b>
+            <span>页面经 NAS 同源代理加载 · 支持 Ctrl+滚轮缩放</span>
+          </div>
+        </div>
         <div class="browser-log" id="browser-log" style="display:none"></div>
         <div class="browser-snap" id="browser-snap" style="display:none"></div>
       </div>
@@ -2065,6 +2077,26 @@ function browserNewTab(url){
   if(!url) document.getElementById('browser-url').focus();
   return t;
 }
+/* 空状态层：当前激活标签无真实 URL 时显示引导，否则隐藏 */
+function browserUpdateEmpty(){
+  const t = browserTabs[browserActive];
+  const el = document.getElementById('browser-empty');
+  if(el) el.style.display = (t && t.url) ? 'none' : 'flex';
+}
+/* 加载进度条：导航时亮起流动动画；15s 兜底自动熄灭（防止 load 不触发时卡住） */
+let browserProgressTimer = null;
+function browserProgressPulse(){
+  const el = document.getElementById('browser-progress');
+  if(!el) return;
+  el.classList.add('on');
+  if(browserProgressTimer) clearTimeout(browserProgressTimer);
+  browserProgressTimer = setTimeout(function(){ el.classList.remove('on'); browserProgressTimer = null; }, 15000);
+}
+function browserProgressDone(){
+  if(browserProgressTimer){ clearTimeout(browserProgressTimer); browserProgressTimer = null; }
+  const el = document.getElementById('browser-progress');
+  if(el) el.classList.remove('on');
+}
 function browserSetActive(i){
   if(i < 0 || i >= browserTabs.length) return;
   browserActive = i;
@@ -2074,6 +2106,7 @@ function browserSetActive(i){
   browserSetSub('');
   browserRenderTabs();
   browserUpdateNav();
+  browserUpdateEmpty();
 }
 function browserCloseTab(i){
   const t = browserTabs[i];
@@ -2111,6 +2144,8 @@ function browserNavHist(){
   t.frame.src = src;
   document.getElementById('browser-url').value = t.raw;
   browserSetSub('');
+  browserProgressPulse();
+  browserUpdateEmpty();
 }
 function browserBack(){
   const t = browserTabs[browserActive];
@@ -2160,6 +2195,8 @@ function browserOpenURL(u, newTab){
   t.frame.src = src;
   document.getElementById('browser-url').value = raw;
   browserSetSub('');
+  browserProgressPulse();
+  browserUpdateEmpty();
   browserRenderTabs();
   browserUpdateNav();
 }
@@ -2294,6 +2331,7 @@ if(window.addEventListener) window.addEventListener('message', function(e){
 });
 // 每次框架加载后：刷新标签标题 + 绑定缩放与链接拦截（同源代理，可直接操作 contentDocument）
 function browserOnFrameLoad(t){
+  browserProgressDone();   // 无论加载成功/失败，进度条都停
   // 逃逸检测：页面 JS 把 iframe 导航到绝对 URL（跳出代理直连目标）。此时
   // contentWindow 跨域，读 location 抛 SecurityError；直连失败则是浏览器错误页。
   // 两种情况都把 iframe 拉回代理路径。
@@ -2485,33 +2523,66 @@ async function enterApp(){
 detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe），随后直接进入面板
 </script>
 <style>
-.browser-bar{display:flex;gap:8px;margin-bottom:10px;flex-shrink:0;flex-wrap:wrap}
-.browser-bar input{flex:1;min-width:0}
-/* 桌面：display:contents 让导航按钮与输入框同处一行 */
-.browser-bar2{display:contents}
+/* ===== 浏览器页：omnibox 工具条 + 胶囊标签 + 框架区 ===== */
+.browser-bar{display:flex;gap:8px;margin-bottom:10px;flex-shrink:0;flex-wrap:wrap;align-items:center}
+/* 后退/前进：拼成一体的分段按钮 */
+.browser-nav{display:flex;flex:0 0 auto;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);overflow:hidden}
+.browser-nav .brw-ic{border:none;border-radius:0;width:38px;height:40px;padding:0;display:inline-flex;align-items:center;justify-content:center;color:var(--text2)}
+.browser-nav .brw-ic svg{width:17px;height:17px}
+.browser-nav .brw-ic+.brw-ic{border-left:1px solid var(--border)}
+.browser-nav .brw-ic:disabled{color:#C9CDD4}
+.browser-nav .brw-ic:not(:disabled):hover{background:var(--primary-light);color:var(--primary)}
+/* omnibox：地球图标 + 输入框 + 前往，一体圆角容器，聚焦时主题色描边 */
+.browser-omni{flex:1 1 220px;min-width:0;display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:0 5px 0 12px;height:40px;transition:border-color .15s,box-shadow .15s}
+.browser-omni:focus-within{border-color:var(--primary);box-shadow:0 0 0 2px var(--primary-light)}
+.omni-ico{flex:0 0 auto;display:inline-flex;color:var(--text3)}
+.omni-ico svg{width:15px;height:15px}
+.browser-omni input{flex:1;min-width:0;border:none;background:transparent;height:100%;padding:0;font-size:14px;color:var(--text1)}
+.browser-omni input:focus{border:none;box-shadow:none}
+.browser-omni #btn-go{flex:0 0 auto;height:32px;border-radius:6px}
+.browser-acts{display:flex;gap:8px;flex:0 0 auto}
+.browser-acts .btn{height:40px}
+/* 加载进度条：导航期间在工具条下方流动，load 后淡出（15s 兜底自动隐藏） */
+.browser-progress{position:relative;height:3px;margin:-6px 0 4px;flex-shrink:0;border-radius:2px;overflow:hidden;opacity:0;transition:opacity .25s;pointer-events:none}
+.browser-progress.on{opacity:1}
+.browser-progress::before{content:'';position:absolute;top:0;bottom:0;left:-30%;width:30%;border-radius:2px;background:linear-gradient(90deg,var(--primary),var(--primary-hover));animation:brwslide 1.1s ease-in-out infinite}
+@keyframes brwslide{to{left:100%}}
 
-/* 手机：输入框独占一行（与"前往"并列），导航按钮另起一行等分，
-   触摸目标加高到 40px；输入框字号提到 16px 以避免 iOS 聚焦时自动放大 */
+/* 手机：omnibox 独占一行（44px 高、16px 字号防 iOS 放大），后退/前进与新标签/诊断
+   合并到第二行等分；标签加高到 36px 增大触摸面积 */
 @media(max-width:720px){
-  .browser-bar{gap:6px;margin-bottom:8px}
-  .browser-bar input{flex:1 1 0;min-width:0;height:40px;font-size:16px;padding:0 12px}
-  #btn-go{height:40px;padding:0 16px;font-size:14px;flex:0 0 auto}
-  .browser-bar2{display:flex;gap:6px;flex:1 1 100%;order:9}
-  .browser-bar2 .btn{flex:1 1 0;min-width:0;height:40px;padding:0 6px;font-size:14px}
-  .browser-bar2 .nav-lbl{display:none}
+  .browser-bar{gap:8px;margin-bottom:8px}
+  .browser-omni{order:1;flex:1 1 100%;height:44px}
+  .browser-omni input{font-size:16px}
+  .browser-omni #btn-go{height:36px;padding:0 14px}
+  .browser-nav{order:8}
+  .browser-nav .brw-ic{width:46px;height:44px}
+  .browser-nav .brw-ic svg{width:19px;height:19px}
+  .browser-acts{order:9;flex:1 1 auto}
+  .browser-acts .btn{flex:1 1 0;min-width:0;height:44px;padding:0 6px;font-size:14px}
+  .browser-acts .nav-lbl{display:none}
   .browser-tabs{gap:5px;margin-bottom:8px}
-  .browser-tab{max-width:130px;padding:4px 8px}
+  .browser-tab{max-width:140px;height:36px;padding:0 10px}
+  .browser-tab .bx{font-size:17px;padding:0 3px}
 }
+/* 标签：胶囊形，激活态填充主题浅蓝 */
 .browser-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;flex-shrink:0}
-.browser-tab{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:var(--radius);font-size:12px;color:var(--text2);cursor:pointer;max-width:180px;background:var(--card)}
-.browser-tab.on{border-color:var(--primary);color:var(--primary);font-weight:600}
+.browser-tab{display:inline-flex;align-items:center;gap:7px;padding:0 11px;height:32px;border:1px solid var(--border);border-radius:999px;font-size:12px;color:var(--text2);cursor:pointer;max-width:200px;background:var(--card);transition:border-color .15s,background .15s,color .15s;user-select:none}
+.browser-tab:hover{border-color:#B8CAFF;color:var(--text1)}
+.browser-tab.on{border-color:var(--primary);color:var(--primary);font-weight:600;background:var(--primary-light)}
 .browser-tab .bt{min-width:0;flex:1 1 auto;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.browser-tab .bx{flex:0 0 auto;cursor:pointer;color:var(--text3);font-weight:400;padding:0 2px}
-.browser-tab .bx:hover{color:var(--danger)}
+.browser-tab .bx{flex:0 0 auto;cursor:pointer;color:var(--text3);font-weight:400;padding:0 1px;border-radius:50%;font-size:15px;line-height:1}
+.browser-tab .bx:hover{color:#fff;background:var(--danger)}
 /* 框架容器可滚动：页面尺寸超出可视区时可横纵滚动查看（含缩放放大后的内容） */
-.browser-frame-wrap{flex:1;min-height:0;border:1px solid var(--border);border-radius:var(--radius);overflow:auto;background:#fff}
+.browser-frame-wrap{position:relative;flex:1;min-height:0;border:1px solid var(--border);border-radius:var(--radius);overflow:auto;background:#fff}
 .browser-frame-item{width:100%;height:100%;border:none;display:none;background:#fff;min-width:640px;min-height:480px}
 .browser-frame-item.on{display:block}
+/* 新标签空状态：覆盖在框架区上的引导层（当前标签有真实 URL 时由 JS 隐藏） */
+.browser-empty{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:var(--bg);color:var(--text3);text-align:center;padding:24px;animation:brwfade .25s ease}
+.browser-empty svg{width:52px;height:52px;color:#C9CDD4}
+.browser-empty b{font-size:15px;font-weight:600;color:var(--text2)}
+.browser-empty span{font-size:12.5px}
+@keyframes brwfade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .browser-log{flex:0 0 auto;max-height:170px;overflow:auto;margin-top:8px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);font-size:12px}
 .browser-log-tb{width:100%;border-collapse:collapse}
 .browser-log-tb th,.browser-log-tb td{padding:4px 8px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
