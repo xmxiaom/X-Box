@@ -18,3 +18,4 @@ data/
 # 临时提交说明文件
 _msg.txt
 _*.py
+_rel*.py
