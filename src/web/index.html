@@ -49,7 +49,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .content.sticky-mode{display:flex;flex-direction:column}
 .sticky-page.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .sticky-head{flex:0 0 auto}
-.sticky-list{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.sticky-list{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
 
 /* ===== 通用组件 ===== */
 .btn{border:none;border-radius:6px;padding:8px 16px;font-size:14px;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
@@ -791,7 +791,14 @@ function baseDevName(dev){let b=String(dev||'').split('/').pop();if(/^(nvme|mmcb
 function fmtRate(bps){if(!bps||bps<=0)return '0 B/s';return fmtB(bps)+'/s'}
 function fmtUp(s){if(s==null)return'—';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+' 天 ':'')+h+' 小时 '+m+' 分'}
 function esc(s){return (s==null?'':s).toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-function toast(msg, cls=''){const t=document.createElement('div');t.className='toast-item '+cls;t.textContent=msg;document.getElementById('toast').appendChild(t);setTimeout(()=>t.remove(),3600)}
+// 瞬时传输错误静音：网关忙/中转窗口期的「响应解析失败」「HTTP 0」「超时」等，
+// api 层已自动重试、轮询下一轮会自愈，弹窗纯属打扰（应用错误 4xx 不受影响，照常提示）
+const TOAST_MUTE_RE = /响应解析失败|网关可能正忙|^HTTP 0$|^HTTP 5\d\d$|^TIMEOUT$|^网络错误$|请求失败（HTTP 5/;
+function toast(msg, cls=''){
+  msg = String(msg);
+  if(cls === 'err' && TOAST_MUTE_RE.test(msg)) return;
+  const t=document.createElement('div');t.className='toast-item '+cls;t.textContent=msg;document.getElementById('toast').appendChild(t);setTimeout(()=>t.remove(),3600);
+}
 
 /* ---------- 通用弹窗 ---------- */
 function closeModal(){document.getElementById('modal').classList.remove('show');document.getElementById('modal-ok').onclick=null}
@@ -961,6 +968,7 @@ let stTimer = null;
 let stNodes = [];          // 节点列表（GET /api/speedtest/nodes）
 let stSel = '';            // 选中的 node_id；'' = 自动竞速
 let stNodesLoaded = false;
+let stErrToasted = false;   // 本次测速的失败 toast 只弹一次
 const stPhases = {idle:'待机', ping:'延迟测试', down:'下载测速', up:'上传测速', done:'测速完成', error:'测速失败'};
 const stSrcName = {builtin:'预置', remote:'在线', custom:'自定义'};
 function stInit(){
@@ -1104,15 +1112,20 @@ function stRender(s){
   const lbl = document.getElementById('st-progress-lbl');
   if(s.running){
     fill.style.width = s.progress + '%';
+    lbl.style.color = '';
     lbl.textContent = stPhases[s.phase] || s.phase + ' ' + s.progress + '% · ' + (s.msg || '');
   } else if(s.phase === 'done'){
     fill.style.width = '100%';
+    lbl.style.color = '';
     lbl.textContent = '测速完成 · ' + (s.msg || '');
   } else if(s.phase === 'error'){
     fill.style.width = '0%';
     lbl.textContent = '失败：' + (s.error || '未知错误');
+    lbl.style.color = 'var(--danger)';
+    if(!stErrToasted){ stErrToasted = true; toast('测速失败：' + (s.error || '未知错误'), 'err'); }
   } else {
     fill.style.width = '0%';
+    lbl.style.color = '';
     lbl.textContent = '';
   }
   // 按钮
@@ -1136,6 +1149,7 @@ async function stStart(){
   try{
     const body = stSel ? JSON.stringify({node_id: stSel}) : '{}';
     await apiRetry('/api/speedtest/start', {method:'POST', headers:{'Content-Type':'application/json'}, body});
+    stErrToasted = false;   // 新一轮测速：失败 toast 重新允许弹出
     toast(stSel ? '开始测速（指定节点）' : '开始测速（自动竞速）', 'ok');
   }
   catch(e){ toast(e.message, 'err'); }
@@ -1281,13 +1295,16 @@ async function runNAT(force){
     const n = j.nat || {};
     const lv = n.natLevel||0;
     if(lv > 0) natLoaded = true; // 拿到有效结论才算「已有结果」；未能判定则下次进入仪表盘/轮询时自动重试
-    // 优化建议按探测时间去重：同一结论只弹一次，刷新/重开应用不再弹出（用户要求：有结果时不重新弹出）
-    let natTipNew = true;
-    try{
-      const _seen = localStorage.getItem('natTipSeen');
-      if(_seen === (n.testedAt||'')){ natTipNew = false; }
-      else{ localStorage.setItem('natTipSeen', n.testedAt||''); }
-    }catch(_){ /* iframe 环境可能禁 localStorage，降级为每次显示 */ }
+    // 优化建议弹出策略：手动重测（force）必定弹出（用户要求：重新检测过都要弹）；
+    // 自动探测按探测时间去重，同一结论只弹一次，刷新/重开应用不再弹出
+    let natTipNew = !!force;
+    if(!natTipNew){
+      try{
+        const _seen = localStorage.getItem('natTipSeen');
+        if(_seen === (n.testedAt||'')){ natTipNew = false; }
+        else{ natTipNew = true; localStorage.setItem('natTipSeen', n.testedAt||''); }
+      }catch(_){ natTipNew = true; /* iframe 环境可能禁 localStorage，降级为每次显示 */ }
+    }
     const lvCls = (lv>=1&&lv<=4) ? 'nat-lv nat-lv'+lv : 'badge badge-gray';
     const lvTxt = n.natLevelText || n.typeText || '—';
     const cgTxt = n.cgnat
@@ -1304,7 +1321,7 @@ async function runNAT(force){
       <div class="kv"><span class="k">探测说明</span><span class="v" style="text-align:right;max-width:65%;font-weight:400;color:var(--text2)">${esc(n.detail||'—')}</span></div>
       <div class="kv"><span class="k">检测时间</span><span class="v">${esc(n.testedAt||'')}</span></div>
       ${(lv&&lv!==1&&n.optimize&&natTipNew)?`<div class="nat-tip${lv>=3?' nat-tip-warn':''}" id="nat-tip-box"><b>优化建议</b>${esc(n.optimize)}</div>`:''}`;
-    // 优化建议仅首次出现时显示 5 秒后淡出；已看过的结论不再弹出（见上方 natTipSeen 去重）
+    // 优化建议展示：5 秒后淡出（手动/自动一致，用户确认保留淡出）
     const tip = document.getElementById('nat-tip-box');
     if(tip){
       clearTimeout(natTipTimer);

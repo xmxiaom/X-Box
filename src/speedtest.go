@@ -62,11 +62,19 @@ func (n stNode) pingURL() string {
 	return strings.TrimSuffix(n.Server, "/") + n.Ping
 }
 
-// hostFromServer 从 Server 提取 host:port 供 TCP 探活
+// hostFromServer 从 Server 提取 host:port 供 TCP 探活。
+// 无显式端口时必须按 scheme 补默认端口（http:80 / https:443），
+// 否则 net.Dial 报 "missing port in address"，所有节点会被误判为不可达。
 func hostFromServer(server string) string {
 	u, err := url.Parse(server)
 	if err != nil || u.Host == "" {
 		return strings.TrimPrefix(strings.TrimPrefix(server, "https://"), "http://")
+	}
+	if u.Port() == "" {
+		if u.Scheme == "https" {
+			return u.Host + ":443"
+		}
+		return u.Host + ":80"
 	}
 	return u.Host
 }

@@ -571,21 +571,22 @@ func initNAT(dataDir string) {
 	natCond = sync.NewCond(&natCacheMu)
 }
 
-// handleNAT 返回 NAT 检测结论；?force=1 强制重测。无有效结果或上次未能判定时自动探测；
-// 有成功结论时永远沿用（持久化跨应用重启），多端并发只跑一次探测。
+// handleNAT 返回 NAT 检测结论；?force=1 强制重测（跳过缓存真实探测，用户要求：
+// 重新检测必须真测）。无有效结果或上次未能判定时自动探测；有成功结论时沿用
+// （持久化跨应用重启），多端并发只跑一次探测。
 func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "1"
 	natCacheMu.Lock()
-	// 已有成功结论：直接返回（持久化结果跨重启有效）
-	if natValid(natCacheRes.Type) {
-		res := natCacheRes
-		natCacheMu.Unlock()
-		ok(w, map[string]any{"nat": res})
-		return
-	}
-	// 无结果/未判定且非 force：60 秒内刚试过就直接返回上次结论（多为未能判定），
-	// 避免前端轮询触发高频 STUN 探测；否则别人在探就等，没人探就自己来
 	if !force {
+		// 已有成功结论：直接返回（持久化结果跨重启有效）
+		if natValid(natCacheRes.Type) {
+			res := natCacheRes
+			natCacheMu.Unlock()
+			ok(w, map[string]any{"nat": res})
+			return
+		}
+		// 无结果/未判定：60 秒内刚试过就直接返回上次结论（多为未能判定），
+		// 避免前端轮询触发高频 STUN 探测；否则别人在探就等，没人探就自己来
 		if !natLastTry.IsZero() && time.Since(natLastTry) < 60*time.Second {
 			res := natCacheRes
 			natCacheMu.Unlock()
@@ -607,7 +608,10 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 	res := detectNAT()
 
 	natCacheMu.Lock()
-	natCacheRes = res
+	// 新结论有效才覆盖缓存；force 重测失败时保留旧有效结论，避免手动重测把好结果冲掉
+	if natValid(res.Type) || !natValid(natCacheRes.Type) {
+		natCacheRes = res
+	}
 	natRunning = false
 	if natValid(res.Type) && natPath != "" {
 		if b, err := json.Marshal(res); err == nil {
