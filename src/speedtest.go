@@ -71,18 +71,18 @@ func hostFromServer(server string) string {
 	return u.Host
 }
 
-// 内置预置节点（2026-10 实测可用；作为上游拉取失败时的兜底）
+// 内置预置节点（2026-10 实测可用；作为上游拉取失败时的兜底）。
+// neu/shu 曾在列但实测已下线，已移除；ustc/sjtu 按来源 IP 过滤（家宽 500/302）不入列。
 var stBuiltin = []stNode{
 	{ID: "nuaa", Name: "南京航空航天大学", Group: "教育网", Server: "http://speed.nuaa.edu.cn", Down: "/backend/garbage.php", Up: "/backend/empty.php", Ping: "/backend/empty.php", Source: "builtin"},
 	{ID: "seu", Name: "东南大学", Group: "教育网", Server: "https://xnfz.seu.edu.cn", Down: "/speed/garbage.php", Up: "/speed/empty.php", Ping: "/speed/empty.php", Source: "builtin"},
-	{ID: "neu", Name: "东北大学", Group: "教育网", Server: "https://speed.neu.edu.cn", Down: "/garbage.php", Up: "/empty.php", Ping: "/empty.php", Source: "builtin"},
-	{ID: "shu", Name: "上海大学", Group: "教育网", Server: "https://speedtest.shu.edu.cn", Down: "/backend/garbage.php", Up: "/backend/empty.php", Ping: "/backend/empty.php", Source: "builtin"},
 }
 
-// 上游 LibreSpeed 节点清单（i-abc/Speedtest 维护，双源互备）
+// 上游 LibreSpeed 节点清单（i-abc/Speedtest 维护，三源互备：GitHub 原站 + 两个镜像）
 var stRemoteSources = []string{
 	"https://raw.githubusercontent.com/i-abc/speedtest/node/china-education.json",
 	"https://asset.bash.icu/https://raw.githubusercontent.com/i-abc/speedtest/node/china-education.json",
+	"https://cdn.jsdelivr.net/gh/i-abc/Speedtest@node/china-education.json",
 }
 
 // LibreSpeed JSON 单条格式（librespeed/speedtest servers.json 标准）
@@ -206,6 +206,13 @@ func (s *stNodesState) saveRemoteLocked() {
 	if err == nil {
 		_ = os.WriteFile(s.cachePath, b, 0o644)
 	}
+}
+
+// isFetching 线程安全读取 fetching 标志（handler 构造响应用）
+func (s *stNodesState) isFetching() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fetching
 }
 
 // refreshRemote 从上游拉取 LibreSpeed 节点清单（双源依次尝试）。
@@ -348,10 +355,12 @@ func handleSpeedtestNodes(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /api/speedtest/nodes/refresh — 手动刷新上游清单
+// POST /api/speedtest/nodes/refresh — 手动刷新上游清单（异步触发，立即返回当前列表+fetching，
+// 前端轮询 /api/speedtest/nodes 直到 fetching=false；不能返回空 nodes，否则前端会把列表清空）
 func handleSpeedtestNodesRefresh(w http.ResponseWriter, r *http.Request) {
 	go stN.refreshRemote(true)
-	ok(w, nil)
+	fetching := stN.isFetching()
+	ok(w, map[string]any{"nodes": stN.all(), "fetching": fetching})
 }
 
 // POST /api/speedtest/nodes/save — 新增/更新自定义节点

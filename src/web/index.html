@@ -43,6 +43,14 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .page-head .sub{margin-left:12px;font-size:13px;color:var(--text3)}
 .page-head .spacer{flex:1}
 
+/* 固定页面顶端（电脑/手机共用）：切页时 JS 给 .content 加 sticky-mode（flex 列布局），
+   sticky-page 自动撑满内容区，标题/筛选/搜索固定顶端，仅 sticky-list 内部滚动。
+   之前只在手机媒体查询内，导致电脑端四个列表页顶端跟着整页滚动 */
+.content.sticky-mode{display:flex;flex-direction:column}
+.sticky-page.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+.sticky-head{flex:0 0 auto}
+.sticky-list{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch}
+
 /* ===== 通用组件 ===== */
 .btn{border:none;border-radius:6px;padding:8px 16px;font-size:14px;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
 .btn:disabled{opacity:.45;cursor:not-allowed}
@@ -227,12 +235,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 .nat-tip-warn{background:var(--warning-light);border-color:#FFD591;color:#7A3E00}
 /* ===== 手机端适配（飞牛 APP 内嵌 / 窄屏） ===== */
 @media(max-width:860px){
-  /* 手机端固定页面顶端：切页时 JS 给 .content 加 sticky-mode（flex 列布局），
-     sticky-page 自动撑满内容区，标题/筛选/搜索固定顶端，仅 sticky-list 内部滚动 */
-  .content.sticky-mode{display:flex;flex-direction:column;padding-bottom:14px}
-  .sticky-page.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
-  .sticky-head{flex:0 0 auto}
-  .sticky-list{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  /* 固定页面顶端规则已提为全局（电脑端同样生效），见布局骨架段 */
   /* 顶栏精简：隐藏版本与主机名，省出宽度 */
   .topbar{padding:0 12px;gap:8px;height:48px}
   .topbar .title{font-size:15px}
@@ -1010,10 +1013,23 @@ function stPick(id){
 async function stRefreshNodes(){
   try{
     toast('正在拉取在线节点…', 'ok');
-    const j = await apiRetry('/api/speedtest/nodes/refresh', {method:'POST'});
-    stNodes = j.nodes || [];
-    stRenderNodes(j);
-    toast('在线节点已更新（' + stNodes.length + ' 个候选）', 'ok');
+    await apiRetry('/api/speedtest/nodes/refresh', {method:'POST'});
+    // 后端异步拉取：立即返回的是「当前列表 + fetching=true」，必须轮询 /api/speedtest/nodes
+    // 直到 fetching=false 再渲染最终结果。之前直接用响应覆盖 stNodes，会把预置节点清空。
+    const started = Date.now();
+    let last = null;
+    while(Date.now() - started < 45000){
+      await new Promise(r => setTimeout(r, 1200));
+      try{ last = await apiRetry('/api/speedtest/nodes'); }catch(e){ continue; } // 单次查询失败继续轮询
+      if(!last.fetching) break;
+    }
+    stNodes = (last && last.nodes) ? last.nodes : stNodes; // 轮询全失败则保留原列表
+    stRenderNodes(last);
+    if(last && !last.fetching){
+      toast(last.fetch_err ? last.fetch_err : '在线节点已更新（' + stNodes.filter(n=>n.source==='remote').length + ' 个在线候选）', last.fetch_err ? 'err' : 'ok');
+    }else{
+      toast('上游拉取超时，稍后列表会自动更新', 'err');
+    }
   }catch(e){ toast(e.message, 'err'); }
 }
 function stAddNode(){
