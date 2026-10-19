@@ -38,6 +38,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/tls"
 	"html"
 	"io"
@@ -163,19 +164,38 @@ const (
 // browserTransport 包级共享：连接复用（keep-alive）对代理性能是决定性的——
 // 页面往往有几十个资源，每个都新建 TCP/TLS 连接会让点击链接明显变慢。
 // 内网设备普遍自签证书，故跳过校验（与浏览器"继续访问"等价）。
+var browserTLSConf = &tls.Config{
+	InsecureSkipVerify: true,
+	// 内网老设备（光猫/老路由器）可能只支持 TLS1.0/1.1，Go 默认最低 1.2
+	// 会直接握手失败（表现为 502）。代理在可信内网，放宽到 1.0 换兼容性。
+	MinVersion: tls.VersionTLS10,
+}
+
 var browserTransport = &http.Transport{
-	TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true,
-		// 内网老设备（光猫/老路由器）可能只支持 TLS1.0/1.1，Go 默认最低 1.2
-		// 会直接握手失败（表现为 502）。代理在可信内网，放宽到 1.0 换兼容性。
-		MinVersion: tls.VersionTLS10,
-	},
+	TLSClientConfig:     browserTLSConf,
 	Proxy:               nil,
 	ForceAttemptHTTP2:   true,
 	MaxIdleConns:        64,
 	MaxIdleConnsPerHost: 8,
 	MaxConnsPerHost:     16, // 单目标并发连接上限，防止把目标或本机连接表打满
 	IdleConnTimeout:     90 * time.Second,
+}
+
+// browserTransport4 强制 IPv4 的备用传输：部分 NAS 分到公网 IPv6 但实际没有
+// IPv6 出口，DNS 返回 AAAA 时连接会一直超时（表现为「手机端/外网访问 502」）。
+// 主传输失败后用这条再试一次，能覆盖绝大多数此类环境。
+var browserTransport4 = &http.Transport{
+	TLSClientConfig:     browserTLSConf,
+	Proxy:               nil,
+	ForceAttemptHTTP2:   true,
+	MaxIdleConns:        16,
+	MaxIdleConnsPerHost: 8,
+	MaxConnsPerHost:     16,
+	IdleConnTimeout:     90 * time.Second,
+	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		d := &net.Dialer{Timeout: 12 * time.Second, KeepAlive: 30 * time.Second}
+		return d.DialContext(ctx, "tcp4", addr)
+	},
 }
 
 // handleBrowserRoot GET /b（无子路径）：提示用法。
@@ -374,13 +394,27 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 		}
 	}
 	resp, err := client.Do(req)
-	// 瞬时失败重试一次：移动网络/NAS 侧 DNS 抖动会让单次连接直接失败，
-	// 用户看到 502 而刷新一下又好了。只对幂等方法重试，且仅一次。
+	// 瞬时失败重试：第一次原样重试（移动网络/DNS 抖动），仍失败再强制 IPv4
+	// （NAS 分到 IPv6 但无出口时，AAAA 首连会一直超时 → 用户看到 502）。
 	if err != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		if req2, e2 := http.NewRequestWithContext(r.Context(), r.Method, target, nil); e2 == nil {
 			req2.Header = req.Header.Clone()
 			if r2, err2 := client.Do(req2); err2 == nil {
 				resp, err = r2, nil
+			} else {
+				// 第二跳：IPv4 强制
+				c4 := &http.Client{
+					Timeout:       browserTimeout,
+					Jar:           jar,
+					CheckRedirect: client.CheckRedirect,
+					Transport:     browserTransport4,
+				}
+				if req3, e3 := http.NewRequestWithContext(r.Context(), r.Method, target, nil); e3 == nil {
+					req3.Header = req.Header.Clone()
+					if r3, err3 := c4.Do(req3); err3 == nil {
+						resp, err = r3, nil
+					}
+				}
 			}
 		}
 	}
@@ -698,7 +732,8 @@ func browserProxyURL(s string, cur *url.URL, direct bool) string {
 	// v1.2.55 的根相对改写引入过死循环：属性值被改成 /b/v1255/...（根相对形式），
 	// 运行时的原型 setter / MutationObserver 再拿它调一次改写 → /b/…/b/… 无限增长
 	// → 每轮属性都变、观察器再触发 → 浏览器卡死。
-	if strings.HasPrefix(s, browserPathPrefix()) || strings.HasPrefix(s, "/b/") {
+	if strings.HasPrefix(s, browserPathPrefix()) || strings.HasPrefix(s, "/b/") ||
+		(appBase != "" && strings.HasPrefix(s, appBase+"/b/")) {
 		return s
 	}
 	// 幂等补：目标站页面若把"当前地址"存起来再拼绝对 URL，响应里会出现
@@ -1162,8 +1197,12 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`try{var LP=Object.getPrototypeOf(window.location)||null;` +
 		`if(LP&&LP.assign){var la=LP.assign;LP.assign=function(u){try{if(typeof u==="string")u=px(u);}catch(e){}return la.call(this,u);};}` +
 		`if(LP&&LP.replace){var lr=LP.replace;LP.replace=function(u){try{if(typeof u==="string")u=px(u);}catch(e){}return lr.call(this,u);};}}catch(e){}` +
-		// window.open / showModalDialog → 交由宿主新建标签
-		`window.open=function(u){msg("newtab",u);return null;};` +
+		// window.open → 宿主新建标签；但带「命名框架」目标时必须放行给浏览器：
+		// 管理类页面（光猫等）常用 window.open(url,"mainFrame") 切换子页面，
+		// 一律改成新标签会导致点击后主区域毫无反应。
+		`var nowo=window.open;window.open=function(u,t){try{var nu=px(u);` +
+		`if(t&&typeof t==="string"&&t.charAt(0)!=="_"&&t!==""){return nowo.call(window,nu,t);}` +
+		`}catch(e){}msg("newtab",u);return null;};` +
 		`try{window.showModalDialog=function(u){msg("newtab",u);return null;};}catch(e){}` +
 		// Worker：新建时把脚本地址改写为代理路径。new Worker("/res/newui/x.js")
 		// 是根相对，不改写会落到面板根下（百度地图的 wasm worker 就这么丢的）。
@@ -1195,6 +1234,10 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`document.documentElement.innerHTML='<body style="font:14px system-ui,sans-serif;padding:24px;color:#666">该站点在代理下反复跳转，已停止加载。请改用站点自身的入口打开。</body>';}}catch(e){}` +
 		`return location.href;}` +
 
+		// 幂等：页面 JS 用 location.pathname 拼前端路由（地图类 SPA 常见）时，
+		// 传进来的已经是代理路径（/b/… 或 appBase+/b/…），再包一层就会变成
+		// /b/vNNN/https/host/app/X-Box/b/https/host/… → 整页 404。
+		`if(u.indexOf(B+"/b/")===0||/^\/b\/(?:v\d+\/)?https?\/[^\/?#]/i.test(u))return u;` +
 		`if(u.charAt(0)==="/"&&u.charAt(1)!=="/"){var g=/^(https?):\/\/([\s\S]+)$/.exec(O);` +
 		`if(g)return spfx(P+g[1]+"/"+g[2]+u);}return u;}catch(e){return u;}}` +
 		`history.pushState=function(s,t,u){return oh.call(history,s,t,hpx(u));};` +
@@ -1232,10 +1275,13 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`while(n&&n.nodeType!==1&&n.parentNode)n=n.parentNode;` +
 		`while(n&&n.nodeType===1&&n.tagName!=="A"&&n!==document.documentElement)n=n.parentNode;` +
 		`if(!n||n.nodeType!==1||n.tagName!=="A")return;` +
-		`var t=n.getAttribute("target");if(t&&t!=="_self"){try{n.setAttribute("target","_self");}catch(e2){}}` +
-		`if(t==="_blank"||e.ctrlKey||e.metaKey||e.button===1){try{e.preventDefault();}catch(e3){}msg("newtab",n.getAttribute("href")||n.href);}}catch(e){}},true);` +
-		// 表单 target 一律收回框架内
-		`document.addEventListener("submit",function(e){try{var n=e.target;if(n&&n.nodeType===1&&n.tagName==="FORM"){var t=n.getAttribute("target");if(t&&t!=="_self"){n.setAttribute("target","_self");}}}catch(e){}},true);` +
+		`var t=n.getAttribute("target"),tl=(t||"").toLowerCase();` +
+		// 只收敛会跳出代理的目标；命名框架（mainFrame 等）必须保留，
+		// 否则管理类页面点菜单链接会「原地不动、内容不变」。
+		`if(tl==="_top"||tl==="_parent"){try{n.setAttribute("target","_self");}catch(e2){}}` +
+		`if(tl==="_blank"||e.ctrlKey||e.metaKey||e.button===1){try{e.preventDefault();}catch(e3){}msg("newtab",n.getAttribute("href")||n.href);}}catch(e){}},true);` +
+		// 表单 target：同上，只把 _top/_parent/_blank 收回框架内
+		`document.addEventListener("submit",function(e){try{var n=e.target;if(n&&n.nodeType===1&&n.tagName==="FORM"){var t=(n.getAttribute("target")||"").toLowerCase();if(t==="_top"||t==="_parent"||t==="_blank"){n.setAttribute("target","_self");}}}catch(e){}},true);` +
 		`}catch(e){}})();</script>`
 	return s
 }
@@ -1284,6 +1330,9 @@ func browserFail(w http.ResponseWriter, target string, err error) {
 		`<ol><li>确认目标已开机、端口正确（路由器管理页若非 80 端口，请写成 <code>192.168.1.1:8080</code>）；</li>` +
 		`<li>确认目标未限制只允许特定 IP / MAC 访问；</li>` +
 		`<li>到「终端」执行 <code>curl -v --max-time 8 ` + html.EscapeString(target) + `</code> 看 NAS 侧的真实报错；也可 <code>ping -c 3 ` + html.EscapeString(tu_host(target)) + `</code> 看是否可达。</li></ol>` +
+		`<div class="tip" style="margin-top:16px">` +
+		`<button onclick="location.reload()" style="font:14px system-ui;padding:7px 16px;border:1px solid #B42318;color:#B42318;background:#fff;border-radius:6px;cursor:pointer">重试</button>` +
+		`<span style="margin-left:10px">若只是网络抖动，点重试通常即可恢复。</span></div>` +
 		`</div></body></html>`
 	_, _ = io.WriteString(w, page)
 }
