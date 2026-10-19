@@ -489,6 +489,16 @@ if ok_sock:
         tp = _b64.urlsafe_b64encode(json.dumps({"m": "GET", "p": ep}).encode()).decode().rstrip("=")
         code, js = gw("/app/X-Box/?__x=" + tp)
         check("网关入口API " + ep, code == "200" and '"ok"' in js, code + " " + js[:60])
+    # Cookie 的"无版本段 Path"必须带 appBase：否则浏览器实际请求 /app/X-Box/b/… 时
+    # 不回传 Cookie，目标设备判定未登录 → 子页面 404、点击菜单不刷新（实测光猫）
+    out = subprocess.run(["curl", "-s", "-D", "-", "-o", "/dev/null", "--unix-socket", sock_path,
+                          "http://localhost/app/X-Box/b/http/192.168.1.1/unicom.html"],
+                         capture_output=True, timeout=10).stdout.decode("utf-8", "replace")
+    ckp = [l for l in out.splitlines() if l.lower().startswith("set-cookie")]
+    if ckp:
+        check("网关Cookie Path带前缀", all("/app/X-Box/b/" in l for l in ckp if "Path=" in l), str(ckp)[:160])
+    else:
+        pass  # 该目标未下发 Cookie（未登录态），跳过
 srv_gw.kill(); shutil.rmtree(sock_dir, ignore_errors=True)
 
 srv.kill(); os.remove(TMPBIN)

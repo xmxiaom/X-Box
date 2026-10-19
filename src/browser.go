@@ -374,6 +374,16 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 		}
 	}
 	resp, err := client.Do(req)
+	// 瞬时失败重试一次：移动网络/NAS 侧 DNS 抖动会让单次连接直接失败，
+	// 用户看到 502 而刷新一下又好了。只对幂等方法重试，且仅一次。
+	if err != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		if req2, e2 := http.NewRequestWithContext(r.Context(), r.Method, target, nil); e2 == nil {
+			req2.Header = req.Header.Clone()
+			if r2, err2 := client.Do(req2); err2 == nil {
+				resp, err = r2, nil
+			}
+		}
+	}
 	if err != nil {
 		rec.Err = browserErrText(err)
 		browserFail(w, target, err)
@@ -404,7 +414,10 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 	// 出向 Cookie 回写：显式 Path 限本站点代理子树（浏览器默认"当前请求目录"
 	// 在无子路径时会抬到 /b/，导致跨站点串 cookie）
 	cookiePathV := "; Path=" + browserPathPrefix() + scheme + "/" + host + "/" // 带版本段（base 注入的页面）
-	cookiePathN := "; Path=/b/" + scheme + "/" + host + "/"                     // 无版本段（入口地址）
+	// 无版本段（入口地址）：必须带 appBase 前缀。网关模式下面板挂在 /app/X-Box 下，
+	// 写死 /b/... 的 Path 与真实请求路径 /app/X-Box/b/... 不匹配，浏览器不会回传
+	// Cookie → 设备判定未登录 → 子页面 404、点击菜单无反应。
+	cookiePathN := "; Path=" + appBase + "/b/" + scheme + "/" + host + "/"
 	if direct {
 		cookiePathV = "; Path=/"
 		cookiePathN = ""
@@ -1114,6 +1127,14 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		// 否则落到面板根下 → 孤儿重定向 → 站点错位（百度地图 CSS/Worker 全丢）
 		`if(s.charAt(0)==="/"&&s.charAt(1)!=="/"){var g=/^(https?):\/\/([\s\S]+)$/.exec(O);if(g)return P+g[1]+"/"+g[2]+s;}` +
 		`if(s.indexOf("//")===0)s=location.protocol+s;` +
+		// 面板 host 绝对地址：页面 JS 用 location.host 拼接口/资源地址（该值已被
+		// 替换成面板 host），如 http://面板/?qt=xxx。它的本意是"当前站点"，若直接
+		// 走通用分支会变成"代理面板自身"→ 服务端 400（实测百度地图接口全部失败）。
+		// 这里先还原成当前目标站的绝对地址，再交给通用分支包代理路径。
+		`var hp=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);` +
+		`if(hp&&hp[2].toLowerCase()===location.host.toLowerCase()){` +
+		`var g2=/^(https?):\/\/([\s\S]+)$/.exec(O);` +
+		`if(g2)s=g2[1]+"://"+g2[2]+((hp[3]&&hp[3].charAt(0)==="/")?hp[3]:"/"+(hp[3]||""));}` +
 		`var m=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!m)return u;` +
 		`var out=P+m[1]+"/"+m[2]+((m[3]&&m[3].charAt(0)==="/")?m[3]:"/"+(m[3]||""));` +
 		// 防自嵌套：登录类跳转常把当前地址编码进 redirect_uri 等参数，
