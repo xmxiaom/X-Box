@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
 <title>X-Box</title>
 <style>
 :root{
@@ -300,6 +300,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
   /* 手机端禁用全部过渡：软键盘弹出时视口 resize，transition 连续重绘让界面显得迟钝；
      animation 不禁（加载旋转 .spin / toast 提示需要保留） */
   *{transition:none!important}
+  /* 手机端输入控件统一 ≥16px：小于 16px 时 iOS 聚焦会自动放大页面再缩回，
+     这段"放大-缩回"就是用户感觉慢的过渡动画；16px 以上不触发自动缩放。 */
+  input[type=text],input[type=number],input[type=password],select,textarea{font-size:16px}
   /* 终端手机端：输出区/命令栏字号行距收紧，命令栏留足触屏高度 */
   .term-out{font-size:12px;line-height:1.6;padding:10px 12px 8px;letter-spacing:0}
   .term-input-row{padding:10px 12px;gap:8px}
@@ -556,7 +559,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           </div>
           <div class="browser-acts">
             <button class="btn btn-outline btn-sm" onclick="browserNewTab('')" title="新标签页">＋<span class="nav-lbl"> 新标签页</span></button>
-            <button class="btn btn-outline btn-sm" id="btn-browser-log" onclick="browserToggleLog()">诊断</button>
           </div>
         </div>
         <div class="browser-progress" id="browser-progress"></div>
@@ -1382,7 +1384,6 @@ async function startScan(){
   try{
     cleanData = await api('/api/scan');
     renderClean();
-    toast(`扫描完成：可清理 ${fmtB(cleanData.totalBytes)}（${cleanData.durationMs} ms）`,'good');
   }catch(e){ toast(e.message,'err'); }
   btn.disabled = false; btn.textContent = '开始扫描';
 }
@@ -2389,12 +2390,16 @@ function browserOnFrameLoad(t){
   }catch(e){}
   t.blankBack = 0;
   if(!doc) return;
-  // 同步地址栏：页面内导航（点链接/重定向）后显示真实地址
+  // 同步地址栏：页面内导航（点链接/重定向）后显示真实地址。
+  // 输入中保护：用户正在地址栏输入（焦点在输入框）时不覆盖，否则
+  // 页面加载完成事件会把用户打到一半的地址冲掉（手机端尤甚）。
   try{
     const loc = t.frame.contentWindow.location;
     const cur = (loc.pathname||'') + (loc.search||'');
     const raw = browserFromProxy(cur);
-    if(raw){ t.url = cur; t.raw = raw; document.getElementById('browser-url').value = raw; browserSetSub(''); browserPushHist(t, cur); browserUpdateNav(); }
+    const urlBox = document.getElementById('browser-url');
+    const typing = urlBox && document.activeElement === urlBox;
+    if(raw){ t.url = cur; t.raw = raw; if(!typing) urlBox.value = raw; browserSetSub(''); browserPushHist(t, cur); browserUpdateNav(); }
   }catch(e){}
   try{ const ti = (doc.title||'').trim(); if(ti) t.title = ti.slice(0, 20); }catch(e){}
   browserRenderTabs();
@@ -2564,6 +2569,9 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
   .browser-tabs{gap:5px;margin-bottom:8px}
   .browser-tab{max-width:140px;height:36px;padding:0 10px}
   .browser-tab .bx{font-size:17px;padding:0 3px}
+  /* 手机端取消 iframe 最小尺寸（640×480 为桌面缩放场景设计）：
+     屏宽不足时它强制框架区横向溢出，底部常驻一条横向滚动条 */
+  .browser-frame-item{min-width:0;min-height:0}
 }
 /* 标签：胶囊形，激活态填充主题浅蓝 */
 .browser-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;flex-shrink:0}

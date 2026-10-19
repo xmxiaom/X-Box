@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.11"
+	version = "1.3.13"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -319,6 +319,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// 面板 HTML 禁止缓存：升级后浏览器/手机 WebView 会沿用旧页面（表现为
+	// "电脑端已修复、手机端没有"），且旧页面里的 base 前缀可能与新网关不匹配。
+	// 面板本身只有几十 KB，每次取最新最稳妥；静态资源（图标等）仍可缓存。
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	// 注入版本标识到登录卡片：便于确认客户端实际加载的构建版本（iframe 缓存/未重启排障）
 	page := bytes.Replace(indexHTML, []byte("<!--XBOX_VER-->"), []byte("v"+version), 1)
 	// 网关模式下前端需要知道前缀，才能拼出网关能识别的绝对路径

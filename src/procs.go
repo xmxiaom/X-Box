@@ -269,13 +269,20 @@ func listSystemdServices() []ServiceEntry {
 		if line == "" {
 			continue
 		}
-		f := strings.SplitN(line, " ", 5)
+		// systemctl 输出为多空格对齐的表格，按单空格 SplitN 会把空串切进字段、
+		// 导致 Active/Sub 错位（如 Active 拿到 "loaded"）。改用空白折叠切列，
+		// 描述为第 4 列之后的所有 token 重新拼接（描述内的连续空格折叠为单个，可接受）。
+		f := strings.Fields(line)
+		// 异常状态单元行首带 "●" 标记，去掉后列位才对齐，否则 Unit 名变成 "●"
+		if len(f) > 0 && f[0] == "●" {
+			f = f[1:]
+		}
 		if len(f) < 4 {
 			continue
 		}
 		desc := ""
-		if len(f) == 5 {
-			desc = strings.TrimSpace(f[4])
+		if len(f) > 4 {
+			desc = strings.Join(f[4:], " ")
 		}
 		out = append(out, ServiceEntry{
 			Unit: f[0], Load: f[1], Active: f[2], Sub: f[3], Desc: desc,

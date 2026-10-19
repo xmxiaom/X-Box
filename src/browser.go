@@ -164,7 +164,12 @@ const (
 // 页面往往有几十个资源，每个都新建 TCP/TLS 连接会让点击链接明显变慢。
 // 内网设备普遍自签证书，故跳过校验（与浏览器"继续访问"等价）。
 var browserTransport = &http.Transport{
-	TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+	TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true,
+		// 内网老设备（光猫/老路由器）可能只支持 TLS1.0/1.1，Go 默认最低 1.2
+		// 会直接握手失败（表现为 502）。代理在可信内网，放宽到 1.0 换兼容性。
+		MinVersion: tls.VersionTLS10,
+	},
 	Proxy:               nil,
 	ForceAttemptHTTP2:   true,
 	MaxIdleConns:        64,
@@ -189,6 +194,14 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	// 防护 2：同一 URL 里出现多段 /b/vNNN/ 说明发生了代理嵌套，直接拒绝
 	if browserProxyDepth(raw) > 1 {
+		// 先尝试修复：页面 JS 把"面板地址"与相对路径二次拼接，会产出
+		// /b/vNNN/https/host/A/ + b/vNNN/https/host + B 这种重复前缀地址
+		// （实测百度地图移动版：/mobile/webapp/ + b/vNNN/https/host + index/index）。
+		// 折叠重复前缀后 307 到正确地址，避免整页报"嵌套循环"。
+		if fixed, ok := browserCollapseDupPrefix(raw); ok {
+			http.Redirect(w, r, fixed, http.StatusTemporaryRedirect)
+			return
+		}
 		fail(w, 400, "检测到代理嵌套循环，已阻止")
 		return
 	}
@@ -368,8 +381,12 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 	}
 	defer resp.Body.Close()
 
-	// 剥离阻碍 iframe 内嵌的头（响应由面板同源提供，原站策略不适用于本响应）
-	for _, h := range []string{"X-Frame-Options", "Content-Security-Policy", "Content-Security-Policy-Report-Only"} {
+	// 剥离阻碍 iframe 内嵌的头（响应由面板同源提供，原站策略不适用于本响应）。
+	// Strict-Transport-Security 必须剥：https 站点发它会让浏览器把面板域名也
+	// 强制升级 https 并记住（跨站点串味）；Cross-Origin-* 系列会让代理页的
+	// 子资源被浏览器按 CORP/COEP 规则拦掉（表现为样式/图片丢失）。
+	for _, h := range []string{"X-Frame-Options", "Content-Security-Policy", "Content-Security-Policy-Report-Only",
+		"Strict-Transport-Security", "Cross-Origin-Opener-Policy", "Cross-Origin-Embedder-Policy", "Cross-Origin-Resource-Policy"} {
 		resp.Header.Del(h)
 	}
 	// 跳转类响应头一律改写成代理路径后写给浏览器（否则浏览器直连目标 → 拒绝连接）
@@ -671,6 +688,18 @@ func browserProxyURL(s string, cur *url.URL, direct bool) string {
 	if strings.HasPrefix(s, browserPathPrefix()) || strings.HasPrefix(s, "/b/") {
 		return s
 	}
+	// 幂等补：目标站页面若把"当前地址"存起来再拼绝对 URL，响应里会出现
+	// "面板域名绝对 URL"形态（http(s)://面板host/b/vNNN/https/目标/...）。
+	// 它不以 /b/ 开头，上面拦不住；再包一层就 depth=2 → 400。这里按代理
+	// 签名识别，命中即原样返回（绝对 URL 由浏览器按面板路由解析，天然带
+	// appBase 前缀，不需要在这里截取）。
+	if i := strings.Index(s, "/b/"); i > 0 {
+		if strings.HasPrefix(s[:i], "http://") || strings.HasPrefix(s[:i], "https://") {
+			if browserReAbsProxy.MatchString(s) {
+				return s
+			}
+		}
+	}
 	// 直通模式（独立端口、路径不加前缀）：同站绝对 URL 压成根相对，
 	// 根相对原样，跨站绝对 URL 保持原样（由浏览器直连）。
 	if direct {
@@ -884,9 +913,74 @@ func panelPort(host string) string {
 // （路由器管理页）不受影响。
 var lastSite atomic.Value // string
 
+// browserReProxySite 从任意地址里提取代理路径中的站点段（scheme/host）。
+var browserReProxySite = regexp.MustCompile(`/b/(?:v\d+/)?(https?)/([^/?#]+)`)
+
+// browserCollapseDupPrefix 折叠同一站点的重复代理前缀。
+// 输入形如 /b/v1312/https/map.baidu.com/mobile/webapp/b/v1312/https/map.baidu.comindex/index&x=1
+// （页面 JS 二次拼接产物），返回 /b/v1312/https/map.baidu.com/mobile/webapp/index&x=1。
+// 只处理所有前缀都指向同一站点（scheme/host 相同）的情形——跨站嵌套是真的嵌套，
+// 仍交给上面的 400 拦截。
+func browserCollapseDupPrefix(raw string) (string, bool) {
+	first := browserReProxySite.FindStringSubmatchIndex(raw)
+	if first == nil || first[0] != 0 {
+		return "", false
+	}
+	schemeA, hostA := raw[first[2]:first[3]], raw[first[4]:first[5]]
+	prefix := raw[:first[1]] // /b/v1312/https/map.baidu.com
+	out := prefix
+	rest := raw[first[1]:]
+	for {
+		loc := browserReProxySite.FindStringSubmatchIndex(rest)
+		if loc == nil {
+			out += rest
+			break
+		}
+		schemeB, hostB := rest[loc[2]:loc[3]], rest[loc[4]:loc[5]]
+		if !strings.EqualFold(schemeA, schemeB) {
+			return "", false
+		}
+		// 二次拼接常把路径首段粘在 host 后面（.../map.baidu.comindex/index），
+		// 此时 hostB 以 hostA 开头、多出的尾巴其实是路径的一部分：折叠前缀但保留尾巴。
+		tail := ""
+		if strings.EqualFold(hostB, hostA) {
+			// 完全同站
+		} else if len(hostB) > len(hostA) && strings.EqualFold(hostB[:len(hostA)], hostA) {
+			tail = hostB[len(hostA):]
+		} else {
+			// 跨站嵌套：不折叠
+			return "", false
+		}
+		head := rest[:loc[0]]
+		if tail != "" && !strings.HasSuffix(head, "/") {
+			tail = "/" + tail // host 粘连的路径首段要补回分隔斜杠
+		}
+		out += head + tail
+		rest = rest[loc[1]:]
+	}
+	// 修复后必须真的不含多段前缀；且必须仍是一个合法的代理路径（带 scheme/host）
+	if out == raw || browserProxyDepth(out) > 1 {
+		return "", false
+	}
+	if browserReProxySite.FindStringIndex(out) == nil {
+		return "", false
+	}
+	return out, true
+}
+
+
+
+// browserReAbsProxy 代理路径签名：/b/ + 可选版本段 + scheme + host 齐全。
+// 正常站点 URL 几乎不可能出现该签名；能构造出它的只有本代理链路。
+var browserReAbsProxy = regexp.MustCompile(`(?i)/b/(?:v\d+/)?https?/[^/?#]+`)
+
 // handleOrphan GET/POST /（非根路径）：页面 JS 用面板 host 拼出的"面板根下
 // 绝对 URL"（如 /cgi-bin/x）会落到这里 —— 307 重定向回最近站点的代理路径
 // （307 保留方法与请求体，POST 登录表单也能继续）。
+// 站点判定：优先从 Referer（代理页地址，/b/ 段里带着真实站点）提取——孤儿
+// 请求总由某个代理页内的 JS 发出，它的站点就是归属站点；Referer 缺失才回退
+// 全局 lastSite。此前只用 lastSite，多标签同时开不同站点时会把请求重定向到
+// 错误站点（实测：同时开地图与管理页，管理页子菜单全部 404 或串到别的站）。
 func (s *Server) handleOrphan(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" || r.URL.Path == "" {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
@@ -896,7 +990,15 @@ func (s *Server) handleOrphan(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "未找到")
 		return
 	}
-	site, _ := lastSite.Load().(string)
+	site := ""
+	if ref := r.Referer(); ref != "" {
+		if m := browserReProxySite.FindStringSubmatch(ref); m != nil {
+			site = m[1] + "://" + m[2]
+		}
+	}
+	if site == "" {
+		site, _ = lastSite.Load().(string)
+	}
 	if site == "" {
 		fail(w, 404, "未找到")
 		return
@@ -980,9 +1082,29 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`var l=s.toLowerCase();if(l.indexOf("javascript:")===0||l.indexOf("data:")===0||l.indexOf("mailto:")===0||l.indexOf("#")===0)return u;` +
 		// 保险：地址异常长或已含多段代理路径，说明改写出现了自激，直接放弃改写
 		`if(s.length>2048||s.split("/b/").length>3)return u;` +
+		// 去重：页面 JS 二次拼接会产出含两段代理前缀的畸形地址（实测百度地图
+		// 移动版：/b/vNNN/https/host/mobile/webapp/b/vNNN/https/hostindex/index），
+		// 保留第一段前缀、删掉后续重复前缀；否则服务端判定嵌套循环 → 400。
+		`var sg=s.match(/\/b\/(?:v\d+\/)?https?\/[^\/?#]+|b\/(?:v\d+\/)?https?\/[^\/?#]+/g)||[];` +
+		`if(sg.length>1&&s.indexOf(sg[0])===0){` +
+		`s=sg[0]+s.slice(sg[0].length).replace(/\/b\/(?:v\d+\/)?https?\/[^\/?#]+|b\/(?:v\d+\/)?https?\/[^\/?#]+/g,"");}` +
 		// 幂等：已经是代理路径（服务端已改写过的属性值）绝不能再套一层，
 		// 否则 MutationObserver 每轮都会看到"属性又变了"→ 无限嵌套 → 卡死
 		`if(s.indexOf(B+"\/b\/")===0)return u;` +
+		// 幂等补：页面 JS 读已改写属性（a.href）时浏览器会解析成"面板域名绝对
+		// URL"（https://面板/b/vNNN/https/目标/...），上面只拦相对前缀拦不住，
+		// 走通用分支会再包一层 → 服务端 depth 检测 400 → 按钮点击无反应。
+		// 命中面板 host + /b/ 路径时截取 /b/ 起的部分原样返回。
+		`var am=/^(https?):\/\/([^\/]+)(\/b\/(?:v\d+\/)?(?:https?)\/[^\s]*)$/i.exec(s);` +
+		`if(am&&am[2].toLowerCase()===location.host.toLowerCase())return am[3];` +
+		// 幂等补 2：网关模式下面板绝对 URL 形如 https://域名/app/X-Box/b/vNNN/...，
+		// host 与 /b/ 之间夹着 appBase 前缀，上面的正则匹配不上。这里改用前缀
+		// 判定：面板协议+host 开头、且 /b/ 起是合法代理签名时，截取 /b/ 起的
+		// 部分并补回 appBase（B），避免丢前缀落到面板根 → 404。
+		`var k=s.indexOf("/b/");if(k>=0){var seg=s.substring(k);var ok=k===0;` +
+		`if(!ok){var pp=(location.protocol+"//"+location.host+"/").toLowerCase();` +
+		`ok=s.substring(0,k).toLowerCase().indexOf(pp)===0;}` +
+		`if(ok&&/^\/b\/(?:v\d+\/)?https?\/[^\/?#]/i.test(seg))return B+seg;}` +
 		`if(M){if(s.charAt(0)==="/"&&s.charAt(1)!=="/")return s;` +
 		`if(s.indexOf("//")===0)s=location.protocol+s;` +
 		`var d=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!d)return u;` +

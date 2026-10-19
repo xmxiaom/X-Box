@@ -373,8 +373,13 @@ check("浏览器代理拒绝代理自身", st == 400 and "面板自身" in body,
 # 代理防护：自激/自环会拖垮整机，服务端必须有硬边界
 st, body = get("http://127.0.0.1:8899/b/http/" + H + "/page?x=" + ("a" * 5000))
 check("防护-超长地址拒绝", st == 400 and "过长" in body, body[:60])
+# 重复前缀折叠：页面 JS 二次拼接会产出同站重复前缀（百度地图移动版实测），
+# 服务端应 307 纠正到单前缀地址而不是直接报错（urllib 自动跟随 → 200）
 st, body = get("http://127.0.0.1:8899/b/v9999/http/" + H + "/b/v9999/http/" + H + "/page")
-check("防护-嵌套代理拒绝", st == 400 and "嵌套" in body, body[:60])
+check("嵌套-同站重复前缀自动折叠", st == 200 and "嵌套" not in body, "%s %s" % (st, body[:60]))
+# 跨站嵌套是真的嵌套（A 站页面里再嵌 B 站），必须仍拒绝
+st, body = get("http://127.0.0.1:8899/b/v9999/http/" + H + "/b/v9999/http/127.0.0.1:8897/page")
+check("防护-跨站嵌套拒绝", st == 400 and "嵌套" in body, body[:60])
 st, body = get("http://127.0.0.1:8899/b/http/127.0.0.1/")
 check("防护-本机网关拒绝", st == 400 and "自环" in body, body[:60])
 # 并发闸门：24 个槽 + 1.5s 慢响应，40 并发里必须出现 429

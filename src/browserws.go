@@ -38,7 +38,7 @@ func (s *Server) browserProxyWS(w http.ResponseWriter, r *http.Request, target s
 		err  error
 	)
 	if tu.Scheme == "https" {
-		conn, err = tls.DialWithDialer(d, "tcp", addr, &tls.Config{InsecureSkipVerify: true})
+		conn, err = tls.DialWithDialer(d, "tcp", addr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS10})
 	} else {
 		conn, err = d.Dial("tcp", addr)
 	}
