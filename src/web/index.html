@@ -131,7 +131,20 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .st-progressbar{flex:1;min-width:160px;height:8px;background:var(--bg);border-radius:4px;overflow:hidden}
 .st-progressbar span{display:block;height:100%;width:0;background:var(--primary);border-radius:4px;transition:width .5s}
 .st-progress-lbl{font-size:12.5px;color:var(--text2);white-space:nowrap}
-.st-nodes{margin-top:12px;font-size:12.5px;color:var(--text3)}
+.st-nodes{margin-top:12px}
+.st-nodes-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.st-nodes-head .lbl{font-size:13px;font-weight:600;color:var(--text2)}
+.st-nodes-head .meta{font-size:12px;color:var(--text3);flex:1}
+.st-node-grid{display:flex;flex-wrap:wrap;gap:8px}
+.st-node{border:1.5px solid var(--border);border-radius:8px;padding:7px 12px;font-size:12.5px;cursor:pointer;transition:border-color .15s,background .15s;user-select:none}
+.st-node:hover{border-color:var(--primary)}
+.st-node.sel{border-color:var(--primary);background:var(--primary-light);font-weight:600}
+.st-node .nm{color:var(--text1)}
+.st-node .src{font-size:11px;color:var(--text3);margin-left:6px}
+.st-node.dead{opacity:.45;cursor:not-allowed;text-decoration:line-through}
+.st-node .rm{color:var(--danger);margin-left:6px;font-weight:700;padding:0 2px}
+.st-node .rm:hover{text-decoration:underline}
+.st-live{font-size:13px;font-weight:600;color:var(--primary);margin-top:10px;min-height:18px}
 
 /* 过滤 chips */
 .chips{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
@@ -184,6 +197,12 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 .proc-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
 .proc-toolbar input[type=text]{width:280px}
 .proc-toolbar .count{font-size:12.5px;color:var(--text3);margin-left:auto}
+/* 进程页分类面板：进程/应用/容器/服务 顶部 chip 切换，仅显示当前 tab */
+.proc-pane{display:none}
+.proc-pane.on{display:block}
+/* 端口管理列表紧凑化：提升信息密度，两端阅读都不松散 */
+#page-ports .tbl th{padding:9px 10px;font-size:12.5px}
+#page-ports .tbl td{padding:8px 10px;font-size:13px}
 .tbl th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
 .tbl th.sortable:hover{color:var(--primary)}
 .tbl th .arr{font-size:10px;margin-left:3px;color:var(--primary)}
@@ -208,6 +227,12 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 .nat-tip-warn{background:var(--warning-light);border-color:#FFD591;color:#7A3E00}
 /* ===== 手机端适配（飞牛 APP 内嵌 / 窄屏） ===== */
 @media(max-width:860px){
+  /* 手机端固定页面顶端：切页时 JS 给 .content 加 sticky-mode（flex 列布局），
+     sticky-page 自动撑满内容区，标题/筛选/搜索固定顶端，仅 sticky-list 内部滚动 */
+  .content.sticky-mode{display:flex;flex-direction:column;padding-bottom:14px}
+  .sticky-page.active{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+  .sticky-head{flex:0 0 auto}
+  .sticky-list{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch}
   /* 顶栏精简：隐藏版本与主机名，省出宽度 */
   .topbar{padding:0 12px;gap:8px;height:48px}
   .topbar .title{font-size:15px}
@@ -298,13 +323,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="6"/><path d="M12 8v4l3 2"/></svg>
         开机自启
       </div>
-      <div class="menu-item" data-page="ddns">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
-        DDNS服务
-      </div>
       <div class="menu-item" data-page="sync">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6-1.6A4 4 0 0 1 19 17H7a3 3 0 0 1-3-2z"/><path d="M12 12v7M9 16l3 3 3-3"/></svg>
         网盘同步
+      </div>
+      <div class="menu-item" data-page="ddns">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        DDNS服务
       </div>
       <div class="menu-item" data-page="speedtest">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20a8 8 0 1 1 8-8"/><path d="M12 12l5-3"/><circle cx="12" cy="12" r="1.5"/><path d="M18 18l3 3"/></svg>
@@ -350,70 +375,102 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       </div>
 
       <!-- 垃圾清理 -->
-      <div class="page" id="page-clean">
-        <div class="page-head">
-          <h2>垃圾清理</h2><span class="sub" id="clean-sub">点击「开始扫描」获取可清理空间</span>
-          <div class="spacer"></div>
-          <button class="btn btn-primary" id="btn-scan" onclick="startScan()">开始扫描</button>
+      <div class="page sticky-page" id="page-clean">
+        <div class="sticky-head">
+          <div class="page-head">
+            <h2>垃圾清理</h2><span class="sub" id="clean-sub">点击「开始扫描」获取可清理空间</span>
+            <div class="spacer"></div>
+            <button class="btn btn-primary" id="btn-scan" onclick="startScan()">开始扫描</button>
+          </div>
         </div>
-        <div id="clean-total" class="card" style="display:none;margin-bottom:14px"></div>
-        <div class="rows" id="clean-rows">
-          <div class="empty" id="clean-empty">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
-            <div>尚未扫描 · 白名单机制保证只清理可安全再生成的文件</div>
+        <div class="sticky-list">
+          <div id="clean-total" class="card" style="display:none;margin-bottom:14px"></div>
+          <div class="rows" id="clean-rows">
+            <div class="empty" id="clean-empty">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
+              <div>尚未扫描 · 白名单机制保证只清理可安全再生成的文件</div>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- 端口 -->
-      <div class="page" id="page-ports">
-        <div class="page-head"><h2>端口管理</h2><span class="sub" id="ports-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadPorts()">刷新</button></div>
-        <div class="chips" id="port-chips">
-          <div class="chip active" data-f="all">全部</div>
-          <div class="chip" data-f="listen">监听中</div>
-          <div class="chip" data-f="public">对外暴露</div>
+      <div class="page sticky-page" id="page-ports">
+        <div class="sticky-head">
+          <div class="page-head"><h2>端口管理</h2><span class="sub" id="ports-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadPorts()">刷新</button></div>
+          <div class="chips" id="port-chips">
+            <div class="chip active" data-f="all">全部</div>
+            <div class="chip" data-f="listen">监听中</div>
+            <div class="chip" data-f="public">对外暴露</div>
+          </div>
         </div>
-        <div class="tblwrap"><table class="tbl"><thead><tr>
-          <th>协议</th><th>本地地址</th><th>远程地址</th><th>状态</th><th>进程</th><th>属主</th><th>暴露面</th>
-        </tr></thead><tbody id="ports-body"></tbody></table></div>
+        <div class="sticky-list">
+          <div class="tblwrap"><table class="tbl"><thead><tr>
+            <th>协议</th><th>本地地址</th><th>远程地址</th><th>状态</th><th>进程</th><th>属主</th><th>暴露面</th>
+          </tr></thead><tbody id="ports-body"></tbody></table></div>
+        </div>
       </div>
 
       <!-- 进程服务 -->
-      <div class="page" id="page-procs">
-        <div class="page-head"><h2>进程与服务</h2><span class="sub" id="procs-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadProcs()">刷新</button></div>
-        <div class="card" style="margin-bottom:14px">
-          <h3>🧮 进程管理 <span class="h-action" style="font-size:12px;font-weight:400;color:var(--text3)">点击表头排序 · 风格对齐飞牛资源监控</span></h3>
-          <div class="proc-toolbar">
-            <input type="text" id="proc-search" placeholder="搜索进程名 / 用户 / PID / 命令行">
-            <span class="count" id="proc-count"></span>
+      <div class="page sticky-page" id="page-procs">
+        <div class="sticky-head">
+          <div class="page-head"><h2>进程与服务</h2><span class="sub" id="procs-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadProcs()">刷新</button></div>
+          <div class="card" style="margin-bottom:14px">
+            <div class="chips" id="proc-tabs" style="margin-bottom:0">
+              <div class="chip active" data-t="procs">🧮 进程</div>
+              <div class="chip" data-t="apps">🧩 飞牛应用</div>
+              <div class="chip" data-t="docker">🐳 Docker 容器</div>
+              <div class="chip" data-t="services">⚙️ 系统服务</div>
+            </div>
           </div>
-          <div class="tblwrap"><table class="tbl"><thead><tr>
-            <th class="sortable" data-k="pid">PID<span class="arr"></span></th>
-            <th class="sortable" data-k="name">进程名<span class="arr"></span></th>
-            <th class="sortable" data-k="user">用户<span class="arr"></span></th>
-            <th class="sortable" data-k="cpuPercent">CPU %<span class="arr"></span></th>
-            <th class="sortable" data-k="memKB">内存<span class="arr"></span></th>
-            <th class="sortable" data-k="state">状态<span class="arr"></span></th>
-            <th>运行时长</th>
-            <th style="text-align:right">操作</th>
-          </tr></thead><tbody id="proc-body"></tbody></table></div>
         </div>
-        <div class="section-title">🧩 飞牛应用</div>
-        <div class="rows" id="apps-rows"></div>
-        <div class="section-title">🐳 Docker 容器</div>
-        <div id="docker-box"></div>
-        <div class="section-title">⚙️ 系统服务（systemd）</div>
-        <div class="chips" id="svc-chips">
-          <div class="chip active" data-s="all">全部</div>
-          <div class="chip" data-s="active">运行中</div>
+        <div class="sticky-list">
+          <div class="proc-pane on" id="pane-procs">
+            <div class="proc-toolbar">
+              <input type="text" id="proc-search" placeholder="搜索进程名 / 用户 / PID / 命令行">
+              <span class="count" id="proc-count"></span>
+            </div>
+            <div class="tblwrap"><table class="tbl"><thead><tr>
+              <th class="sortable" data-k="pid">PID<span class="arr"></span></th>
+              <th class="sortable" data-k="name">进程名<span class="arr"></span></th>
+              <th class="sortable" data-k="user">用户<span class="arr"></span></th>
+              <th class="sortable" data-k="cpuPercent">CPU %<span class="arr"></span></th>
+              <th class="sortable" data-k="memKB">内存<span class="arr"></span></th>
+              <th class="sortable" data-k="state">状态<span class="arr"></span></th>
+              <th>运行时长</th>
+              <th style="text-align:right">操作</th>
+            </tr></thead><tbody id="proc-body"></tbody></table></div>
+          </div>
+          <div class="proc-pane" id="pane-apps">
+            <div class="rows" id="apps-rows"></div>
+          </div>
+          <div class="proc-pane" id="pane-docker">
+            <div id="docker-box"></div>
+          </div>
+          <div class="proc-pane" id="pane-services">
+            <div class="chips" id="svc-chips">
+              <div class="chip active" data-s="all">全部</div>
+              <div class="chip" data-s="active">运行中</div>
+            </div>
+            <div class="tblwrap"><table class="tbl"><thead><tr><th>服务单元</th><th>状态</th><th>描述</th></tr></thead><tbody id="svc-body"></tbody></table></div>
+          </div>
         </div>
-        <div class="tblwrap"><table class="tbl"><thead><tr><th>服务单元</th><th>状态</th><th>描述</th></tr></thead><tbody id="svc-body"></tbody></table></div>
       </div>
 
       <!-- 开机自启 -->
-      <div class="page" id="page-autostart">
-        <div class="page-head"><h2>开机自启</h2><span class="sub" id="autostart-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadAutostart()">刷新</button></div>
-        <div class="tblwrap"><table class="tbl"><thead><tr><th>名称</th><th>类型</th><th>状态</th><th>说明</th><th>来源</th></tr></thead><tbody id="autostart-body"></tbody></table></div>
+      <div class="page sticky-page" id="page-autostart">
+        <div class="sticky-head">
+          <div class="page-head"><h2>开机自启</h2><span class="sub" id="autostart-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadAutostart()">刷新</button></div>
+        </div>
+        <div class="sticky-list">
+          <div class="tblwrap"><table class="tbl"><thead><tr><th>名称</th><th>类型</th><th>状态</th><th>说明</th><th>来源</th></tr></thead><tbody id="autostart-body"></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- 网盘同步 -->
+      <div class="page" id="page-sync">
+        <div class="page-head"><h2>网盘同步</h2><span class="sub" id="sync-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadSyncTasks()">刷新</button></div>
+        <div class="rows" id="sync-rows"></div>
       </div>
 
       <!-- DDNS -->
@@ -461,6 +518,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
             <button class="btn btn-outline" onclick="stClear()">清空记录</button>
             <span class="st-progressbar"><span id="st-progress-fill"></span></span>
             <span class="st-progress-lbl" id="st-progress-lbl"></span>
+            <span class="st-live" id="st-live"></span>
           </div>
           <div class="st-nodes" id="st-nodes"></div>
           <div class="tblwrap" style="margin-top:14px">
@@ -473,10 +531,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       </div>
 
       <!-- 浏览器（多标签 · 经后端 /b 同源代理加载） -->
-      <div class="page" id="page-sync">
-        <div class="page-head"><h2>网盘同步</h2><span class="sub" id="sync-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadSyncTasks()">刷新</button></div>
-        <div class="rows" id="sync-rows"></div>
-      </div>
       <div class="page" id="page-browser">
         <div class="page-head"><h2>浏览器</h2><span class="sub" id="browser-sub"></span><div class="spacer"></div></div>
         <div class="browser-bar">
@@ -597,12 +651,35 @@ async function apiOnce(path, opts) {
     if(!r.ok){
       let msg = '请求失败（HTTP ' + r.status + '）';
       try{ const j = await r.json(); if(j && j.error) msg = j.error; }catch(e){}
-      throw new Error(msg); // 服务端有响应：应用错误
+      // 5xx：网关/服务端瞬时故障（多端并发常见），标记传输失败允许重试；4xx 才是应用错误
+      if(r.status >= 500){ const er = new Error(msg); er.transport = true; throw er; }
+      throw new Error(msg);
     }
     let j;
     try{ j = await r.json(); }catch(e){ const er = new Error('响应解析失败（网关可能正忙）'); er.transport = true; throw er; }
     if(!j.ok) throw new Error(j.error || '请求失败');
     return j;
+  }
+  if(apiChannel === 'nav'){
+    try{
+      const r = await navApi(path, opts, opts.timeoutMs);
+      navFailCount = 0; // 成功即清零
+      return r;
+    }catch(e){
+      if(e && e.transport){
+        navFailCount++;
+        // 兼容模式连续 3 次传输失败：大概率网关已恢复标准请求（如 fnOS 中转窗口期过去），
+        // 自动重探通道回退 xhr/fetch —— 修复旧版「降级后永不回退，重开应用才能恢复」的问题
+        if(navFailCount >= 3 && !navRechecking){
+          navRechecking = true;
+          navFailCount = 0;
+          const ch = await detectChannel();
+          navRechecking = false;
+          if(ch === 'xhr' || ch === 'fetch') switchChannel(ch); // 切回 xhr 时 switchChannel 内部会 toast
+        }
+      }
+      throw e;
+    }
   }
   return navApi(path, opts, opts.timeoutMs);
 }
@@ -618,7 +695,8 @@ function xhrApi(url, method, timeoutMs){
         if(xhr.status === 200){
           let j = null; try{ j = JSON.parse(xhr.responseText); }catch(e){}
           if(j && j.ok) resolve(j);
-          else if(j === null && !xhr.responseText){ const er = new Error('响应解析失败（网关可能正忙）'); er.transport = true; reject(er); }
+          // JSON 解析失败：网关忙时可能回 HTML 错误页/截断体——属于传输层问题，允许重试
+          else if(j === null){ const er = new Error('响应解析失败（网关可能正忙）'); er.transport = true; reject(er); }
           else reject(new Error((j && j.error) || '请求失败')); // 应用错误（有响应）
         }else if(xhr.status === 0 || xhr.status >= 500){
           let msg = 'HTTP ' + xhr.status;
@@ -650,10 +728,16 @@ window.apiTunnel = apiTunnel;
 let apiChannel = 'xhr'; // 'xhr' | 'fetch' | 'nav'
 window.__navMode = false; // 观测标志：当前是否处于导航通道（iframe 兼容模式）
 let navSeq = 0;
+let navFailCount = 0;    // 兼容模式连续传输失败计数：达阈值自动重探回退（自愈，防永久卡死）
+let navRechecking = false; // 防重复重探标志
 function switchChannel(ch){
   if(apiChannel !== ch){
     apiChannel = ch;
-    if(ch === 'nav'){ window.__navMode = true; toast('网络通道已切换为兼容模式', 'good'); }
+    if(ch === 'nav'){ window.__navMode = true; } // 切换静默：不打扰用户
+    else{
+      window.__navMode = false;
+      if(ch === 'xhr'){ navFailCount = 0; }
+    }
   }
 }
 function navApi(path, opts, timeoutMs){
@@ -727,6 +811,8 @@ document.getElementById('menu').addEventListener('click', e => {
   item.classList.add('active');
   const page = item.dataset.page;
   document.getElementById('page-'+page).classList.add('active');
+  // sticky 页面（端口/进程/自启）手机端切到 flex 列布局模式，实现「顶端固定仅列表滚动」
+  document.querySelector('.content').classList.toggle('sticky-mode', !!document.getElementById('page-'+page).classList.contains('sticky-page'));
   (loaders[page]||(()=>{}))();
 });
 
@@ -869,10 +955,104 @@ async function syncDelete(id){
 
 /* ---------- 网络测速（NAS 后端 ↔ 外网节点，浏览器仅回传结果 JSON） ---------- */
 let stTimer = null;
+let stNodes = [];          // 节点列表（GET /api/speedtest/nodes）
+let stSel = '';            // 选中的 node_id；'' = 自动竞速
+let stNodesLoaded = false;
 const stPhases = {idle:'待机', ping:'延迟测试', down:'下载测速', up:'上传测速', done:'测速完成', error:'测速失败'};
+const stSrcName = {builtin:'预置', remote:'在线', custom:'自定义'};
 function stInit(){
+  if(!stNodesLoaded) stLoadNodes(); // 节点列表只拉一次，之后由增删改操作后局部刷新
   if(stTimer) return; // 已在轮询（页面切换不清轮询，避免重复起定时器）
   stPoll();
+}
+async function stLoadNodes(){
+  try{
+    const j = await apiRetry('/api/speedtest/nodes');
+    stNodes = j.nodes || [];
+    stNodesLoaded = true;
+    stRenderNodes(j);
+  }catch(e){ /* 静默：节点加载失败不阻塞测速（后端仍走自动竞速） */ }
+}
+function stRenderNodes(meta){
+  const m = meta || {};
+  let html = '<div class="st-nodes-head">' +
+    '<span class="lbl">测速节点</span>' +
+    '<span class="meta">' +
+      (m.fetching ? '在线节点拉取中…' :
+        (m.fetch_err ? '在线拉取失败：' + esc(m.fetch_err) :
+          (m.remote_at ? '在线清单更新于 ' + esc(m.remote_at) : '未拉取在线清单'))) +
+    '</span>' +
+    '<button class="btn btn-outline btn-sm" onclick="stRefreshNodes()">刷新在线节点</button>' +
+    '<button class="btn btn-outline btn-sm" onclick="stAddNode()">+ 添加节点</button>' +
+  '</div><div class="st-node-grid">';
+  html += `<div class="st-node ${stSel===''?'sel':''}" onclick="stPick('')">` +
+    '<span class="nm">⚡ 自动竞速</span><span class="src">全节点探活选最快</span></div>';
+  stNodes.forEach(n => {
+    const dead = n.alive === false;
+    html += `<div class="st-node ${stSel===n.id?'sel':''} ${dead?'dead':''}" ` +
+      `onclick="stPick('${esc(n.id)}')">` +
+      `<span class="nm">${esc(n.name)}</span>` +
+      (n.source ? `<span class="src">${stSrcName[n.source]||esc(n.source)}</span>` : '') +
+      (dead ? '<span class="src" style="color:var(--danger)">不可用</span>' : '') +
+      (n.source==='custom' ? `<span class="rm" onclick="event.stopPropagation();stDelNode('${esc(n.id)}','${esc(n.name)}')" title="删除">×</span>` : '') +
+    '</div>';
+  });
+  if(stNodes.length === 0) html += '<span style="font-size:12.5px;color:var(--text3)">节点列表为空</span>';
+  html += '</div>';
+  document.getElementById('st-nodes').innerHTML = html;
+}
+function stPick(id){
+  if(stSel === id) return;
+  stSel = id;
+  stRenderNodes();
+  if(id) toast('已选节点，点「开始测速」生效', 'ok');
+}
+async function stRefreshNodes(){
+  try{
+    toast('正在拉取在线节点…', 'ok');
+    const j = await apiRetry('/api/speedtest/nodes/refresh', {method:'POST'});
+    stNodes = j.nodes || [];
+    stRenderNodes(j);
+    toast('在线节点已更新（' + stNodes.length + ' 个候选）', 'ok');
+  }catch(e){ toast(e.message, 'err'); }
+}
+function stAddNode(){
+  confirmDialog('添加测速节点', `
+    <div class="form-row"><label>节点名称</label><input type="text" id="stn-name" placeholder="例如 自建 LibreSpeed"></div>
+    <div class="form-row"><label>节点地址</label><input type="text" id="stn-server" placeholder="http://192.168.1.10:8080">
+      <div class="hint">LibreSpeed 后端根地址（http/https 开头），如自建：github.com/librespeed/speedtest</div></div>
+    <div class="form-row"><label>下载路径</label><input type="text" id="stn-down" placeholder="/backend/garbage.php（默认）"></div>
+    <div class="form-row"><label>上传路径</label><input type="text" id="stn-up" placeholder="/backend/empty.php（默认）"></div>
+    <div class="form-row"><label>延迟路径</label><input type="text" id="stn-ping" placeholder="/backend/empty.php（默认）"></div>
+  `, async ()=>{
+    const name = document.getElementById('stn-name').value.trim();
+    const server = document.getElementById('stn-server').value.trim();
+    if(!name || !server){ toast('名称与节点地址必填', 'err'); return false; }
+    if(!/^https?:\/\//i.test(server)){ toast('节点地址需以 http:// 或 https:// 开头', 'err'); return false; }
+    try{
+      const j = await apiRetry('/api/speedtest/nodes/save', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name, server,
+          down: document.getElementById('stn-down').value.trim(),
+          up: document.getElementById('stn-up').value.trim(),
+          ping: document.getElementById('stn-ping').value.trim()})});
+      stNodes = j.nodes || [];
+      stRenderNodes(j);
+      toast('节点已添加', 'ok');
+    }catch(e){ toast(e.message, 'err'); return false; }
+    return true;
+  }, '添加');
+}
+async function stDelNode(id, name){
+  confirmDialog('删除测速节点', '确认删除「' + esc(name) + '」？', async ()=>{
+    try{
+      const j = await apiRetry('/api/speedtest/nodes/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id})});
+      if(stSel === id) stSel = '';
+      stNodes = j.nodes || [];
+      stRenderNodes(j);
+      toast('已删除', 'ok');
+    }catch(e){ toast(e.message, 'err'); }
+  });
 }
 async function stPoll(){
   try{
@@ -894,6 +1074,15 @@ function stRender(s){
     const el = document.getElementById('st-' + k);
     if(el) el.classList.toggle('st-active', s.running && (('down'===k&&s.phase==='down')||('up'===k&&s.phase==='up')||(('ping'===k||'loss'===k)&&s.phase==='ping')));
   });
+  // 实时速率（下载/上传阶段的瞬时速度，来自后端 liveMbps）
+  const liveEl = document.getElementById('st-live');
+  if(liveEl){
+    if(s.running && (s.phase==='down'||s.phase==='up') && s.live > 0){
+      liveEl.textContent = (s.phase==='down' ? '↓ 当前 ' : '↑ 当前 ') + s.live + ' Mbps';
+    } else {
+      liveEl.textContent = '';
+    }
+  }
   // 进度条与状态字
   const fill = document.getElementById('st-progress-fill');
   const lbl = document.getElementById('st-progress-lbl');
@@ -913,9 +1102,8 @@ function stRender(s){
   // 按钮
   document.getElementById('st-btn-start').disabled = !!s.running;
   document.getElementById('st-btn-stop').disabled = !s.running;
-  // 历史表
+  // 历史表（节点说明区已改为节点卡片，此处不再输出旧文案）
   const h = s.history || [];
-  document.getElementById('st-nodes').textContent = '测速节点：' + (h.length > 0 ? '' : '成都联通 / 北京联通 / 天津电信 / 中科大（自动选延迟最低）');
   document.getElementById('st-history').innerHTML = h.map(r => '<tr>' +
     '<td>' + esc(r.at) + '</td>' +
     '<td>' + esc(r.server) + '</td>' +
@@ -929,7 +1117,11 @@ function fmtSpeed(v, id){ const el = document.getElementById(id); el.textContent
 function fmtMs(v, id){ const el = document.getElementById(id); el.textContent = (v > 0) ? v : '—'; }
 function fmtPct(v, id){ const el = document.getElementById(id); el.textContent = (v > 0 || v === 0) ? v : '—'; }
 async function stStart(){
-  try{ await apiRetry('/api/speedtest/start', {method:'POST'}); }
+  try{
+    const body = stSel ? JSON.stringify({node_id: stSel}) : '{}';
+    await apiRetry('/api/speedtest/start', {method:'POST', headers:{'Content-Type':'application/json'}, body});
+    toast(stSel ? '开始测速（指定节点）' : '开始测速（自动竞速）', 'ok');
+  }
   catch(e){ toast(e.message, 'err'); }
 }
 async function stStop(){
@@ -954,7 +1146,7 @@ async function loadOverview(){
     const _tmp = j.temps||{};
     const _cuPct = Number(j.cpuUsage) || 0;   // CPU 占用率（%），后端两次 /proc/stat 差值
     const cpuTempHtml = _tmp.cpuMax>0
-      ? ` · <span id="stat-cpu-temp" style="font-size:14px;color:${_tmp.cpuMax>=80?'var(--danger)':_tmp.cpuMax>=65?'var(--warning)':'var(--success)'}">🌡️ ${_tmp.cpuMax.toFixed(1)}°C</span>`
+      ? ` · <span id="stat-cpu-temp" style="font-size:14px;color:${tempColor(_tmp.cpuMax)}">🌡️ ${_tmp.cpuMax.toFixed(1)}°C</span>`
       : ' · <span id="stat-cpu-temp">🌡️ —</span>';
     document.getElementById('ov-stats').innerHTML = `
       <div class="stat"><div class="s-icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></div><div><div class="s-v">${j.cpuCores||'?'} 核${cpuTempHtml}</div><div class="s-k">${esc(j.cpuModel||'CPU').slice(0,26)} · 占用 <span class="${_cuPct>=85?'cpu-hot':_cuPct>=65?'cpu-warm':''}">${_cuPct.toFixed(1)}%</span></div></div></div>
@@ -980,13 +1172,18 @@ async function loadOverview(){
 }
 
 /* ---------- 温度动态刷新（/api/temps 5s 轮询，仅局部更新温度节点，不重建整页） ---------- */
-function tempColor(t){ return t>=80?'var(--danger)':t>=65?'var(--warning)':t>=55?'#F53F3F':t>=45?'var(--warning)':'var(--success)'; }
-// CPU 统计卡用 80/65 阈值，硬盘用 55/45，统一走 tempColor（重叠段取更严的）
+// 温度颜色统一单调分档：温度越高越红，绝不回橙（修复旧版 55 红/65 橙忽红忽橙的混乱）
+function tempColor(t){ return t>=75?'var(--danger)':t>=60?'var(--warning)':'var(--success)'; }
+// 硬盘按设备类型分档：NVMe/SSD 耐温高（65 橙 / 75 红）；机械盘敏感（45 橙 / 55 红）
+function diskTempColor(t, dev){
+  if(/^nvme/.test(String(dev||''))) return t>=75?'var(--danger)':t>=65?'var(--warning)':'var(--success)';
+  return t>=55?'var(--danger)':t>=45?'var(--warning)':'var(--success)';
+}
 function renderDiskTemps(temps){
   const disks = (temps||{}).disks||[];
   if(!disks.length) return '<div style="font-size:12.5px;color:var(--text3)">硬盘温度：暂无可用传感器（部分硬盘需 smartctl 支持）</div>';
   return '<div style="display:flex;flex-wrap:wrap;gap:8px 16px;font-size:12.5px;color:var(--text2)">' +
-    disks.map(d=>`<span title="${esc(d.note||d.source||'')}">盘 ${esc(d.device)}：<b id="disk-temp-all-${esc(d.device)}" style="color:${d.tempC>0?tempColor(d.tempC):'var(--text3)'}">${d.tempC>0?d.tempC.toFixed(1)+'°C':'—'}</b>${d.mount?`<span style="color:var(--text3)">（${esc(d.mount)}）</span>`:''}</span>`).join('') +
+    disks.map(d=>`<span title="${esc(d.note||d.source||'')}">盘 ${esc(d.device)}：<b id="disk-temp-all-${esc(d.device)}" style="color:${d.tempC>0?diskTempColor(d.tempC,d.device):'var(--text3)'}">${d.tempC>0?d.tempC.toFixed(1)+'°C':'—'}</b>${d.mount?`<span style="color:var(--text3)">（${esc(d.mount)}）</span>`:''}</span>`).join('') +
     '</div>';
 }
 function applyTemps(t){
@@ -1004,9 +1201,9 @@ function applyTemps(t){
   // 挂载行内的温度 span（id 与 device 对应）
   disks.forEach(d=>{
     const el = document.getElementById('disk-temp-'+d.device);
-    if(el && d.tempC>0){ el.style.color = tempColor(d.tempC); el.textContent = '🌡️ '+d.tempC.toFixed(1)+'°C'; }
+    if(el && d.tempC>0){ el.style.color = diskTempColor(d.tempC, d.device); el.textContent = '🌡️ '+d.tempC.toFixed(1)+'°C'; }
     const el2 = document.getElementById('disk-temp-all-'+d.device);
-    if(el2){ if(d.tempC>0){ el2.style.color=tempColor(d.tempC); el2.textContent=d.tempC.toFixed(0)+'°C'; } else el2.textContent='—'; }
+    if(el2){ if(d.tempC>0){ el2.style.color=diskTempColor(d.tempC, d.device); el2.textContent=d.tempC.toFixed(0)+'°C'; } else el2.textContent='—'; }
   });
 }
 let tempsTimerStarted = false, tempsTimer = null;
@@ -1064,10 +1261,17 @@ async function runNAT(force){
   const keep = force && natLoaded;  // 手动重测时保留旧结果避免闪烁，探测完成后再整体替换
   if(!keep) box.innerHTML = '<div class="empty"><span class="spin spin-dark"></span> 正在探测 STUN / 公网 IP…</div>';
   try{
-    const j = await api('/api/nat'+(force?'?force=1':''));
-    natLoaded = true;
+    const j = await api('/api/nat'+(force?'?force=1':''), {timeoutMs: 35000}); // 首次探测要连发多个 STUN 请求可达 10s+，放宽传输超时
     const n = j.nat || {};
     const lv = n.natLevel||0;
+    if(lv > 0) natLoaded = true; // 拿到有效结论才算「已有结果」；未能判定则下次进入仪表盘/轮询时自动重试
+    // 优化建议按探测时间去重：同一结论只弹一次，刷新/重开应用不再弹出（用户要求：有结果时不重新弹出）
+    let natTipNew = true;
+    try{
+      const _seen = localStorage.getItem('natTipSeen');
+      if(_seen === (n.testedAt||'')){ natTipNew = false; }
+      else{ localStorage.setItem('natTipSeen', n.testedAt||''); }
+    }catch(_){ /* iframe 环境可能禁 localStorage，降级为每次显示 */ }
     const lvCls = (lv>=1&&lv<=4) ? 'nat-lv nat-lv'+lv : 'badge badge-gray';
     const lvTxt = n.natLevelText || n.typeText || '—';
     const cgTxt = n.cgnat
@@ -1083,8 +1287,8 @@ async function runNAT(force){
       <div class="kv"><span class="k">P2P 建议</span><span class="v" style="text-align:right;max-width:65%">${esc(n.p2pNote||'—')}</span></div>
       <div class="kv"><span class="k">探测说明</span><span class="v" style="text-align:right;max-width:65%;font-weight:400;color:var(--text2)">${esc(n.detail||'—')}</span></div>
       <div class="kv"><span class="k">检测时间</span><span class="v">${esc(n.testedAt||'')}</span></div>
-      ${(lv&&lv!==1&&n.optimize)?`<div class="nat-tip${lv>=3?' nat-tip-warn':''}" id="nat-tip-box"><b>优化建议</b>${esc(n.optimize)}</div>`:''}`;
-    // 优化建议显示 5 秒后淡出消失（用户要求：不常驻占屏）
+      ${(lv&&lv!==1&&n.optimize&&natTipNew)?`<div class="nat-tip${lv>=3?' nat-tip-warn':''}" id="nat-tip-box"><b>优化建议</b>${esc(n.optimize)}</div>`:''}`;
+    // 优化建议仅首次出现时显示 5 秒后淡出；已看过的结论不再弹出（见上方 natTipSeen 去重）
     const tip = document.getElementById('nat-tip-box');
     if(tip){
       clearTimeout(natTipTimer);
@@ -1093,7 +1297,7 @@ async function runNAT(force){
         setTimeout(()=>tip.remove(), 650);
       }, 5000);
     }
-  }catch(e){ natLoaded = true; box.innerHTML = '<div class="empty">检测失败：'+esc(e.message)+'<div style="margin-top:8px"><button class="btn btn-outline btn-sm" onclick="runNAT(true)">重试</button></div></div>'; }
+  }catch(e){ box.innerHTML = '<div class="empty">检测失败：'+esc(e.message)+'<div style="margin-top:8px"><button class="btn btn-outline btn-sm" onclick="runNAT(true)">重试</button></div></div>'; }
   finally{
     natRunning = false;
     if(natBtn){ natBtn.disabled = false; natBtn.textContent = '重新检测'; }
@@ -1495,6 +1699,14 @@ function renderServices(){
 // 进程排序 / 搜索 / 状态映射（仿飞牛资源监控进程管理）
 const PROC_STATE = {R:['运行中','sd-run'],S:['睡眠','sd-sleep'],D:['磁盘等待','sd-wait'],Z:['僵尸','sd-zombie'],T:['已停止','sd-stop'],t:['跟踪','sd-stop'],I:['空闲','sd-idle'],X:['已退出','sd-dead'],x:['已退出','sd-dead'],K:['可唤醒','sd-run'],P:['驻页','sd-idle'],W:['换页','sd-wait']};
 let procQuery='', procSortKey='cpuPercent', procSortAsc=false;
+/* 进程页顶部分类切换：进程/飞牛应用/Docker 容器/系统服务（对齐端口管理筛选交互） */
+document.getElementById('proc-tabs').addEventListener('click',e=>{
+  const c = e.target.closest('.chip'); if(!c) return;
+  document.querySelectorAll('#proc-tabs .chip').forEach(x=>x.classList.remove('active'));
+  c.classList.add('active');
+  const t = c.dataset.t;
+  document.querySelectorAll('#page-procs .proc-pane').forEach(p=>p.classList.toggle('on', p.id==='pane-'+t));
+});
 document.getElementById('proc-search').addEventListener('input', function(){ procQuery=this.value.trim().toLowerCase(); renderProcs(); });
 document.querySelectorAll('#page-procs th.sortable').forEach(th=>{
   th.addEventListener('click', ()=>{
@@ -1551,20 +1763,25 @@ function askKillProc(pid,name){
 
 /* ---------- 开机自启 ---------- */
 const AUTO_TYPE = {'systemd-service':'systemd 服务','systemd-timer':'systemd 定时器','rc-local':'rc.local','cron':'cron @reboot','initd':'SysV 脚本','fnos-app':'fnOS 应用'};
+let autostartCache = null; // 缓存上次结果：切页先显旧数据秒开，后台刷新后原地更新
+function renderAutostart(items){
+  document.getElementById('autostart-sub').textContent = `共 ${items.length} 项`;
+  document.getElementById('autostart-body').innerHTML = items.map(x=>{
+    const m = SVC_STATE[x.state]||['badge-gray',esc(x.state)];
+    return `<tr><td style="font-weight:500">${esc(x.name)}</td>
+      <td><span class="badge badge-purple">${AUTO_TYPE[x.type]||esc(x.type)}</span></td>
+      <td><span class="badge ${m[0]}"><span class="dot"></span>${m[1]}</span></td>
+      <td style="color:var(--text2)">${esc(x.desc)}</td>
+      <td class="mono" style="font-size:12px;color:var(--text3)">${esc(x.source)}</td></tr>`;
+  }).join('') || '<tr><td colspan="5"><div class="empty">未检测到开机启动项</div></td></tr>';
+}
 async function loadAutostart(){
+  if(autostartCache) renderAutostart(autostartCache); // 有缓存先渲染，立即可见
   try{
     const j = await api('/api/autostart');
-    const items = j.items||[];
-    document.getElementById('autostart-sub').textContent = `共 ${items.length} 项`;
-    document.getElementById('autostart-body').innerHTML = items.map(x=>{
-      const m = SVC_STATE[x.state]||['badge-gray',esc(x.state)];
-      return `<tr><td style="font-weight:500">${esc(x.name)}</td>
-        <td><span class="badge badge-purple">${AUTO_TYPE[x.type]||esc(x.type)}</span></td>
-        <td><span class="badge ${m[0]}"><span class="dot"></span>${m[1]}</span></td>
-        <td style="color:var(--text2)">${esc(x.desc)}</td>
-        <td class="mono" style="font-size:12px;color:var(--text3)">${esc(x.source)}</td></tr>`;
-    }).join('') || '<tr><td colspan="5"><div class="empty">未检测到开机启动项</div></td></tr>';
-  }catch(e){ toast(e.message,'err'); }
+    autostartCache = j.items||[];
+    renderAutostart(autostartCache);
+  }catch(e){ if(!autostartCache) toast(e.message,'err'); } // 有缓存时静默失败，保留旧数据不打扰
 }
 
 /* ---------- DDNS ---------- */

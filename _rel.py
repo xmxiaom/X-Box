@@ -66,13 +66,24 @@ def main():
     fpk = sys.argv[2]
     title = sys.argv[3] if len(sys.argv) > 3 else tag
     tok = token()
+    # 说明文件（第 4 参数）：存在则读为 Release body
+    body_text = ""
+    if len(sys.argv) > 4:
+        with open(sys.argv[4], "r", encoding="utf-8") as f:
+            payload = json.load(f)
+            body_text = payload.get("body", "")
     # 查询是否已有该 tag 的 release（GET 404 = 不存在，走创建）
     code, rel = http("GET", f"https://api.github.com/repos/{REPO}/releases/tags/{tag}", tok)
     if code == 200 and rel:
         rel_id, upload_url = rel["id"], rel["upload_url"]
         print(f"Release 已存在: {rel['html_url']}")
+        if body_text:
+            code, rel = http("PATCH", f"https://api.github.com/repos/{REPO}/releases/{rel_id}", tok,
+                             data=json.dumps({"body": body_text}).encode(),
+                             headers={"Content-Type": "application/json"})
+            print("已更新 Release 说明")
     else:
-        body = {"tag_name": tag, "name": title, "body": "", "draft": False, "prerelease": False}
+        body = {"tag_name": tag, "name": title, "body": body_text, "draft": False, "prerelease": False}
         code, rel = http("POST", f"https://api.github.com/repos/{REPO}/releases", tok,
                          data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
         if code not in (201, 200):

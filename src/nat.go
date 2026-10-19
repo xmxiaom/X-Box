@@ -6,11 +6,14 @@ package main
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -537,30 +540,81 @@ func publicIPv6Cached() (string, error) {
 	return ip, nil
 }
 
-// nat 探测结果缓存：完整探测要连发多个 STUN 请求（最多可阻塞 10 秒+），
-// 高频调用（页面定时刷新、用户连点重测）一律沿用 5 分钟内的缓存结果，仅 force 才重测。
+// nat 探测结果缓存 + 持久化：完整探测要连发多个 STUN 请求（最多可阻塞 10 秒+）。
+// 用户要求（2026-10-19）：只要有检测结果就不自动重测——结果落盘 nat.json，
+// 应用重启后仍沿用；仅「无结果」「上次未能判定」或用户点重新检测（force）才探测。
 var (
 	natCacheMu  sync.Mutex
 	natCacheRes NatResult
-	natCacheAt  time.Time
+	natLastTry  time.Time // 最近一次探测发起时间（无论成败）：无结论时 60s 内不重复探测，防轮询打爆 STUN
+	natRunning  bool      // 并发去重：多端同时请求时只跑一次探测，其余等结果
+	natCond     *sync.Cond
+	natPath     string
 )
 
-// handleNAT 触发一次 STUN 探测并返回结论；?force=1 强制重测，否则沿用 5 分钟缓存。
+// natValid 判断类型串是否对应有效 NAT 等级（1-4）。
+func natValid(t string) bool { lv, _ := natLevel(t); return lv > 0 }
+
+// initNAT 注册持久化路径并尝试加载历史结果（dataDir 为空时纯内存缓存）。
+func initNAT(dataDir string) {
+	natCacheMu.Lock()
+	defer natCacheMu.Unlock()
+	if dataDir != "" {
+		natPath = filepath.Join(dataDir, "nat.json")
+		if b, err := os.ReadFile(natPath); err == nil {
+			var res NatResult
+			if json.Unmarshal(b, &res) == nil && natValid(res.Type) {
+				natCacheRes = res
+			}
+		}
+	}
+	natCond = sync.NewCond(&natCacheMu)
+}
+
+// handleNAT 返回 NAT 检测结论；?force=1 强制重测。无有效结果或上次未能判定时自动探测；
+// 有成功结论时永远沿用（持久化跨应用重启），多端并发只跑一次探测。
 func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "1"
 	natCacheMu.Lock()
-	if !force && natCacheAt.Add(5*time.Minute).After(time.Now()) {
+	// 已有成功结论：直接返回（持久化结果跨重启有效）
+	if natValid(natCacheRes.Type) {
 		res := natCacheRes
 		natCacheMu.Unlock()
 		ok(w, map[string]any{"nat": res})
 		return
 	}
+	// 无结果/未判定且非 force：60 秒内刚试过就直接返回上次结论（多为未能判定），
+	// 避免前端轮询触发高频 STUN 探测；否则别人在探就等，没人探就自己来
+	if !force {
+		if !natLastTry.IsZero() && time.Since(natLastTry) < 60*time.Second {
+			res := natCacheRes
+			natCacheMu.Unlock()
+			ok(w, map[string]any{"nat": res})
+			return
+		}
+		if natRunning {
+			natCond.Wait()
+			res := natCacheRes
+			natCacheMu.Unlock()
+			ok(w, map[string]any{"nat": res})
+			return
+		}
+	}
+	natRunning = true
+	natLastTry = time.Now()
 	natCacheMu.Unlock()
 
 	res := detectNAT()
 
 	natCacheMu.Lock()
-	natCacheRes, natCacheAt = res, time.Now()
+	natCacheRes = res
+	natRunning = false
+	if natValid(res.Type) && natPath != "" {
+		if b, err := json.Marshal(res); err == nil {
+			_ = os.WriteFile(natPath, b, 0o600)
+		}
+	}
+	natCond.Broadcast() // 唤醒等结果的并发请求
 	natCacheMu.Unlock()
 	ok(w, map[string]any{"nat": res})
 }
