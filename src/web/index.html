@@ -120,6 +120,19 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .net-detail span{display:inline-block;width:38px;color:var(--text3);flex-shrink:0}
 .net-detail div{display:flex;gap:8px;min-width:0;word-break:break-all}
 
+/* 网络测速 */
+#st-stats .stat{flex-direction:column;align-items:flex-start;gap:2px}
+#st-stats .stat.st-active{border-color:var(--primary);box-shadow:0 0 0 2px var(--primary-light)}
+#st-stats .stat-label{font-size:12px;color:var(--text3)}
+#st-stats .stat-num{font-size:26px;font-weight:700;line-height:1.3}
+#st-stats .stat-num small{font-size:13px;font-weight:500;color:var(--text2);margin-left:2px}
+#st-stats .stat-sub{font-size:12px;color:var(--text3);min-height:16px}
+.st-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.st-progressbar{flex:1;min-width:160px;height:8px;background:var(--bg);border-radius:4px;overflow:hidden}
+.st-progressbar span{display:block;height:100%;width:0;background:var(--primary);border-radius:4px;transition:width .5s}
+.st-progress-lbl{font-size:12.5px;color:var(--text2);white-space:nowrap}
+.st-nodes{margin-top:12px;font-size:12.5px;color:var(--text3)}
+
 /* 过滤 chips */
 .chips{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
 .chip{padding:5px 14px;border-radius:6px;border:1px solid var(--border);background:var(--card);cursor:pointer;font-size:13px;color:var(--text2);transition:.15s}
@@ -293,6 +306,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6-1.6A4 4 0 0 1 19 17H7a3 3 0 0 1-3-2z"/><path d="M12 12v7M9 16l3 3 3-3"/></svg>
         网盘同步
       </div>
+      <div class="menu-item" data-page="speedtest">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20a8 8 0 1 1 8-8"/><path d="M12 12l5-3"/><circle cx="12" cy="12" r="1.5"/><path d="M18 18l3 3"/></svg>
+        网络测速
+      </div>
       <div class="menu-item" data-page="browser">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>
         浏览器
@@ -409,6 +426,49 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="card">
           <h3>解析记录 <span class="h-action"><button class="btn btn-primary btn-sm" onclick="openRecordForm(null)">+ 添加记录</button><button class="btn btn-outline btn-sm" style="margin-left:8px" onclick="syncAllDDNS()">立即全量同步</button></span></h3>
           <div class="tblwrap"><table class="tbl"><thead><tr><th>域名</th><th>类型</th><th>IP 来源</th><th>当前值</th><th>状态</th><th>操作</th></tr></thead><tbody id="ddns-records"></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- 网络测速（后端 ↔ 外网节点实测，浏览器只回传结果 JSON） -->
+      <div class="page" id="page-speedtest">
+        <div class="page-head"><h2>网络测速</h2><span class="sub" id="st-sub">测速在 NAS 与外网节点间进行，不占用网关中转带宽</span><div class="spacer"></div></div>
+        <div class="stats" id="st-stats">
+          <div class="stat" id="st-down">
+            <div class="stat-label">下载速度</div>
+            <div class="stat-num"><span id="st-down-v">—</span><small> Mbps</small></div>
+            <div class="stat-sub" id="st-down-mb">&nbsp;</div>
+          </div>
+          <div class="stat" id="st-up">
+            <div class="stat-label">上传速度</div>
+            <div class="stat-num"><span id="st-up-v">—</span><small> Mbps</small></div>
+            <div class="stat-sub" id="st-up-mb">&nbsp;</div>
+          </div>
+          <div class="stat" id="st-ping">
+            <div class="stat-label">延迟</div>
+            <div class="stat-num"><span id="st-ping-v">—</span><small> ms</small></div>
+            <div class="stat-sub" id="st-ping-extra">&nbsp;</div>
+          </div>
+          <div class="stat" id="st-loss">
+            <div class="stat-label">丢包率</div>
+            <div class="stat-num"><span id="st-loss-v">—</span><small> %</small></div>
+            <div class="stat-sub" id="st-server">&nbsp;</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="st-toolbar">
+            <button class="btn btn-primary" id="st-btn-start" onclick="stStart()">开始测速</button>
+            <button class="btn btn-outline" id="st-btn-stop" onclick="stStop()" disabled>中止</button>
+            <button class="btn btn-outline" onclick="stClear()">清空记录</button>
+            <span class="st-progressbar"><span id="st-progress-fill"></span></span>
+            <span class="st-progress-lbl" id="st-progress-lbl"></span>
+          </div>
+          <div class="st-nodes" id="st-nodes"></div>
+          <div class="tblwrap" style="margin-top:14px">
+            <table class="tbl">
+              <thead><tr><th>时间</th><th>节点</th><th>下载 Mbps</th><th>上传 Mbps</th><th>延迟 ms</th><th>抖动 ms</th><th>丢包 %</th></tr></thead>
+              <tbody id="st-history"></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -659,7 +719,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, sync:loadSyncTasks, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, sync:loadSyncTasks, speedtest:stInit, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -804,6 +864,82 @@ async function syncDelete(id){
   confirmDialog('删除同步任务','确认删除？已同步的文件不会被删除。', async ()=>{
     try{ await apiRetry('/api/sync/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除','ok'); loadSyncTasks(); }
     catch(e){ toast(e.message,'err'); }
+  });
+}
+
+/* ---------- 网络测速（NAS 后端 ↔ 外网节点，浏览器仅回传结果 JSON） ---------- */
+let stTimer = null;
+const stPhases = {idle:'待机', ping:'延迟测试', down:'下载测速', up:'上传测速', done:'测速完成', error:'测速失败'};
+function stInit(){
+  if(stTimer) return; // 已在轮询（页面切换不清轮询，避免重复起定时器）
+  stPoll();
+}
+async function stPoll(){
+  try{
+    const j = await apiRetry('/api/speedtest/status');
+    stRender(j);
+  }catch(e){ /* 静默：轮询失败不打扰 */ }
+  stTimer = setTimeout(stPoll, 1000);
+}
+function stRender(s){
+  // 大数字卡
+  fmtSpeed(s.down, 'st-down-v'); fmtSpeed(s.up, 'st-up-v');
+  fmtMs(s.ping, 'st-ping-v'); fmtPct(s.loss, 'st-loss-v');
+  document.getElementById('st-down-mb').textContent = s.down_mb > 0 ? ('累计 ' + s.down_mb + ' MB') : '\u00a0';
+  document.getElementById('st-up-mb').textContent = s.up_mb > 0 ? ('累计 ' + s.up_mb + ' MB') : '\u00a0';
+  document.getElementById('st-ping-extra').textContent = s.jitter > 0 ? ('抖动 ' + s.jitter + ' ms') : '\u00a0';
+  document.getElementById('st-server').textContent = s.server ? ('节点：' + s.server) : '\u00a0';
+  // 阶段高亮：当前阶段卡片描边
+  ['down','up','ping','loss'].forEach(k => {
+    const el = document.getElementById('st-' + k);
+    if(el) el.classList.toggle('st-active', s.running && (('down'===k&&s.phase==='down')||('up'===k&&s.phase==='up')||(('ping'===k||'loss'===k)&&s.phase==='ping')));
+  });
+  // 进度条与状态字
+  const fill = document.getElementById('st-progress-fill');
+  const lbl = document.getElementById('st-progress-lbl');
+  if(s.running){
+    fill.style.width = s.progress + '%';
+    lbl.textContent = stPhases[s.phase] || s.phase + ' ' + s.progress + '% · ' + (s.msg || '');
+  } else if(s.phase === 'done'){
+    fill.style.width = '100%';
+    lbl.textContent = '测速完成 · ' + (s.msg || '');
+  } else if(s.phase === 'error'){
+    fill.style.width = '0%';
+    lbl.textContent = '失败：' + (s.error || '未知错误');
+  } else {
+    fill.style.width = '0%';
+    lbl.textContent = '';
+  }
+  // 按钮
+  document.getElementById('st-btn-start').disabled = !!s.running;
+  document.getElementById('st-btn-stop').disabled = !s.running;
+  // 历史表
+  const h = s.history || [];
+  document.getElementById('st-nodes').textContent = '测速节点：' + (h.length > 0 ? '' : '成都联通 / 北京联通 / 天津电信 / 中科大（自动选延迟最低）');
+  document.getElementById('st-history').innerHTML = h.map(r => '<tr>' +
+    '<td>' + esc(r.at) + '</td>' +
+    '<td>' + esc(r.server) + '</td>' +
+    '<td><b>' + r.down + '</b></td>' +
+    '<td><b>' + r.up + '</b></td>' +
+    '<td>' + r.ping + '</td>' +
+    '<td>' + r.jitter + '</td>' +
+    '<td>' + r.loss + '</td></tr>').join('');
+}
+function fmtSpeed(v, id){ const el = document.getElementById(id); el.textContent = (v > 0) ? v : '—'; }
+function fmtMs(v, id){ const el = document.getElementById(id); el.textContent = (v > 0) ? v : '—'; }
+function fmtPct(v, id){ const el = document.getElementById(id); el.textContent = (v > 0 || v === 0) ? v : '—'; }
+async function stStart(){
+  try{ await apiRetry('/api/speedtest/start', {method:'POST'}); }
+  catch(e){ toast(e.message, 'err'); }
+}
+async function stStop(){
+  try{ await apiRetry('/api/speedtest/stop', {method:'POST'}); toast('已中止','ok'); }
+  catch(e){ toast(e.message, 'err'); }
+}
+async function stClear(){
+  confirmDialog('清空测速记录','确认清空全部历史记录？', async ()=>{
+    try{ await apiRetry('/api/speedtest/clear', {method:'POST'}); toast('已清空','ok'); }
+    catch(e){ toast(e.message, 'err'); }
   });
 }
 
