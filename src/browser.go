@@ -198,6 +198,21 @@ var browserTransport4 = &http.Transport{
 	},
 }
 
+// browserJars 按目标站点共享会话：host → cookiejar。
+// 代理必须自己记住目标站的会话，不能完全依赖浏览器回传 Cookie——
+// 管理类页面（光猫/路由器）丢一次 Cookie 就整体 404、菜单点不动。
+var browserJars sync.Map
+
+// browserJarFor 取（或创建）某站点的共享会话 jar。
+func browserJarFor(host string) http.CookieJar {
+	if v, ok := browserJars.Load(host); ok {
+		return v.(http.CookieJar)
+	}
+	j, _ := cookiejar.New(nil)
+	actual, _ := browserJars.LoadOrStore(host, j)
+	return actual.(http.CookieJar)
+}
+
 // isMobileUA 判断是否为移动端浏览器标识。
 func isMobileUA(ua string) bool {
 	l := strings.ToLower(ua)
@@ -342,8 +357,24 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 		s.browserProxyWS(w, r, target, tu)
 		return
 	}
-	// 每请求独立 cookiejar：本请求（含目标站 Set-Cookie）种下的会话随响应回写。
-	jar, _ := cookiejar.New(nil)
+	// 按站点共享 cookiejar：会话必须在服务端留存一份。
+	// 只用「每请求独立 jar + 依赖浏览器回传」时，只要有一次请求浏览器没带上
+	// Cookie（路径不匹配、框架页 302、第三方站点 Set-Cookie 被浏览器丢弃等），
+	// 设备立刻判定未登录：所有 .gch 返回 404、点菜单不刷新、登录提示密码错误。
+	// 共享 jar 让代理自己维持会话，浏览器 Cookie 仍会合并进来（多端登录场景）。
+	jar := browserJarFor(host)
+	if ck := r.Header.Get("Cookie"); ck != "" {
+		var cs []*http.Cookie
+		for _, part := range strings.Split(ck, ";") {
+			part = strings.TrimSpace(part)
+			if k, v, ok := strings.Cut(part, "="); ok {
+				cs = append(cs, &http.Cookie{Name: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
+			}
+		}
+		if len(cs) > 0 {
+			jar.SetCookies(tu, cs)
+		}
+	}
 	client := &http.Client{
 		Timeout: browserTimeout,
 		Jar:     jar,
@@ -379,10 +410,8 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 	if ct := r.Header.Get("Content-Type"); ct != "" && r.Method == http.MethodPost {
 		req.Header.Set("Content-Type", ct)
 	}
-	// 入向 Cookie 透传（浏览器按 /b/{scheme}/{host}/ 子树自动携带，天然按站点隔离）
-	if ck := r.Header.Get("Cookie"); ck != "" {
-		req.Header.Set("Cookie", ck)
-	}
+	// Cookie 由 client 的共享 jar 统一注入（浏览器的 Cookie 已合并进 jar），
+	// 这里不能再手工设 Cookie 头，否则同名 Cookie 会重复发送、部分设备直接判为无效会话。
 	// Basic/Digest 认证透传（路由器管理页常见；浏览器弹框输入后由 iframe 请求带上）
 	if au := r.Header.Get("Authorization"); au != "" {
 		req.Header.Set("Authorization", au)
