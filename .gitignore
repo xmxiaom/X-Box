@@ -24,3 +24,5 @@ _rel*.py
 # 临时构建产物 / 发布说明草稿
 .ab-*
 _notes.json
+_ont_*.*
+ont_logout_probe*.js

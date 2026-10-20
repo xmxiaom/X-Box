@@ -558,7 +558,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
             <button class="btn btn-primary btn-sm" id="btn-go" onclick="goBrowser()">前往</button>
           </div>
           <div class="browser-acts">
-            <button class="btn btn-outline btn-sm" onclick="browserNewTab('')" title="新标签页">＋<span class="nav-lbl"> 新标签页</span></button>
+            <button class="btn btn-outline btn-sm" onclick="browserNewTab('')" title="新标签页"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg><span class="nav-lbl">新标签页</span></button>
           </div>
         </div>
         <div class="browser-progress" id="browser-progress"></div>
@@ -2549,6 +2549,7 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
 .browser-omni #btn-go{flex:0 0 auto;height:32px;border-radius:6px}
 .browser-acts{display:flex;gap:8px;flex:0 0 auto}
 .browser-acts .btn{height:40px}
+.browser-acts .btn svg{width:15px;height:15px}
 /* 加载进度条：导航期间在工具条下方流动，load 后淡出（15s 兜底自动隐藏） */
 .browser-progress{position:relative;height:3px;margin:-6px 0 4px;flex-shrink:0;border-radius:2px;overflow:hidden;opacity:0;transition:opacity .25s;pointer-events:none}
 .browser-progress.on{opacity:1}
@@ -2565,8 +2566,11 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
   .browser-nav{order:8}
   .browser-nav .brw-ic{width:46px;height:44px}
   .browser-nav .brw-ic svg{width:19px;height:19px}
-  .browser-acts{order:9;flex:1 1 auto}
-  .browser-acts .btn{flex:1 1 0;min-width:0;height:44px;padding:0 6px;font-size:14px}
+  .browser-acts{order:9;flex:0 0 46px}
+  /* 「＋新标签页」收成与前进/后退等高的方形图标钮：此前 flex:1 拉成一整条
+     宽横幅、孤零零一个加号，与左侧导航胶囊不成比例 */
+  .browser-acts .btn{flex:1 1 0;min-width:0;height:44px;padding:0;justify-content:center}
+  .browser-acts .btn svg{width:18px;height:18px}
   .browser-acts .nav-lbl{display:none}
   .browser-tabs{gap:5px;margin-bottom:8px}
   .browser-tab{max-width:140px;height:36px;padding:0 10px}
