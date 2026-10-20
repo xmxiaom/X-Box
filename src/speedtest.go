@@ -12,8 +12,9 @@ package main
 //          + speedtest.cn 节点库 CSV，来源 spiritLHLS/speedtest.cn-CN-ID 每日自动更新；
 //          缓存 24h，可手动刷新）
 //        → 用户自定义节点（speedtest_nodes.json 持久化）
-//      远程节点合并去重后自动探活，按延迟排序裁剪至 ≤20 个，
-//      电信/联通/移动/广电各保底 1 个；全部参与竞速，失败自动回退次优。
+//      远程节点合并去重（同机别名折叠）后自动探活，按用户策略裁剪至 ≤20：
+//      归属地云测优先 → 四大运营商各保底 1 → 其余名额按延迟填充质量云测；
+//      全部参与竞速，失败自动回退次优。
 //   4. 探活升级：TCP 握手 + HTTP GET pingURL 校验（非 2xx/3xx 视为死节点）。
 //      根治「TCP 通但后端已坏（如 HTTP 500）仍被选中 → 下载 0」的问题。
 //   5. 阶段化进度 + 实时速率：前端 1s 轮询 /api/speedtest/status，
@@ -42,13 +43,13 @@ import (
 type stNode struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
-	Group  string `json:"group"`       // 运营商/地区分组
-	Server string `json:"-"`           // 基础地址，如 https://test.ustc.edu.cn
-	Down   string `json:"-"`           // 下载路径，如 /backend/garbage.php
-	Up     string `json:"-"`           // 上传路径
-	Ping   string `json:"-"`           // 延迟探测路径
+	Group  string `json:"group"`            // 运营商/地区分组
+	Server string `json:"-"`                // 基础地址，如 https://test.ustc.edu.cn
+	Down   string `json:"-"`                // 下载路径，如 /backend/garbage.php
+	Up     string `json:"-"`                // 上传路径
+	Ping   string `json:"-"`                // 延迟探测路径
 	Source string `json:"source,omitempty"` // builtin | remote | custom
-	Alive  *bool  `json:"alive,omitempty"` // 最近一次探活结果（列表展示用）
+	Alive  *bool  `json:"alive,omitempty"`  // 最近一次探活结果（列表展示用）
 }
 
 // dlURL 拼完整下载地址（带防缓存随机参数）
@@ -148,10 +149,10 @@ type stState struct {
 	mu       sync.Mutex
 	running  bool
 	cancel   context.CancelFunc
-	phase    string  // idle | ping | down | up | done | error
-	progress int     // 当前阶段进度 0-100
-	msg      string  // 附加信息（当前节点等）
-	server   string  // 选定节点展示名
+	phase    string // idle | ping | down | up | done | error
+	progress int    // 当前阶段进度 0-100
+	msg      string // 附加信息（当前节点等）
+	server   string // 选定节点展示名
 	pingMs   float64
 	jitterMs float64
 	lossPct  float64
@@ -326,9 +327,10 @@ func (s *stNodesState) refreshRemote(force bool) {
 	}
 	got = stDedupe(got)
 
-	// 探活裁剪：远程候选全量探活 → 按延迟排序 → 四运营商各保底 1 个 → 总数 ≤20。
-	// 原始清单动辄数百节点，直接进列表会拖慢竞速与页面渲染；
-	// 探活只做 TCP+HEAD 轻量校验，20 并发约几秒完成。调用点均为异步，可给足预算。
+	// 探活裁剪：远程候选全量探活 → 用户策略裁剪（归属地云测优先 → 四运营商
+	// 各保底 1 → 云测按延迟填满）→ 总数 ≤20。原始清单动辄数百节点，直接进列表
+	// 会拖慢竞速与页面渲染；探活只做 TCP+HTTP 轻量校验，20 并发约几秒完成。
+	// 调用点均为异步，可给足预算。
 	alive, lats := stProbeBatch(got)
 	if len(alive) > 0 {
 		alive = stTrimRemote(alive, lats, 20)
@@ -360,12 +362,26 @@ func (s *stNodesState) refreshRemote(force bool) {
 	}
 }
 
-// stDedupe 同 Server+Down 去重（保留先出现的，来源优先级由调用方保证）。
+// stHostKey 节点去重键的 host 部分：host 归一化（去端口、小写）。Ookla 清单里
+// 同一物理服务器常以「X」与「X.prod.hosts.ooklaserver.net」两个别名域名出现
+// （后者是前者的 CNAME），折叠后缀避免同机条目占双份名额。
+func stHostKey(server string) string {
+	h := strings.ToLower(hostFromServer(server))
+	if i := strings.LastIndexByte(h, ':'); i > 0 {
+		h = h[:i] // 去端口
+	}
+	return strings.TrimSuffix(h, ".prod.hosts.ooklaserver.net")
+}
+
+// stDedupe 同 host:port+下载路径 去重（保留先出现的，来源优先级由调用方保证）。
+// host 折叠 Ookla 别名后缀；保留路径维度——同一台服务器上 Ookla 标准路径与
+// 云测专用路径（如 /download）是两个独立测速端点，都保留让探活/竞速决策，
+// 只折叠「同机同路径」的真重复。
 func stDedupe(list []stNode) []stNode {
 	seen := map[string]bool{}
 	out := make([]stNode, 0, len(list))
 	for _, n := range list {
-		key := strings.ToLower(hostFromServer(n.Server)) + "|" + n.Down
+		key := stHostKey(n.Server) + "|" + n.Down
 		if seen[key] {
 			continue
 		}
@@ -411,9 +427,31 @@ func stProbeBatch(list []stNode) ([]stNode, []float64) {
 	return out, lats
 }
 
-// stTrimRemote 按探活延迟升序裁剪至 cap 个：电信/联通/移动/广电各保留最快的
-// 1 个作为保底（避免裁剪后某运营商节点全部缺席、竞速无从谈起），其余按
-// 延迟序填充。
+// stCityOf 从节点名提取城市前缀：CN.csv 解析出的名称格式为「城市 sponsor」
+// （如「南京 云测节点-CN-3」），取第一个空格前即城市名。非该格式的名称
+// （Ookla「电信 天津」、LibreSpeed 校名）返回空——只对云测节点做归属地匹配。
+func stCityOf(name string) string {
+	name = strings.TrimSpace(name)
+	if i := strings.IndexByte(name, ' '); i > 0 {
+		return name[:i]
+	}
+	return ""
+}
+
+// stIsYunCe 云测节点判定：speedtest.cn 节点库的 sponsor 均以「云测节点」开头
+// （官方测速网服务器），是归属地优先与质量填充的目标集合。
+func stIsYunCe(name string) bool {
+	return strings.Contains(name, "云测节点")
+}
+
+// stTrimRemote 按用户策略（2026-10-20）裁剪至 cap 个，前提全部为探活存活节点：
+//  1. 归属地云测优先：宽带归属地（省/市，取自线路识别 region）命中的云测节点
+//     全部保留（如南京宽带优先保「南京 云测节点-CN-x」）；
+//  2. 四大运营商（电信/联通/移动/广电）各保留延迟最优的 1 个作保底，
+//     避免裁剪后某运营商节点全部缺席、竞速无从谈起；
+//  3. 其余名额按延迟升序填充其它质量较好的云测节点。
+//
+// 名额不足时（存活数 < cap）全保留。
 func stTrimRemote(list []stNode, lats []float64, cap int) []stNode {
 	if len(list) != len(lats) || len(list) <= cap {
 		return list
@@ -423,27 +461,75 @@ func stTrimRemote(list []stNode, lats []float64, cap int) []stNode {
 		idx[i] = i
 	}
 	sort.SliceStable(idx, func(a, b int) bool { return lats[idx[a]] < lats[idx[b]] })
-	// 保底：四大运营商各取延迟最快的一个
+
+	region := stIsp.snapshotRegion() // 「省 市」，如「江苏 南京」；未识别为空
 	keep := map[int]bool{}
+	usedHost := map[string]bool{} // 折叠别名后的机器维度，同机不重复入选
+	markHost := func(i int) { usedHost[stHostKey(list[i].Server)] = true }
+	hostUsed := func(i int) bool { return usedHost[stHostKey(list[i].Server)] }
+	// 1) 归属地云测：region 含城市名（或城市名含 region 片段）即命中
+	if region != "" {
+		for _, i := range idx {
+			n := list[i]
+			if !stIsYunCe(n.Name) {
+				continue
+			}
+			city := stCityOf(n.Name)
+			if city != "" && !hostUsed(i) && (strings.Contains(region, city) || strings.Contains(city, region)) {
+				keep[i] = true
+				markHost(i)
+			}
+		}
+	}
+	// 2) 四大运营商各取延迟最快的一个保底
 	bottom := map[string]bool{"电信": false, "联通": false, "移动": false, "广电": false}
 	for _, i := range idx {
 		g := list[i].Group
-		if !bottom[g] {
+		if !bottom[g] && !hostUsed(i) {
 			bottom[g] = true
 			keep[i] = true
+			markHost(i)
 		}
 	}
+	// 3) 其余名额按延迟序填充云测节点（已在 keep 的跳过），再不够用其它节点补
 	out := make([]stNode, 0, cap)
-	for _, i := range idx {
-		if keep[i] {
-			out = append(out, list[i])
-		}
-	}
 	for _, i := range idx {
 		if len(out) >= cap {
 			break
 		}
-		if !keep[i] {
+		if keep[i] && stIsYunCe(list[i].Name) {
+			markHost(i)
+			out = append(out, list[i])
+		}
+	}
+	// 3b) 其余云测按延迟序填充
+	for _, i := range idx {
+		if len(out) >= cap {
+			break
+		}
+		if !keep[i] && !hostUsed(i) && stIsYunCe(list[i].Name) {
+			keep[i] = true
+			markHost(i)
+			out = append(out, list[i])
+		}
+	}
+	// 3c) 已入选的非云测（归属地云测外的保底等）按延迟序排入
+	for _, i := range idx {
+		if len(out) >= cap {
+			break
+		}
+		if keep[i] && !stIsYunCe(list[i].Name) {
+			out = append(out, list[i])
+		}
+	}
+	// 3d) 名额仍不满时用其它存活节点补（同机去重）
+	for _, i := range idx {
+		if len(out) >= cap {
+			break
+		}
+		if !keep[i] && !hostUsed(i) {
+			keep[i] = true
+			markHost(i)
 			out = append(out, list[i])
 		}
 	}
@@ -1298,6 +1384,7 @@ func stUpload(ctx context.Context, client *http.Client, node stNode, s *stState)
 	waitDone := make(chan struct{})
 	go func() { wg.Wait(); close(waitDone) }()
 	start := time.Now()
+	prevBytes, prevAt := int64(0), start
 	tick := time.NewTicker(500 * time.Millisecond)
 	defer tick.Stop()
 loop:
@@ -1311,6 +1398,13 @@ loop:
 			mu.Lock()
 			s := bytesSum
 			mu.Unlock()
+			// 瞬时速率：本采样窗口内增量（与下载阶段同口径，供前端「↑ 当前 X Mbps」）
+			dt := time.Since(prevAt).Seconds()
+			inst := 0.0
+			if dt > 0 {
+				inst = float64(s-prevBytes) * 8 / dt / 1e6
+			}
+			prevBytes, prevAt = s, time.Now()
 			p := int(time.Since(start).Seconds() * 100 / 8)
 			if p > 99 {
 				p = 99
@@ -1318,6 +1412,7 @@ loop:
 			st.mu.Lock()
 			st.progress = p
 			st.upMB = r1(float64(s) / 1e6)
+			st.liveMbps = r1(inst)
 			st.mu.Unlock()
 		}
 	}
@@ -1377,14 +1472,14 @@ func (c *countReader) Read(p []byte) (int, error) {
 
 // stISP 运营商线路识别结果（24h 缓存，手动可强刷）。
 type stISP struct {
-	mu       sync.Mutex
-	ip       string // 请求实际走的出口地址（v4 或 v6）
-	ip4      string // IPv4 出口地址（无 v4 出口/探测失败为空）
-	ip6      string // IPv6 出口地址（无 v6 出口/探测失败为空）
-	isp      string // 联通/电信/移动/广电/教育网/其他…
-	region   string // 省 市
+	mu        sync.Mutex
+	ip        string // 请求实际走的出口地址（v4 或 v6）
+	ip4       string // IPv4 出口地址（无 v4 出口/探测失败为空）
+	ip6       string // IPv6 出口地址（无 v6 出口/探测失败为空）
+	isp       string // 联通/电信/移动/广电/教育网/其他…
+	region    string // 省 市
 	checkedAt time.Time
-	checking bool
+	checking  bool
 }
 
 var stIsp = &stISP{}
@@ -1394,6 +1489,13 @@ func (d *stISP) snapshotISP() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.isp
+}
+
+// snapshotRegion 并发安全读取当前识别到的归属地「省 市」（节点归属地优先裁剪用）。
+func (d *stISP) snapshotRegion() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.region
 }
 
 // handleSpeedtestISP GET /api/speedtest/isp — 线路识别（带缓存；?refresh=1 强刷）。
@@ -1487,7 +1589,7 @@ func stDetectOne(v4 bool) (res struct {
 	if req, err := http.NewRequest("GET", "https://myip.ipip.net/json", nil); err == nil {
 		if resp, err := client.Do(req); err == nil {
 			var j struct {
-				Ret string `json:"ret"`
+				Ret  string `json:"ret"`
 				Data struct {
 					IP       string   `json:"ip"`
 					Location []string `json:"location"`

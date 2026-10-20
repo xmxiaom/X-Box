@@ -1078,8 +1078,11 @@ function stPick(id){
 async function stRefreshNodes(){
   try{
     await apiRetry('/api/speedtest/nodes/refresh', {method:'POST'});
-    // 后端异步拉取：立即返回的是「当前列表 + fetching=true」，必须轮询 /api/speedtest/nodes
-    // 直到 fetching=false 再渲染最终结果。之前直接用响应覆盖 stNodes，会把预置节点清空。
+    // 即时反馈：后端异步拉取（立即返回 fetching=true），先就地渲染「拉取中」
+    // 状态，避免按钮点击后 ~1.2s 内页面毫无变化。
+    stRenderNodes({fetching:true});
+    // 必须轮询 /api/speedtest/nodes 直到 fetching=false 再渲染最终结果。
+    // 之前直接用响应覆盖 stNodes，会把预置节点清空。
     const started = Date.now();
     let last = null;
     while(Date.now() - started < 45000){
@@ -1092,7 +1095,7 @@ async function stRefreshNodes(){
     if(last && !last.fetching && last.fetch_err){
       toast(last.fetch_err, 'err'); // 仅失败时提示；成功由列表刷新本身呈现，不再弹 toast
     }
-  }catch(e){ toast(e.message, 'err'); }
+  }catch(e){ stRenderNodes(); toast(e.message, 'err'); }
 }
 function stAddNode(){
   confirmDialog('添加测速节点', `
