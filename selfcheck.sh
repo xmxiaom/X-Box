@@ -31,7 +31,7 @@ done
 echo "[3] JSON 合法性"
 check "config/privilege 合法 JSON 且 run-as=root" "\"$PY\" -c \"import json;d=json.load(open('pkg/config/privilege'));assert d['defaults']['run-as']=='root'\""
 check "config/resource 合法 JSON" "\"$PY\" -c \"import json;json.load(open('pkg/config/resource'))\""
-check "app/ui/config 合法 JSON 且端口正确" "\"$PY\" -c \"import json;d=json.load(open('pkg/app/ui/config'));a=d['.url']['X-Box.Application'];assert a['port']=='8899'\""
+check "app/ui/config 合法 JSON 且网关 socket 正确" "\"$PY\" -c \"import json;d=json.load(open('pkg/app/ui/config'));a=d['.url']['X-Box.Application'];assert a['gatewaySocket']=='app.sock' and a['gatewayPrefix']=='/app/X-Box'\""
 
 echo "[4] 双架构二进制"
 for a in amd64 arm64; do
@@ -50,7 +50,7 @@ check "ICON.PNG 256px（与 ui 同源高清，见 gen_icons.py 说明）" "\"$PY
 check "ICON_256.PNG 256px" "\"$PY\" -c \"import struct;d=open('pkg/ICON_256.PNG','rb').read();assert struct.unpack('>II',d[16:24])==(256,256)\""
 check "ui icon_64/icon_256 齐备" "[ -f 'pkg/app/ui/images/icon_64.png' ] && [ -f 'pkg/app/ui/images/icon_256.png' ]"
 check "根图标与 ui 图标字节一致" "\"$PY\" -c \"assert open('pkg/ICON.PNG','rb').read()==open('pkg/app/ui/images/icon_64.png','rb').read();assert open('pkg/ICON_256.PNG','rb').read()==open('pkg/app/ui/images/icon_256.png','rb').read()\""
-check "UI 内嵌同一应用图标（base64 data URI）" "grep -qa 'data:image/png;base64,iVBORw0KGgo' pkg/app/server/xbox-amd64"
+check "UI 图标由外部文件承载（config 引用 images/icon_256.png）" "grep -q 'images/icon_256.png' pkg/app/ui/config"
 
 echo "[6] fpk 包结构"
 FPK="X-Box.fpk"

@@ -1265,6 +1265,16 @@ func browserPatchScript(tu *url.URL, direct bool) string {
 		`if(hp&&hp[2].toLowerCase()===location.host.toLowerCase()){` +
 		`var g2=/^(https?):\/\/([\s\S]+)$/.exec(O);` +
 		`if(g2)s=g2[1]+"://"+g2[2]+((hp[3]&&hp[3].charAt(0)==="/")?hp[3]:"/"+(hp[3]||""));}` +
+		// 兜底：页面 JS 在真实目标域上下文里二次拼接，产出「外域 host + 面板前缀」
+		// 的畸形绝对 URL（实测形态：https://map.baidu.com/app/X-Box/…）。这类地址
+		// 不带 /b/ 段时服务端管不到（请求逃逸到 fnOS 网关 → 品牌 404）。这里剥掉
+		// 面板前缀：剥后若带代理签名（可能无前导斜杠，如 b/vNNN/https/…）则当
+		// 代理路径直接返回（补回 B）；否则还原成目标绝对地址交给通用分支重新包装。
+		`var mm=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(mm&&B){var rp=mm[3]||"";` +
+		`if(rp.indexOf(B+"/")===0){rp=rp.slice((B+"/").length);` +
+		`var r1="/"+rp.replace(/^\/+/,"");` +
+		`var kk=r1.indexOf("/b/");if(kk>=0&&/^\/b\/(?:v\d+\/)?https?\/[^\/?#]/i.test(r1.substring(kk)))return B+r1.substring(kk);` +
+		`s=mm[1]+"://"+mm[2]+(r1.charAt(0)==="/"?r1:"/"+r1);}}` +
 		`var m=/^(https?):\/\/([^\/]+)([\s\S]*)$/i.exec(s);if(!m)return u;` +
 		`var out=P+m[1]+"/"+m[2]+((m[3]&&m[3].charAt(0)==="/")?m[3]:"/"+(m[3]||""));` +
 		// 防自嵌套：登录类跳转常把当前地址编码进 redirect_uri 等参数，
