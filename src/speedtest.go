@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,15 +51,23 @@ type stNode struct {
 	Ping   string `json:"-"`                // 延迟探测路径
 	Source string `json:"source,omitempty"` // builtin | remote | custom
 	Alive  *bool  `json:"alive,omitempty"`  // 最近一次探活结果（列表展示用）
+	// SizeParam 下载端点的计费参数名：""=用 ckSize（LibreSpeed 协议）；
+	// "size"=运营商自建节点（部分本地电信/移动节点只认 size，传 ckSize 会
+	// 返回 Content-Length: 0，导致下行恒为 0、只有上行速度）。
+	SizeParam string `json:"-"`
 }
 
-// dlURL 拼完整下载地址（带防缓存随机参数）
+// dlURL 拼完整下载地址（带防缓存随机参数 + 计费参数）
 func (n stNode) dlURL(seq int) string {
 	sep := "?"
 	if strings.Contains(n.Down, "?") {
 		sep = "&"
 	}
-	return strings.TrimSuffix(n.Server, "/") + n.Down + sep + "ckSize=100&r=" + fmt.Sprintf("%d%d", time.Now().UnixNano(), seq)
+	param := n.SizeParam
+	if param == "" {
+		param = "ckSize"
+	}
+	return strings.TrimSuffix(n.Server, "/") + n.Down + sep + param + "=100&r=" + fmt.Sprintf("%d%d", time.Now().UnixNano(), seq)
 }
 
 // ulURL / pingURL 拼完整地址
@@ -678,15 +687,24 @@ func stParseCnIDCsv(body []byte) []stNode {
 			sponsor = host
 		}
 		name := strings.TrimSpace(city + " " + sponsor)
+		// 协议分型：speedtest.cn 公共云测（sponsor 以「云测节点」开头）用
+		// LibreSpeed 协议（ckSize）；运营商自建节点（如「上海电信」「南京移动-5G」
+		// 的本地站点）只认 size 参数，传 ckSize 会返回 Content-Length:0，
+		// 表现为下行恒 0、只有上行速度。
+		sizeParam := ""
+		if !strings.Contains(sponsor, "云测节点") {
+			sizeParam = "size"
+		}
 		out = append(out, stNode{
-			ID:     "cnid-" + fmt.Sprintf("%x", fnv32(srv+dPath)),
-			Name:   name,
-			Group:  groupOf(op),
-			Server: srv,
-			Down:   dPath,
-			Up:     uPath,
-			Ping:   pPath,
-			Source: "remote",
+			ID:        "cnid-" + fmt.Sprintf("%x", fnv32(srv+dPath)),
+			Name:      name,
+			Group:     groupOf(op),
+			Server:    srv,
+			Down:      dPath,
+			Up:        uPath,
+			Ping:      pPath,
+			Source:    "remote",
+			SizeParam: sizeParam,
 		})
 	}
 	return out
@@ -1229,7 +1247,53 @@ func stProbeNode(ctx context.Context, n stNode) float64 {
 	if !try("HEAD") && !try("GET") {
 		return 0
 	}
+	// 下载端点有效性校验：部分节点 ping 正常、HTTP 200，但下载端点返回
+	// Content-Length: 0（服务器没挂载测速文件，如某些地方电信的 /download）。
+	// 这类节点只能测上行、下行恒为 0，若放任入选会表现为"只有上行速度"。
+	// 用 HEAD 读响应头判定，开销约 40ms，远小于后续真实测速。
+	if n.Down != "" {
+		if cl, ok := stDownloadContentLen(n); ok && cl == 0 {
+			return 0
+		}
+	}
 	return float64(total.Microseconds()) / 1000.0 / float64(tries-fail)
+}
+
+// stDownloadContentLen 对下载端点发 HEAD，取 Content-Length。
+// ok=false 表示拿不到该头（节点不支持 HEAD 或无此响应头）——此时不做判定，
+// 交由真实测速阶段处理，避免误杀可用节点。
+func stDownloadContentLen(n stNode) (int64, bool) {
+	// 必须用 dlURL（含计费参数）而不是裸路径：运营商自建节点不传 size 时
+	// 会返回 Content-Length:0，用裸路径探活会把可用节点误杀。
+	u := n.dlURL(0)
+	req, err := http.NewRequest(http.MethodHead, u, nil)
+	if err != nil {
+		return 0, false
+	}
+	cl := &http.Client{
+		Timeout: 2000 * time.Millisecond,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 64))
+	if resp.StatusCode >= 400 {
+		return 0, false
+	}
+	v := resp.Header.Get("Content-Length")
+	if v == "" {
+		return 0, false
+	}
+	size, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return size, true
 }
 
 // 下载：8 连接并发拉流 8 秒，丢弃前 2 秒（TCP 爬坡），后 6 秒平均速率。
