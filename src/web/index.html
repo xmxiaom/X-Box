@@ -240,6 +240,27 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
 .nat-tip{margin-top:10px;background:var(--primary-light);border:1px solid #94BFFF;border-radius:6px;padding:10px 12px;font-size:12.5px;line-height:1.65;color:#0E42D2}
 .nat-tip b{display:block;margin-bottom:3px}
 .nat-tip-warn{background:var(--warning-light);border-color:#FFD591;color:#7A3E00}
+/* ===== 媒体管理 ===== */
+.media-tabs{display:flex;gap:8px;margin-bottom:14px}
+.media-tabs .mtab{flex:1;height:42px;border:1px solid var(--border);background:var(--card);color:var(--text2);border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit}
+.media-tabs .mtab.active{background:var(--primary-light);color:var(--primary);border-color:var(--primary)}
+.mplan{max-height:44vh;overflow:auto;border:1px solid var(--border);border-radius:8px;margin-top:10px}
+.mplan .it{padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px;line-height:1.65}
+.mplan .it:last-child{border-bottom:none}
+.mplan .old{color:var(--text3);text-decoration:line-through;word-break:break-all}
+.mplan .new{word-break:break-all;font-weight:600}
+.mplan .fx{color:var(--warning);font-size:11px;margin-top:2px;word-break:break-all}
+.mlog{font-family:ui-monospace,Menlo,Consolas,monospace;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:11.5px;line-height:1.7;max-height:190px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin-top:8px}
+.dp-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:200}
+.dp-mask.show{display:flex}
+.dp-box{background:var(--card);border-radius:14px;width:min(560px,92vw);max-height:78vh;display:flex;flex-direction:column;padding:18px 16px;box-shadow:0 12px 40px rgba(0,0,0,.18)}
+.dp-box h3{font-size:15px;margin-bottom:6px}
+.dp-crumb{font-size:11.5px;color:var(--text3);word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace;padding:6px 0;border-bottom:1px solid var(--border);min-height:26px}
+.dp-list{overflow:auto;flex:1;min-height:130px}
+.dp-item{padding:11px 8px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;justify-content:space-between;gap:10px;font-size:13.5px}
+.dp-item:hover{background:var(--primary-light)}
+.dp-item .cnt{color:var(--text3);font-size:11px;flex:0 0 auto;white-space:nowrap}
+.dp-foot{display:flex;gap:8px;justify-content:flex-end;padding-top:12px}
 /* ===== 手机端适配（飞牛 APP 内嵌 / 窄屏） ===== */
 @media(max-width:860px){
   /* 固定页面顶端规则已提为全局（电脑端同样生效），见布局骨架段 */
@@ -279,6 +300,17 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
   #page-sync .row .actions{flex:1 1 100%;display:flex;gap:6px;padding-left:46px;box-sizing:border-box}
   #page-sync .row .actions .btn{flex:1 1 0;min-width:0;height:36px;padding:0 4px;font-size:13px}
   #page-sync .bar{height:6px}
+  /* 媒体管理（手机）：行内按钮整行等分、路径换行、目录选择器全宽 */
+  #page-media .row{padding:11px 12px;gap:8px}
+  #page-media .row .icon{width:38px;height:38px;flex:0 0 38px}
+  #page-media .row .info{flex:1 1 calc(100% - 46px);min-width:0}
+  #page-media .row .name{font-size:13.5px;gap:6px;flex-wrap:wrap}
+  #page-media .row .desc{word-break:break-all;font-size:11px;line-height:1.6;white-space:normal}
+  #page-media .row .actions{flex:1 1 100%;display:flex;gap:6px;flex-wrap:wrap;padding-left:0;box-sizing:border-box}
+  #page-media .row .actions .btn{flex:1 1 0;min-width:0;height:36px;padding:0 4px;font-size:13px}
+  .media-tabs .mtab{height:44px;font-size:13.5px}
+  .mplan{max-height:38vh}
+  .dp-box{max-height:82vh}
   /* 进程工具条全宽 */
   .proc-toolbar input[type=text]{width:100%}
   .proc-toolbar .count{margin-left:0;width:100%}
@@ -339,6 +371,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       <div class="menu-item" data-page="sync">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6-1.6A4 4 0 0 1 19 17H7a3 3 0 0 1-3-2z"/><path d="M12 12v7M9 16l3 3 3-3"/></svg>
         网盘同步
+      </div>
+      <div class="menu-item" data-page="media">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="14" height="14" rx="2"/><path d="M16 10l6-3v10l-6-3"/></svg>
+        媒体管理
       </div>
       <div class="menu-item" data-page="ddns">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
@@ -484,6 +520,16 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       <div class="page" id="page-sync">
         <div class="page-head"><h2>网盘同步</h2><span class="sub" id="sync-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadSyncTasks()">刷新</button></div>
         <div class="rows" id="sync-rows"></div>
+      </div>
+
+      <!-- 媒体管理 -->
+      <div class="page" id="page-media">
+        <div class="page-head"><h2>媒体管理</h2><span class="sub" id="media-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadMediaTasks()">刷新</button></div>
+        <div class="media-tabs">
+          <button class="mtab active" id="mtab-video" onclick="mediaSwitch('video')">🎬 视频管理</button>
+          <button class="mtab" id="mtab-audio" onclick="mediaSwitch('audio')">🎵 音频管理</button>
+        </div>
+        <div class="rows" id="media-rows"></div>
       </div>
 
       <!-- DDNS -->
@@ -633,6 +679,17 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
     <div class="foot">
       <button class="btn btn-text" onclick="closeModal()">取消</button>
       <button class="btn btn-primary" id="modal-ok">确认</button>
+    </div>
+  </div>
+</div>
+<div class="dp-mask" id="dirpicker">
+  <div class="dp-box">
+    <h3>选择目录</h3>
+    <div class="dp-crumb" id="dp-crumb">加载中…</div>
+    <div class="dp-list" id="dp-list"></div>
+    <div class="dp-foot">
+      <button class="btn btn-text" onclick="closeDirPicker()">取消</button>
+      <button class="btn btn-primary" onclick="dpChoose()">选择当前目录</button>
     </div>
   </div>
 </div>
@@ -845,7 +902,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, sync:loadSyncTasks, speedtest:stInit, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, sync:loadSyncTasks, media:loadMediaTasks, speedtest:stInit, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -993,6 +1050,230 @@ async function syncDelete(id){
     try{ await apiRetry('/api/sync/delete?id='+encodeURIComponent(id),{method:'POST'}); toast('已删除','ok'); loadSyncTasks(); }
     catch(e){ toast(e.message,'err'); }
   });
+}
+
+/* ---------- 媒体管理（视频/音频文件名与元数据整理） ---------- */
+let mediaCache = [], mediaStates = {}, mediaTab = 'video', mediaTimer = null;
+
+function mediaSwitch(kind){
+  mediaTab = kind;
+  document.getElementById('mtab-video').classList.toggle('active', kind === 'video');
+  document.getElementById('mtab-audio').classList.toggle('active', kind === 'audio');
+  renderMediaPage();
+}
+
+async function loadMediaTasks(){
+  try{
+    const j = await apiRetry('/api/media/list');
+    mediaCache = j.tasks || [];
+    mediaStates = j.states || {};
+    renderMediaPage();
+    let running = false;
+    for(const k in mediaStates){ if(mediaStates[k] && mediaStates[k].running) running = true; }
+    if(mediaTimer) clearTimeout(mediaTimer);
+    if(running){
+      mediaTimer = setTimeout(()=>{
+        const pg = document.getElementById('page-media');
+        if(pg && pg.classList.contains('active')) loadMediaTasks();
+      }, 1500);
+    }
+  }catch(e){
+    if(!/HTTP (0|5\d\d)/.test(String(e.message))) toast(e.message, 'err');
+  }
+}
+
+function renderMediaPage(){
+  const isV = mediaTab === 'video';
+  const list = mediaCache.filter(t => t.kind === mediaTab);
+  document.getElementById('media-sub').textContent = '共 ' + list.length + ' 个' + (isV ? '视频' : '音频') + '任务';
+  const hint = isV
+    ? '原理：读文件名与影片内嵌信息（MP4/MKV），按 Jellyfin/Plex 规范重命名——电影「片名 (年份) [分辨率] [来源]」，剧集「剧名 (年份) - S01E01 - 标题」并自动建 Season 目录。只改文件名与位置，不删除文件，重名自动加序号不覆盖。'
+    : '原理：读音频标签（ID3/Vorbis/MP4）并与文件名交叉印证，纠正「歌名填在歌手框」这类错位；可联网匹配 MusicBrainz/iTunes 补全歌手、专辑、年份与封面；按「歌手 - 歌名」重命名，可选归档到「歌手/专辑」。只改文件名与标签，不删除文件。';
+  const head = '<div class="proxy-hint">' + hint + '</div>' +
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openMediaForm(null)">+ 添加' + (isV ? '视频' : '音频') + '整理任务</button></div>';
+
+  const rows = list.map(t => {
+    const st = mediaStates[t.id] || {};
+    let badge = '<span class="badge badge-gray"><span class="dot"></span>待运行</span>';
+    if(st.running) badge = '<span class="badge badge-blue"><span class="dot"></span>整理中</span>';
+    else if(st.lastAt) badge = st.lastOk
+      ? '<span class="badge badge-green"><span class="dot"></span>已完成</span>'
+      : '<span class="badge" style="background:var(--danger-light);color:var(--danger)"><span class="dot"></span>有错误</span>';
+
+    let detail;
+    if(st.running){
+      const pct = st.total ? Math.min(100, Math.round((st.done || 0) * 100 / st.total)) : 0;
+      detail = '<div class="bar" style="margin-top:6px"><i style="width:' + pct + '%"></i></div>' +
+        '<span style="font-size:12px;color:var(--text2)">' + (st.phase === 'scan' ? '正在扫描目录…' : '处理中 ' + (st.done || 0) + ' / ' + (st.total || 0) + '（' + pct + '%）') +
+        (st.current ? ' · ' + esc(st.current.slice(0, 40)) : '') + '</span>';
+    }else if(st.lastAt){
+      detail = '扫描 ' + (st.total || 0) + ' · 重命名 ' + (st.renamed || 0) +
+        (isV ? '' : (' · 写标签 ' + (st.tagged || 0))) +
+        ' · 跳过 ' + (st.skipped || 0) + ' · 失败 ' + (st.failed || 0) + ' · 耗时 ' + (st.duration || '—');
+    }else{
+      detail = '尚未整理过';
+    }
+    if(st.lastErr) detail = '<span style="color:var(--danger)">' + esc(st.lastErr.slice(0, 100)) + '</span> · ' + detail;
+
+    const tags = [];
+    if(t.recursive) tags.push('<span class="badge badge-blue"><span class="dot"></span>含子目录</span>');
+    if(isV && t.useMeta) tags.push('<span class="badge badge-green"><span class="dot"></span>读内嵌信息</span>');
+    if(!isV && t.fix) tags.push('<span class="badge badge-green"><span class="dot"></span>字段纠错</span>');
+    if(!isV && t.online) tags.push('<span class="badge badge-blue"><span class="dot"></span>联网匹配</span>');
+    if(!isV && t.writeTag) tags.push('<span class="badge badge-blue"><span class="dot"></span>回写标签</span>');
+    if(t.organize) tags.push('<span class="badge badge-gray"><span class="dot"></span>自动归档</span>');
+
+    const when = st.lastAt ? new Date(st.lastAt).toLocaleString() : '—';
+    const idArg = '\'' + esc(t.id) + '\'';
+    return '<div class="row">' +
+      '<div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+        (isV ? '<rect x="2" y="5" width="14" height="14" rx="2"/><path d="M16 10l6-3v10l-6-3"/>' : '<path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/>') +
+      '</svg></div>' +
+      '<div class="info"><div class="name">' + esc(t.name) + ' ' + badge + ' ' + tags.join(' ') + '</div>' +
+        '<div class="desc mono" style="font-size:11.5px">' + esc(t.dir) + '</div>' +
+        '<div class="desc" style="font-size:11.5px;color:var(--text3)">' + esc(when) + ' · ' + detail + '</div>' +
+      '</div>' +
+      '<div class="actions">' +
+        (st.running
+          ? '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="mediaStop(' + idArg + ')">停止</button>'
+          : '<button class="btn btn-text btn-sm" onclick="mediaPreview(' + idArg + ')">预览</button>' +
+            '<button class="btn btn-text btn-sm" onclick="mediaRun(' + idArg + ')">整理</button>') +
+        '<button class="btn btn-text btn-sm" onclick="mediaShowLog(' + idArg + ')">日志</button>' +
+        '<button class="btn btn-text btn-sm" onclick="openMediaForm(' + idArg + ')">编辑</button>' +
+        '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="mediaDelete(' + idArg + ')">删除</button>' +
+      '</div></div>';
+  }).join('') || '<div class="empty">还没有' + (isV ? '视频' : '音频') + '整理任务，点右上角「添加」选择一个飞牛文件夹</div>';
+  document.getElementById('media-rows').innerHTML = head + rows;
+}
+
+function openMediaForm(id){
+  const t = id ? mediaCache.find(x => x.id === id) : null;
+  const kind = t ? t.kind : mediaTab;
+  const isV = kind === 'video';
+  const optV = '<label class="field-check"><input type="checkbox" id="md-usemeta" ' + ((!t || t.useMeta) ? 'checked' : '') + '> 读取影片内嵌信息（标题/年份/分辨率，MKV/MP4）</label>';
+  const optA =
+    '<label class="field-check"><input type="checkbox" id="md-fix" ' + ((!t || t.fix) ? 'checked' : '') + '> 字段纠错（歌名/歌手/专辑错位自动纠正）</label>' +
+    '<label class="field-check"><input type="checkbox" id="md-online" ' + ((t && t.online) ? 'checked' : '') + '> 联网匹配元数据（MusicBrainz / iTunes，每首约 1 秒）</label>' +
+    '<label class="field-check"><input type="checkbox" id="md-writetag" ' + ((!t || t.writeTag) ? 'checked' : '') + '> 同时把纠正后的信息写回文件标签</label>' +
+    '<div class="form-row"><label>命名模板<span style="color:var(--muted);font-weight:normal">（可用 {artist} {title} {album} {year} {track}）</span></label><input type="text" id="md-template" value="' + esc(t ? t.template : '{artist} - {title}') + '" placeholder="{artist} - {title}"></div>';
+  const body =
+    '<div class="form-row"><label>名称</label><input type="text" id="md-name" value="' + esc(t ? t.name : '') + '" placeholder="例如 电影整理"></div>' +
+    '<div class="form-row"><label>目录<span style="color:var(--muted);font-weight:normal">（要整理的飞牛文件夹）</span></label>' +
+      '<div style="display:flex;gap:8px"><input type="text" id="md-dir" value="' + esc(t ? t.dir : '') + '" placeholder="/vol1/1000/media" style="flex:1;min-width:0">' +
+      '<button class="btn btn-outline btn-sm" style="flex:0 0 auto" onclick="openDirPicker(function(p){document.getElementById(\'md-dir\').value=p})">选择</button></div></div>' +
+    '<label class="field-check"><input type="checkbox" id="md-recursive" ' + ((!t || t.recursive) ? 'checked' : '') + '> 包含子目录</label>' +
+    (isV ? optV : optA) +
+    '<label class="field-check"><input type="checkbox" id="md-organize" ' + ((t && t.organize) ? 'checked' : '') + '> ' + (isV ? '按剧集自动建「剧名 (年份)/Season 01」目录' : '归档到「歌手/专辑」目录') + '</label>' +
+    '<div class="form-row"><label>排除规则<span style="color:var(--muted);font-weight:normal">（逗号分隔，如 Sample,*.tmp）</span></label><input type="text" id="md-exclude" value="' + esc(t ? t.exclude : '') + '" placeholder="Sample,*.tmp"></div>' +
+    '<div style="font-size:12px;color:var(--text3);margin-top:6px">整理前建议先点「预览」看清改名结果；执行时只改名/移动/写标签，不会删除任何文件。</div>';
+  confirmDialog(id ? '编辑整理任务' : ('添加' + (isV ? '视频' : '音频') + '整理任务'), body, async ()=>{
+    const gv = (eid)=>{ const el = document.getElementById(eid); return el ? el.value : ''; };
+    const gc = (eid)=>{ const el = document.getElementById(eid); return el ? !!el.checked : false; };
+    const payload = {
+      id: id || '', kind: kind,
+      name: gv('md-name').trim(),
+      dir: gv('md-dir').trim(),
+      recursive: gc('md-recursive'),
+      organize: gc('md-organize'),
+      exclude: gv('md-exclude').trim(),
+      useMeta: isV ? gc('md-usemeta') : false,
+      fix: isV ? false : gc('md-fix'),
+      online: isV ? false : gc('md-online'),
+      writeTag: isV ? false : gc('md-writetag'),
+      template: isV ? '' : gv('md-template').trim(),
+      enabled: true,
+    };
+    if(!payload.dir){ toast('请选择要整理的目录','err'); return; }
+    try{ await apiRetry('/api/media/save',{method:'POST',body:JSON.stringify(payload)}); toast('已保存','ok'); loadMediaTasks(); }
+    catch(e){ toast(e.message,'err'); }
+  }, id ? '保存' : '添加');
+}
+
+async function mediaPreview(id){
+  toast('正在生成整理计划…');
+  try{
+    const j = await api('/api/media/run?id=' + encodeURIComponent(id) + '&dry=1', {method:'POST', timeoutMs:180000});
+    const items = j.items || [];
+    if(!items.length){ toast('没有需要整理的文件','ok'); return; }
+    let html = '<div style="font-size:12.5px;color:var(--text2);line-height:1.7">扫描 <b>' + (j.total||0) + '</b> 个文件，<b>' + (j.changed||0) + '</b> 个将重命名' +
+      (j.fixed ? ('，<b>' + j.fixed + '</b> 个文件名已规范、仅纠正标签字段') : '') +
+      (j.warn ? ('，<b>' + j.warn + '</b> 个有告警') : '') + '。</div>';
+    if(j.note) html += '<div style="font-size:12px;color:var(--warning);line-height:1.6;margin-top:4px">' + esc(j.note) + '</div>';
+    html += '<div class="mplan">' + items.map(it => {
+      const fixes = (it.fixes || []).map(f => '<div class="fx">纠错 ' + esc(f.field) + '：' + esc(f.from || '空') + ' → ' + esc(f.to) + '（' + esc(f.why || '') + '）</div>').join('');
+      const warn = it.warn ? '<div class="fx">⚠ ' + esc(it.warn) + '</div>' : '';
+      const nameBlock = it.changed
+        ? ('<div class="old">' + esc(it.oldName) + '</div><div class="new">' + esc(it.newName) + '</div>')
+        : ('<div class="new" style="font-weight:normal">' + esc(it.oldName) + '</div><div class="fx" style="color:var(--text3)">文件名已规范，仅写回纠错后的标签</div>');
+      return '<div class="it">' + nameBlock +
+        (it.reason ? '<div class="fx" style="color:var(--text3)">' + esc(it.reason) + '</div>' : '') + fixes + warn + '</div>';
+    }).join('') + '</div>';
+    if(j.truncated) html += '<div style="font-size:12px;color:var(--text3);margin-top:8px">列表仅显示前 ' + items.length + ' 条，实际将处理 ' + (j.changed||0) + ' 个文件。</div>';
+    confirmDialog('整理预览', html, ()=>mediaRun(id), '确认整理');
+  }catch(e){ toast(e.message,'err'); }
+}
+
+async function mediaRun(id){
+  try{
+    await apiRetry('/api/media/run?id=' + encodeURIComponent(id), {method:'POST'});
+    toast('已开始整理','ok');
+    setTimeout(loadMediaTasks, 800);
+  }catch(e){ toast(e.message,'err'); }
+}
+
+async function mediaStop(id){
+  try{ await apiRetry('/api/media/stop?id=' + encodeURIComponent(id), {method:'POST'}); toast('正在停止…','ok'); loadMediaTasks(); }
+  catch(e){ toast(e.message,'err'); }
+}
+
+function mediaShowLog(id){
+  const st = mediaStates[id] || {};
+  const logs = st.logs || [];
+  confirmDialog('运行日志', '<div class="mlog" style="max-height:52vh">' + (logs.length ? esc(logs.join('\n')) : '暂无日志（重启后清空）') + '</div>', ()=>{}, '关闭');
+}
+
+function mediaDelete(id){
+  confirmDialog('删除整理任务','确认删除该任务？只删除任务配置，磁盘上的文件不会被删除。', async ()=>{
+    try{ await apiRetry('/api/media/delete',{method:'POST',body:JSON.stringify({id:id})}); toast('已删除','ok'); loadMediaTasks(); }
+    catch(e){ toast(e.message,'err'); }
+  });
+}
+
+/* ---------- 目录选择器（媒体管理专用） ---------- */
+let dpCB = null, dpPath = '';
+function openDirPicker(cb){
+  dpCB = cb; dpPath = '';
+  const el = document.getElementById('dirpicker');
+  el.classList.add('show');
+  dpLoad('');
+}
+function closeDirPicker(){
+  document.getElementById('dirpicker').classList.remove('show');
+  dpCB = null;
+}
+async function dpLoad(path){
+  try{
+    const j = await apiRetry('/api/media/dirs' + (path ? ('?path=' + encodeURIComponent(path)) : ''));
+    dpPath = j.path || '';
+    document.getElementById('dp-crumb').textContent = dpPath || '选择存储卷（/vol1、/vol2…）';
+    const dirs = j.dirs || [];
+    let html = '';
+    if(dpPath && j.parent !== undefined && j.parent !== null && j.parent !== ''){
+      html += '<div class="dp-item" data-path="' + esc(j.parent) + '"><span>⬆ 上一级</span></div>';
+    }
+    html += dirs.map(d => '<div class="dp-item" data-path="' + esc(d.path) + '"><span>📁 ' + esc(d.name) + '</span>' +
+      (d.media ? '<span class="cnt">' + d.media + ' 个媒体文件</span>' : '') + '</div>').join('');
+    document.getElementById('dp-list').innerHTML = html || '<div class="empty" style="padding:20px 0">没有子目录（可直接选择当前目录）</div>';
+  }catch(e){ toast(e.message,'err'); }
+}
+document.getElementById('dp-list').addEventListener('click', e => {
+  const it = e.target.closest('.dp-item');
+  if(it && it.dataset.path) dpLoad(it.dataset.path);
+});
+function dpChoose(){
+  if(!dpPath){ toast('请先进入要整理的目录','err'); return; }
+  if(dpCB) dpCB(dpPath);
+  closeDirPicker();
 }
 
 /* ---------- 网络测速（NAS 后端 ↔ 外网节点，浏览器仅回传结果 JSON） ---------- */
@@ -1717,7 +1998,7 @@ async function pollDownload(url, name, toPC, transFail){
   if(btn){ btn.disabled = false; btn.innerHTML = '⬇️ 下载更新（'+name+'）'; }
 }
 /* ---------- 配置备份：导出 / 导入 ---------- */
-const CFG_NAMES = {ddns:'DDNS 配置', cloudSync:'网盘同步任务', speedtestNodes:'自定义测速节点'};
+const CFG_NAMES = {ddns:'DDNS 配置', cloudSync:'网盘同步任务', speedtestNodes:'自定义测速节点', media:'媒体管理任务'};
 async function cfgExport(){
   const btn = document.getElementById('btn-cfg-export');
   if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 导出中…'; }

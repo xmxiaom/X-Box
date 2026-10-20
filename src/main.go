@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.26"
+	version = "1.3.27"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -111,6 +111,14 @@ func main() {
 	mux.HandleFunc("POST /api/sync/run", srv.handleSyncRun)
 	mux.HandleFunc("POST /api/sync/pause", srv.handleSyncPause)
 	mux.HandleFunc("GET /api/sync/dirs", srv.handleSyncDirs)
+	// 媒体管理：按目录批量整理视频/音频文件名与元数据
+	mux.HandleFunc("GET /api/media/list", srv.handleMediaList)
+	mux.HandleFunc("POST /api/media/save", srv.handleMediaSave)
+	mux.HandleFunc("POST /api/media/delete", srv.handleMediaDelete)
+	mux.HandleFunc("POST /api/media/run", srv.handleMediaRun)
+	mux.HandleFunc("POST /api/media/stop", srv.handleMediaStop)
+	mux.HandleFunc("GET /api/media/status", srv.handleMediaStatus)
+	mux.HandleFunc("GET /api/media/dirs", srv.handleMediaDirs)
 	mux.HandleFunc("GET /api/speedtest/status", handleSpeedtestStatus)
 	mux.HandleFunc("POST /api/speedtest/start", handleSpeedtestStart)
 	mux.HandleFunc("POST /api/speedtest/stop", handleSpeedtestStop)

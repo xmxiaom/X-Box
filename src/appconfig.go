@@ -6,6 +6,7 @@ package main
 //   - ddns.json            DDNS 服务商（含凭据）与解析记录
 //   - cloud-sync.json      网盘同步任务
 //   - speedtest_nodes.json 自定义测速节点
+//   - media.json           媒体整理任务
 //
 // 测速历史 / 远端节点缓存 / NAT 检测结果属运行数据，重启可自动再生，不纳入备份。
 // 导入语义为「整体替换」：备份里存在的配置项覆盖当前对应配置；缺失项保持不变。
@@ -54,6 +55,7 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 	doc.Configs["ddns"] = raw("ddns.json")
 	doc.Configs["cloudSync"] = raw("cloud-sync.json")
 	doc.Configs["speedtestNodes"] = raw("speedtest_nodes.json")
+	doc.Configs["media"] = raw("media.json")
 	ok(w, map[string]any{"app": doc.App, "version": doc.Version, "exportedAt": doc.ExportedAt, "configs": doc.Configs})
 }
 
@@ -104,6 +106,19 @@ func (s *Server) handleConfigImport(w http.ResponseWriter, r *http.Request) {
 		}
 		applySpeedtestNodesImport(list)
 		imported["speedtestNodes"] = true
+	}
+	// 媒体管理任务
+	if raw, has := req.Configs["media"]; has && len(raw) > 0 {
+		var list []MediaTask
+		if json.Unmarshal(raw, &list) != nil {
+			fail(w, 400, "媒体管理配置解析失败")
+			return
+		}
+		if err := applyMediaImport(list); err != nil {
+			fail(w, 500, "媒体管理配置写入失败："+err.Error())
+			return
+		}
+		imported["media"] = true
 	}
 	if len(imported) == 0 {
 		fail(w, 400, "备份中没有任何可导入的配置项")
