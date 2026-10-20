@@ -159,6 +159,8 @@ func writeMediaTags(path string, m MediaMeta, cover []byte) error {
 		return writeOggComment(path, m, cover)
 	case ".m4a", ".m4b", ".mp4", ".m4v":
 		return writeMP4Tags(path, m, cover)
+	case ".wma", ".asf", ".wmv":
+		return writeASFTags(path, m, cover)
 	}
 	return errors.New("该格式暂不支持写入标签")
 }

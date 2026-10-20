@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,7 +203,7 @@ func sniffFormat(path string) string {
 	}
 	defer f.Close()
 	h := make([]byte, 16)
-	n, _ := f.Read(h)
+	n, _ := io.ReadFull(f, h) // 必须读满：短读会让 GUID / ftyp 判断失效
 	h = h[:n]
 
 	// ID3 → 后面是 MP3
@@ -220,6 +221,10 @@ func sniffFormat(path string) string {
 	// FLAC
 	if len(h) >= 4 && string(h[:4]) == "fLaC" {
 		return "flac"
+	}
+	// ASF（WMA / WMV）
+	if isASF(h) {
+		return "asf"
 	}
 	// Ogg
 	if len(h) >= 4 && string(h[:4]) == "OggS" {
@@ -264,6 +269,9 @@ func ReadMediaMeta(path string) (MediaMeta, error) {
 	case format == "mp4":
 		m, _ = readMP4(path)
 		m.Format = "mp4"
+	case format == "asf":
+		m, _ = readASF(path)
+		m.Format = "asf"
 	case format == "flac":
 		m, _ = readVorbisFile(path, true)
 		m.Format = "flac"
@@ -298,6 +306,9 @@ func ReadMediaMeta(path string) (MediaMeta, error) {
 		case ".webm", ".mkv":
 			m, _ = readMatroska(path)
 			m.Format = "matroska"
+		case ".wma", ".wmv", ".asf":
+			m, _ = readASF(path)
+			m.Format = "asf"
 		}
 	}
 	return m, nil

@@ -293,28 +293,17 @@ func correctAudioTags(meta MediaMeta, filename string) correctedMeta {
 		}
 	}
 
-	// 情形 2：歌手框装的是歌名（文件名歌名与歌手框内容高度相似）
-	if origArtist != "" && origTitle != "" {
+	// 情形 2：文件名里的歌手/歌名顺序与标签相反。
+	// 这种情况本地无法判定谁错了——可能标签错位，也可能文件名被改反了
+	// （例如整批文件是「歌名 - 歌手」，标签却是对的）。
+	// 标签是文件自带信息，回写又不可逆，所以这里**只告警不改写**；
+	// 真正需要靠外部知识判断的错位，交给「联网匹配」用权威库定案。
+	if origArtist != "" && origTitle != "" && cand.HasArtist && cand.HasTitle {
 		simAT := similarity(origArtist, origTitle)
-		// 文件名里的歌名与"歌手框"更接近 → 歌手框装错
-		if cand.HasTitle && similarity(cand.Title, origArtist) > 0.75 && similarity(cand.Title, origTitle) < 0.5 {
-			newTitle := origArtist
-			newArtist := origTitle
-			if cand.HasArtist && similarity(cand.Artist, origTitle) > 0.5 {
-				// 文件名也指向这个歌手
-				newArtist = origTitle
-			}
-			res.Meta.Title = newTitle
-			res.Meta.Artist = newArtist
-			res.Fixes = append(res.Fixes, mediaFix{
-				Field: "title", From: origTitle, To: newTitle,
-				Why: "歌名与歌手框内容互换，按文件名内容重新分配",
-			})
-			res.Fixes = append(res.Fixes, mediaFix{
-				Field: "artist", From: origArtist, To: newArtist,
-				Why: "歌手框内容疑似歌名，与歌名框互换",
-			})
-			res.Confidence = 0.85
+		reversed := similarity(cand.Artist, origTitle) > 0.7 && similarity(cand.Title, origArtist) > 0.7
+		sameOrder := similarity(cand.Artist, origArtist) > 0.7 && similarity(cand.Title, origTitle) > 0.7
+		if reversed && !sameOrder {
+			res.Warnings = append(res.Warnings, "文件名里歌手/歌名顺序与标签相反，已按标签为准（标签若有误可用联网匹配纠正）")
 		} else if simAT > 0.9 {
 			res.Warnings = append(res.Warnings, "歌名与歌手内容几乎相同，可能未正确填写")
 		}

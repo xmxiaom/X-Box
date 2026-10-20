@@ -368,6 +368,9 @@ func runMediaTask(t MediaTask) {
 	mediaLog(id, fmt.Sprintf("发现 %d 个待整理文件", len(files)))
 
 	reserved := map[string]bool{}
+	// 标签写入失败按原因聚合：同一原因只打前 3 条，末尾给汇总，避免刷屏
+	tagFailByReason := map[string]int{}
+	tagFailOrder := []string{}
 	for i, p := range files {
 		select {
 		case <-cancel:
@@ -386,10 +389,23 @@ func runMediaTask(t MediaTask) {
 
 		// 标签回写（在改名之前完成，写入用临时文件+原子改名）
 		// 仅在"名字要变"或"纠错改动了字段"时写，避免整库无谓重写
-		tagDone := false
+		tagDone, tagErr := false, ""
 		if opts.WriteTag && opts.Kind == "audio" && (it.Changed || len(it.Fixes) > 0) {
 			if err := writeMediaTags(it.OldPath, meta, cover); err != nil {
-				mediaLog(id, fmt.Sprintf("! 标签写入失败 %s：%v", it.OldName, err))
+				tagErr = err.Error()
+				tagFailByReason[tagErr]++
+				if tagFailByReason[tagErr] <= 3 {
+					mediaLog(id, fmt.Sprintf("! 标签写入失败 %s：%s", it.OldName, tagErr))
+				}
+				seen := false
+				for _, r := range tagFailOrder {
+					if r == tagErr {
+						seen = true
+					}
+				}
+				if !seen {
+					tagFailOrder = append(tagFailOrder, tagErr)
+				}
 			} else {
 				tagDone = true
 			}
@@ -420,7 +436,10 @@ func runMediaTask(t MediaTask) {
 			if tagDone {
 				st.Tagged++
 			}
-			if !moved && !tagDone {
+			switch {
+			case tagErr != "":
+				st.Failed++ // 标签没写进去不算"跳过"，否则用户以为无事发生
+			case !moved && !tagDone:
 				st.Skipped++
 			}
 		})
@@ -431,8 +450,19 @@ func runMediaTask(t MediaTask) {
 		}
 	}
 
+	// 失败原因汇总：每个原因一行，失败数 > 0 时任务标记为"有错误"
+	summary := ""
+	for _, r := range tagFailOrder {
+		if n := tagFailByReason[r]; n > 0 {
+			line := fmt.Sprintf("标签写入失败 %d 个：%s", n, r)
+			mediaLog(id, "! "+line)
+			if summary == "" {
+				summary = line
+			}
+		}
+	}
 	st := mediaStateOf(id)
-	finishMediaTask(id, start, true, "")
+	finishMediaTask(id, start, st.Failed == 0, summary)
 	mediaLog(id, fmt.Sprintf("完成：重命名 %d，写标签 %d，跳过 %d，失败 %d",
 		st.Renamed, st.Tagged, st.Skipped, st.Failed))
 }

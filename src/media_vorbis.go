@@ -349,21 +349,28 @@ func writeFLACComment(path string, m MediaMeta, cover []byte) error {
 		last := b[0]&0x80 != 0
 		blkType := b[0] & 0x7F
 		length := int(beUint24(b[1:4]))
+		// 块长度必须落在文件内，否则是损坏文件或偏移算错（继续读只会读到垃圾）
+		if length < 0 || off+4+int64(length) > fi.Size() {
+			return errors.New("FLAC 元数据块长度越界")
+		}
 		data := make([]byte, length)
 		if _, err := src.ReadAt(data, off+4); err != nil {
 			return err
 		}
+		newLen := length
 		// 替换 comment 块
 		if blkType == 4 {
 			t := parseVorbisCommentBlock(data)
 			applyMetaToVorbis(t, m)
 			data = buildVorbisCommentBlock(t)
-			length = len(data)
+			newLen = len(data)
 		}
-		blk := make([]byte, 0, 4+length)
-		blk = append(blk, b[0]&0x7F, byte(length>>16), byte(length>>8), byte(length))
+		blk := make([]byte, 0, 4+newLen)
+		blk = append(blk, blkType, byte(newLen>>16), byte(newLen>>8), byte(newLen))
 		blk = append(blk, data...)
 		blocks = append(blocks, blk)
+		// 关键：偏移必须按「原块长度」推进。用 newLen 会在 comment 变长/变短后
+		// 从块中间继续读，下一个长度字段就是垃圾 → 越界或 EOF
 		off += 4 + int64(length)
 		if last {
 			audioStart = off
@@ -392,6 +399,15 @@ func writeFLACComment(path string, m MediaMeta, cover []byte) error {
 			}
 		}
 	}
+	// 重新打 last-block 标志：上面重建块头时把原 last 位清掉了，
+	// 不补回去解码器会把元数据当音频帧解析，整个文件就废了
+	for i := range blocks {
+		blocks[i][0] &= 0x7F
+	}
+	if len(blocks) > 0 {
+		blocks[len(blocks)-1][0] |= 0x80
+	}
+
 	// 写临时文件
 	tmp := mediaTempPath(path)
 	out, err := os.Create(tmp)

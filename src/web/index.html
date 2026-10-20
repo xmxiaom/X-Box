@@ -1088,7 +1088,7 @@ function renderMediaPage(){
   document.getElementById('media-sub').textContent = '共 ' + list.length + ' 个' + (isV ? '视频' : '音频') + '任务';
   const hint = isV
     ? '原理：读文件名与影片内嵌信息（MP4/MKV），按 Jellyfin/Plex 规范重命名——电影「片名 (年份) [分辨率] [来源]」，剧集「剧名 (年份) - S01E01 - 标题」并自动建 Season 目录。只改文件名与位置，不删除文件，重名自动加序号不覆盖。'
-    : '原理：读音频标签（ID3/Vorbis/MP4）并与文件名交叉印证，纠正「歌名填在歌手框」这类错位；可联网匹配 MusicBrainz/iTunes 补全歌手、专辑、年份与封面；按「歌手 - 歌名」重命名，可选归档到「歌手/专辑」。只改文件名与标签，不删除文件。';
+    : '原理：读音频标签（MP3/FLAC/M4A/WMA）并与文件名交叉印证，纠正「歌名与歌手填成同一个值」「标题框是原始文件名」这类可判定的错位；标签与文件名冲突但无法判定时以标签为准、只提示不硬改（回写不可逆）；可联网匹配 MusicBrainz/iTunes 补全歌手、专辑、年份与封面；按「歌手 - 歌名」重命名，可选归档到「歌手/专辑」。只改文件名与标签，不删除文件。';
   const head = '<div class="proxy-hint">' + hint + '</div>' +
     '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openMediaForm(null)">+ 添加' + (isV ? '视频' : '音频') + '整理任务</button></div>';
 
