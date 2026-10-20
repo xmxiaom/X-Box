@@ -26,3 +26,4 @@ _rel*.py
 _notes.json
 _ont_*.*
 ont_logout_probe*.js
+tests/
