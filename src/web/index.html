@@ -2436,15 +2436,17 @@ function goBrowser(){
   browserOpenURL(u, false);
 }
 
-/* ---------- 终端（命令执行控制台，显式连接/断开会话） ---------- */
+/* ---------- 终端（PTY 交互会话，降级命令执行控制台） ---------- */
 let termCwd = '';
 let termConnected = false;
+let termPty = false; // 当前会话是否为 PTY 模式（false=exec 降级）
 function termSetConn(on){
   termConnected = on;
   document.getElementById('term-btn-conn').disabled = on;
   document.getElementById('term-btn-disc').disabled = !on;
   document.getElementById('term-input').disabled = !on;
   if(!on){
+    termPty = false;
     const o = document.getElementById('term-out');
     o.textContent = '';
     termAppend('未连接 · 点击「连接」开始终端会话', 't-sys');
@@ -2454,18 +2456,24 @@ function termSetConn(on){
 }
 async function termConnect(){
   try{
-    const j = await api('/api/terminal/info');
+    // 先探测 PTY：可用则长驻交互会话；不可用（无 script）自动降级 exec 控制台
+    const j = await api('/api/terminal/start', {method:'POST', body:'{}'});
+    termPty = !!j.pty;
     termCwd = j.cwd || '/root';
     updateTermPrompt();
     const o = document.getElementById('term-out');
     o.textContent = '';
-    termAppend('已连接终端 · 当前目录 '+termCwd, 't-sys');
+    termAppend(termPty ? '已连接终端（PTY 交互模式）· 当前目录 '+termCwd
+                      : '已连接终端（兼容模式）· 当前目录 '+termCwd, 't-sys');
     termSetConn(true);
     document.getElementById('term-input').focus();
   }catch(e){ toast(e.message, 'err'); }
 }
 async function termDisconnect(){
-  try{ await api('/api/terminal/close', {method:'POST', body:'{}'}); }catch(e){}
+  try{
+    if(termPty){ await api('/api/terminal/stop', {method:'POST', body:'{}'}); }
+    else{ await api('/api/terminal/close', {method:'POST', body:'{}'}); }
+  }catch(e){}
   termSetConn(false);
 }
 function updateTermPrompt(){
@@ -2486,7 +2494,8 @@ function termAppend(s, cls){
   }
   o.scrollTop = o.scrollHeight;
 }
-// 命令回显行：彩色提示符 + 转义后的用户输入
+// 命令回显行：彩色提示符 + 转义后的用户输入（仅 exec 降级模式使用；
+// PTY 模式下 shell 自身会回显输入，这里不再手动回显，避免双回显）
 function termEchoLine(cmd){
   const base = termCwd === '/root' ? '~' : termCwd;
   const line = document.createElement('span');
@@ -2497,23 +2506,50 @@ function termEchoLine(cmd){
   o.appendChild(document.createTextNode('\n'));
   o.scrollTop = o.scrollHeight;
 }
+// 清洗 PTY 原始输出：CRLF→LF、剥离 ANSI 转义序列（颜色/光标控制/括号粘贴模式等）
+function termClean(raw){
+  if(!raw) return '';
+  let s = raw;
+  // 先剥 ANSI CSI/OSC 转义：ESC [ ... 字母、ESC ] ... BEL、ESC 7/8 等单字符序列
+  s = s.replace(/\u001b\]8;;[^\u001b]*\u001b\\/g, ''); // 超链接 OSC 8
+  s = s.replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, ''); // OSC 标题等
+  s = s.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, ''); // CSI 序列
+  s = s.replace(/\u001b[()][0-9A-Za-z]/g, ''); // 字符集选择
+  s = s.replace(/\u001b[7-8DM]/g, ''); // 单字符控制（DECSC/DECRC/滚屏）
+  s = s.replace(/\r\n/g, '\n');
+  s = s.replace(/\r/g, '\n');
+  return s;
+}
 async function termExec(){
   if(!termConnected) return;
   const inp = document.getElementById('term-input');
   const cmd = inp.value;
-  termEchoLine(cmd);
   inp.value = '';
   if(cmd.trim() === '') return;
   try{
-    // 客户端超时放宽到 65s：服务端命令上限 60s，避免长命令被 8-10s 传输超时误杀
-    //（挂住型命令仍会被服务端超时终止并回显提示；更长的任务用 nohup ... & 转后台）
-    const j = await api('/api/terminal/exec', {method:'POST', body:JSON.stringify({cmd}), timeoutMs:65000});
-    termCwd = j.cwd || termCwd;
-    updateTermPrompt();
-    let out = j.output || '';
-    if(out && !out.endsWith('\n')) out += '\n';
-    termAppend(out);
-    if(j.exitCode !== 0){ termAppend('[退出码 '+j.exitCode+']\n', 't-code'); }
+    if(termPty){
+      // PTY 模式：写入会话 stdin，shell 自身回显输入；读取清洗后的累积输出
+      const j = await api('/api/terminal/write', {method:'POST', body:JSON.stringify({data:cmd+'\n'}), timeoutMs:65000});
+      termCwd = j.cwd || termCwd;
+      updateTermPrompt();
+      let out = termClean(j.output || '');
+      if(out && !out.endsWith('\n')) out += '\n';
+      termAppend(out);
+      // 兼容：若服务端未回显（极少数），补一条输入回显，避免用户看不到自己输入
+      if(out.indexOf(cmd) < 0){ termEchoLine(cmd); }
+    }else{
+      // exec 降级模式：手动回显输入，命令串行执行
+      termEchoLine(cmd);
+      // 客户端超时放宽到 65s：服务端命令上限 60s，避免长命令被 8-10s 传输超时误杀
+      //（挂住型命令仍会被服务端超时终止并回显提示；更长的任务用 nohup ... & 转后台）
+      const j = await api('/api/terminal/exec', {method:'POST', body:JSON.stringify({cmd}), timeoutMs:65000});
+      termCwd = j.cwd || termCwd;
+      updateTermPrompt();
+      let out = j.output || '';
+      if(out && !out.endsWith('\n')) out += '\n';
+      termAppend(out);
+      if(j.exitCode !== 0){ termAppend('[退出码 '+j.exitCode+']\n', 't-code'); }
+    }
   }catch(e){ termAppend('[错误] '+(e.message||e)+'\n', 't-err'); }
 }
 function termClear(){ document.getElementById('term-out').textContent = ''; }
@@ -2632,7 +2668,9 @@ detectChannel().then(enterApp); // 探测传输通道（XHR→fetch→iframe）�
 .t-code{color:#F5A623}
 .t-err{color:#F26D6D}
 .t-echo{color:#E8EDF4}
-.term-input-row{display:flex;align-items:center;gap:10px;margin-top:0;background:#0D1117;border:1px solid #232A33;border-top:1px solid #1A2129;border-radius:0 0 var(--radius) var(--radius);padding:9px 16px;flex-shrink:0}
+/* 命令输入栏：背景略提亮 + 亮蓝边框，与上方输出区形成对比，一眼可辨 */
+.term-input-row{display:flex;align-items:center;gap:10px;margin-top:0;background:#131A23;border:1px solid #57C7FF;border-top:1px solid #2A3A4A;border-radius:0 0 var(--radius) var(--radius);padding:9px 16px;flex-shrink:0}
+.term-input-row:focus-within{border-color:#6FC3FF;background:#151D28}
 .term-prompt{font-family:ui-monospace,'Cascadia Mono',Consolas,Menlo,monospace;font-size:13px;font-weight:600;letter-spacing:.2px;white-space:nowrap;user-select:none}
 .tp-user{color:#3DDC84}.tp-path{color:#57C7FF}.tp-sig{color:#5C6875;font-weight:400}
 .term-input-row input{flex:1;background:transparent;color:#D6DEE8;border:none;padding:0;caret-color:#3DDC84;box-shadow:none!important}

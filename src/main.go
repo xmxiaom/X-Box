@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.21"
+	version = "1.3.22"
 	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
 	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
 	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
@@ -90,6 +90,9 @@ func main() {
 	mux.HandleFunc("GET /api/terminal/info", srv.handleTerminalInfo)
 	mux.HandleFunc("POST /api/terminal/exec", srv.handleTerminalExec)
 	mux.HandleFunc("POST /api/terminal/close", srv.handleTerminalClose)
+	mux.HandleFunc("POST /api/terminal/start", srv.handleTerminalStart)
+	mux.HandleFunc("POST /api/terminal/write", srv.handleTerminalWrite)
+	mux.HandleFunc("POST /api/terminal/stop", srv.handleTerminalStop)
 	mux.HandleFunc("GET /api/nvme-sleep", handleNVMeSleepList)
 	mux.HandleFunc("POST /api/nvme-sleep", handleNVMeSleepSet)
 	mux.HandleFunc("GET /api/update/check", handleUpdateCheck)
@@ -130,6 +133,7 @@ func main() {
 	mux.HandleFunc("POST /", srv.handleOrphan)
 
 	initAppBase()
+	startPTYIdleReaper()     // 终端 PTY 空闲会话回收
 	srv.startSyncScheduler() // 网盘同步定时任务
 	cleanupLegacyReverseProxy() // 反向代理功能已移除，清掉早期版本留下的实例
 	handler := formBridge(tunnelBridge(panelActivity(mux)))
