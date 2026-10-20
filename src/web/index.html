@@ -580,7 +580,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="term-out" id="term-out"><span class="t-sys">未连接 · 点击「连接」开始终端会话</span></div>
         <div class="term-input-row">
           <span class="term-prompt" id="term-prompt"><span class="tp-user">root@xbox</span><span class="tp-path">:~</span><span class="tp-sig">$</span></span>
-          <input type="text" id="term-input" autocomplete="off" spellcheck="false" disabled onkeydown="if(event.key==='Enter') termExec()">
+          <input type="text" id="term-input" autocomplete="off" spellcheck="false" disabled onkeydown="termInputKey(event)">
         </div>
       </div>
 
@@ -607,6 +607,18 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           <div class="kv"><span class="k">最新版本</span><span class="v mono" id="upd-latest">—</span></div>
           <div class="kv"><span class="k">版本状态</span><span class="v" id="upd-status"><span class="badge badge-gray">待检查</span></span></div>
           <div id="upd-body" style="margin-top:12px"></div>
+        </div>
+        <div class="card">
+          <h3>📦 配置备份</h3>
+          <div style="font-size:13px;color:var(--text2);line-height:1.8;margin-bottom:10px">
+            导出 / 还原应用配置：DDNS（服务商与解析记录）、网盘同步任务、自定义测速节点。导出文件为 JSON，可在重装或迁移设备后一键还原（导入为整体覆盖对应配置项，未包含的项不受影响）。
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-outline btn-sm" id="btn-cfg-export" onclick="cfgExport()">⬇️ 导出配置</button>
+            <button class="btn btn-outline btn-sm" id="btn-cfg-import" onclick="document.getElementById('cfg-import-file').click()">⬆️ 导入配置</button>
+            <input type="file" id="cfg-import-file" accept=".json,application/json" style="display:none" onchange="cfgImportFile(this)">
+          </div>
+          <div id="cfg-import-result" style="margin-top:10px"></div>
         </div>
       </div>
 
@@ -1701,6 +1713,63 @@ async function pollDownload(url, name, toPC, transFail){
   }
   if(btn){ btn.disabled = false; btn.innerHTML = '⬇️ 下载更新（'+name+'）'; }
 }
+/* ---------- 配置备份：导出 / 导入 ---------- */
+const CFG_NAMES = {ddns:'DDNS 配置', cloudSync:'网盘同步任务', speedtestNodes:'自定义测速节点'};
+async function cfgExport(){
+  const btn = document.getElementById('btn-cfg-export');
+  if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 导出中…'; }
+  try{
+    const j = await api('/api/config/export');
+    const items = [];
+    for(const k of Object.keys(j.configs||{})){ if(j.configs[k]) items.push(CFG_NAMES[k]||k); }
+    if(!items.length){ toast('当前没有任何可导出的配置','err'); return; }
+    const blob = new Blob([JSON.stringify({app:j.app, version:j.version, exportedAt:j.exportedAt, configs:j.configs}, null, 2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'xbox-config-' + (j.version||'') + '-' + new Date().toISOString().slice(0,10) + '.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+    toast('已导出：' + items.join('、'), 'good');
+  }catch(e){
+    toast('导出失败：' + e.message, 'err');
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '⬇️ 导出配置'; }
+  }
+}
+function cfgImportFile(input){
+  const f = (input.files||[])[0];
+  input.value = ''; // 允许连续选择同一文件
+  if(!f) return;
+  if(f.size > 1024*1024){ toast('文件过大（上限 1MB），请选择导出的配置 JSON','err'); return; }
+  const rd = new FileReader();
+  rd.onerror = () => toast('读取文件失败','err');
+  rd.onload = () => {
+    let doc;
+    try{ doc = JSON.parse(rd.result); }catch(e){ toast('不是有效的 JSON 文件','err'); return; }
+    const names = Object.keys(doc.configs||{}).filter(k=>doc.configs[k]);
+    if(!names.length){ toast('该文件中没有可导入的配置项','err'); return; }
+    const list = names.map(k=>CFG_NAMES[k]||k).join('、');
+    confirmDialog('导入配置',
+      `<div style="font-size:13px;line-height:1.9">将导入：<b>${esc(list)}</b><br><span style="color:var(--danger)">对应配置将被备份文件内容整体覆盖（未包含的项不受影响），覆盖后立即生效。</span><br>文件导出版本：${esc(doc.version||'未知')} · 导出时间：${esc((doc.exportedAt||'').replace('T',' ').slice(0,19)||'未知')}</div>`,
+      async ()=>{
+        const btn = document.getElementById('btn-cfg-import');
+        if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 导入中…'; }
+        try{
+          const j = await api('/api/config/import', {method:'POST', body:JSON.stringify({configs:doc.configs})});
+          const done = Object.keys(j.imported||{}).map(k=>CFG_NAMES[k]||k).join('、');
+          const box = document.getElementById('cfg-import-result');
+          if(box) box.innerHTML = `<div class="warn-box" style="background:var(--success-light,#e8f7ee);border-color:#BFE5CD;color:#1a6b3c">✅ 已导入：${esc(done)}（${esc(new Date().toLocaleString())}）</div>`;
+          toast('配置已导入：' + done, 'good');
+        }catch(e){
+          toast('导入失败：' + e.message, 'err');
+        }finally{
+          if(btn){ btn.disabled = false; btn.textContent = '⬆️ 导入配置'; }
+        }
+      }, '确认导入');
+  };
+  rd.readAsText(f);
+}
+
 function showDownloadError(url, name, msg){
   // 失败原因持久显示（不再只靠一闪而过的 toast），带重试按钮
   document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" id="upd-err" style="margin-top:10px;background:var(--danger-light);border-color:#FDCDC5;color:#7A1F0A">❌ 下载失败：${esc(msg)}<br><span style="font-size:12px">常见原因：NAS 无法直达 github.com（检查 DNS/外网）、所选目录不存在或不可写、Release 资源尚未上传完成。可重试或改用「下载到电脑」（经 NAS 中转）。</span><br><button class="btn btn-outline btn-sm" style="margin-top:6px" onclick="downloadUpdate('${esc(url)}','${esc(name)}')">重试</button></div>`);
@@ -2448,6 +2517,41 @@ function goBrowser(){
 let termCwd = '';
 let termConnected = false;
 let termPty = false; // 当前会话是否为 PTY 模式（false=exec 降级）
+// 输入历史（上下箭头翻找）：termHist 保存已执行命令，termHistIdx 为当前浏览位置
+// （=长度表示不在浏览态），termHistDraft 记住翻找前未执行的草稿
+let termHist = [];
+let termHistIdx = -1;
+let termHistDraft = '';
+const TERM_HIST_MAX = 200;
+function termHistPush(cmd){
+  const c = cmd.trim();
+  if(!c) return;
+  // 连续重复只保留一条（连按上箭头不会出现重复行）
+  if(termHist[termHist.length-1] === c) return;
+  termHist.push(c);
+  if(termHist.length > TERM_HIST_MAX) termHist.shift();
+}
+function termInputKey(e){
+  const inp = e.target;
+  if(e.key === 'Enter'){ e.preventDefault(); termExec(); return; }
+  if(e.key === 'ArrowUp'){
+    e.preventDefault(); // 光标移到行首的默认行为取消，改翻历史
+    if(termHistIdx === -1){ termHistDraft = inp.value; termHistIdx = termHist.length; }
+    if(termHistIdx > 0){ termHistIdx--; inp.value = termHist[termHistIdx]; }
+    return;
+  }
+  if(e.key === 'ArrowDown'){
+    e.preventDefault();
+    if(termHistIdx === -1) return; // 不在浏览态，交给光标移动
+    termHistIdx++;
+    if(termHistIdx >= termHist.length){ // 翻到底：恢复草稿回当前态
+      termHistIdx = -1; inp.value = termHistDraft;
+    }else{
+      inp.value = termHist[termHistIdx];
+    }
+    return;
+  }
+}
 function termSetConn(on){
   termConnected = on;
   document.getElementById('term-btn-conn').disabled = on;
@@ -2533,6 +2637,9 @@ async function termExec(){
   const inp = document.getElementById('term-input');
   const cmd = inp.value;
   inp.value = '';
+  termHistPush(cmd); // 入历史并复位上下箭头浏览态
+  termHistIdx = -1;
+  termHistDraft = '';
   if(cmd.trim() === '') return;
   try{
     if(termPty){
