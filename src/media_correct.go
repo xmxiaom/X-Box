@@ -16,6 +16,7 @@
 package main
 
 import (
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -88,9 +89,18 @@ func parseAudioCandidates(filename string, artistSecond bool) mediaCandidates {
 	}
 	// "歌手 - 歌名" / 反序时 "歌名 - 歌手"
 	if m := reArtistDashTitle.FindStringSubmatch(base); m != nil {
-		a, t := strings.TrimSpace(m[1]), strings.TrimSpace(m[2])
+		l, r := strings.TrimSpace(m[1]), strings.TrimSpace(m[2])
+		a, t := l, r
 		if artistSecond {
-			a, t = t, a // 右侧才是歌手
+			a, t = r, l // 右侧才是歌手
+		}
+		// 命中常用歌手名时以它为准（比目录统计更直接）
+		if lk, rk := isKnownArtist(l), isKnownArtist(r); lk != rk {
+			if rk {
+				a, t = r, l
+			} else {
+				a, t = l, r
+			}
 		}
 		if looksLikeArtist(a) && looksLikeTitle(t) {
 			c.Artist, c.Title = a, t
@@ -193,6 +203,44 @@ func looksLikeAlbum(s string) bool {
 	return true
 }
 
+// dirArtistHint 用所在目录名做外部证据判断歌手是谁。
+// 专辑目录通常以歌手或专辑命名：若某个上级目录名恰好等于「歌名框」里的值，
+// 说明歌名/歌手两个字段互换了（目录名才是歌手）；等于歌手框则标签没问题。
+func dirArtistHint(path string, m MediaMeta) (string, bool) {
+	title := normalizeForCompare(m.Title)
+	artist := normalizeForCompare(m.Artist)
+	if title == "" || artist == "" || title == artist {
+		return "", false
+	}
+	dir := filepath.Dir(path)
+	titleDepth, artistDepth := -1, -1
+	titleName := ""
+	for i := 0; i < 4; i++ {
+		base := filepath.Base(dir)
+		if base == "" || base == "." || base == string(filepath.Separator) {
+			break
+		}
+		nb := normalizeForCompare(base)
+		if nb == title {
+			titleDepth, titleName = i, base
+		}
+		if nb == artist {
+			artistDepth = i
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	// 目录层级越高越像「歌手目录」（歌手在上、专辑在下）：
+	// 只有上层命中歌名框、且没有更上层的歌手目录时，才认定两个字段互换
+	if titleDepth >= 0 && titleDepth > artistDepth {
+		return titleName, true
+	}
+	return "", false
+}
+
 // ---------- 相似度 ----------
 
 // normalizeForCompare 归一化用于比较：小写、去符号、去空格
@@ -279,7 +327,7 @@ func levenshtein(a, b string) int {
 
 // correctAudioTags 对音频文件的标签做字段纠错
 // meta 为读到的原始标签，filename 为文件名
-func correctAudioTags(meta MediaMeta, filename string, artistSecond bool) correctedMeta {
+func correctAudioTags(meta MediaMeta, filename string, artistSecond bool, dirPath string) correctedMeta {
 	res := correctedMeta{Meta: meta, Confidence: 0.5}
 	cand := parseAudioCandidates(filename, artistSecond)
 
@@ -316,15 +364,19 @@ func correctAudioTags(meta MediaMeta, filename string, artistSecond bool) correc
 		}
 	}
 
-	// 情形 3：专辑框装的是歌名
+	// 情形 3：专辑框与歌名相同
+	// 同名专辑（单曲/EP/同名专辑）非常常见，清空反而会把文件挪错目录，
+	// 所以只提示不改写。只有专辑框明显是整条文件名时才清空。
 	if origAlbum != "" && origTitle != "" {
-		if similarity(origAlbum, origTitle) > 0.85 && cand.HasTitle && similarity(cand.Title, origAlbum) > 0.7 {
+		if similarity(origAlbum, origTitle) > 0.85 && filepath.Ext(origAlbum) != "" {
 			res.Meta.Album = ""
 			res.Fixes = append(res.Fixes, mediaFix{
 				Field: "album", From: origAlbum, To: "",
-				Why: "专辑框内容与歌名一致，疑似误填，已清空待在线匹配补全",
+				Why: "专辑框里是整条文件名，不是专辑名，已清空",
 			})
 			res.Confidence = 0.75
+		} else if similarity(origAlbum, origTitle) > 0.85 {
+			res.Warnings = append(res.Warnings, "专辑名与歌名相同（同名专辑），保持原样")
 		}
 	}
 
@@ -357,6 +409,33 @@ func correctAudioTags(meta MediaMeta, filename string, artistSecond bool) correc
 			Why: "歌手缺失，按文件名补全",
 		})
 		res.Confidence = 0.6
+	}
+
+	// 情形 10：歌名框里是常用歌手名、歌手框里不是 → 两个字段写反了
+	if res.Meta.Title != "" && res.Meta.Artist != "" && res.Meta.Title != res.Meta.Artist {
+		if isKnownArtist(res.Meta.Title) && !isKnownArtist(res.Meta.Artist) {
+			oldTitle, oldArtist := res.Meta.Title, res.Meta.Artist
+			res.Meta.Title, res.Meta.Artist = oldArtist, oldTitle
+			res.Fixes = append(res.Fixes, mediaFix{
+				Field: "title", From: oldTitle, To: res.Meta.Title,
+				Why: "歌名框里是常用歌手名，与歌手框内容互换",
+			})
+			res.Confidence = 0.88
+		}
+	}
+
+	// 情形 9：所在文件夹名是歌手 → 歌名/歌手框内容互换
+	// 这是本地唯一可靠的"外部证据"（专辑目录名通常就是歌手名）
+	if dirPath != "" {
+		if name, ok := dirArtistHint(dirPath, res.Meta); ok {
+			oldTitle, oldArtist := res.Meta.Title, res.Meta.Artist
+			res.Meta.Title, res.Meta.Artist = oldArtist, oldTitle
+			res.Fixes = append(res.Fixes, mediaFix{
+				Field: "title", From: oldTitle, To: res.Meta.Title,
+				Why: "所在文件夹「" + name + "」是歌手名，歌名与歌手框内容互换",
+			})
+			res.Confidence = 0.9
+		}
 	}
 
 	// 情形 7：年份非法

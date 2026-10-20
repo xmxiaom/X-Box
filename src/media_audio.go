@@ -94,7 +94,7 @@ func planAudioRename(path string, opts mediaOptions, reserved map[string]bool) (
 	// 1) 字段纠错：文件名 + 现有标签交叉印证
 	corrected := correctedMeta{Meta: meta, Confidence: 0.5}
 	if opts.Fix {
-		corrected = correctAudioTags(meta, nameNoExt, opts.ArtistSecond)
+		corrected = correctAudioTags(meta, nameNoExt, opts.ArtistSecond, path)
 	}
 	// 标签为空 + 角色靠猜：只改名不回写标签
 	if opts.RoleGuessed && strings.TrimSpace(meta.Title) == "" && strings.TrimSpace(meta.Artist) == "" {
@@ -138,7 +138,13 @@ func planAudioRename(path string, opts mediaOptions, reserved map[string]bool) (
 
 	newDir := filepath.Dir(path)
 	if opts.Organize {
-		newDir = audioDirFor(newDir, m)
+		// 基准必须是任务根目录：用当前所在目录会在每次整理时把
+		// 「歌手/专辑」再套一层，越整理越深
+		base := strings.TrimSpace(opts.Root)
+		if base == "" {
+			base = filepath.Dir(path)
+		}
+		newDir = audioDirFor(base, m)
 	}
 	target := uniquePath(path, filepath.Join(newDir, newName), reserved)
 

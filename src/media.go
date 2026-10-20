@@ -60,6 +60,9 @@ type mediaOptions struct {
 	ArtistSecond bool
 	// RoleGuessed：角色来自模板顺序推断，目录内没有重复证据
 	RoleGuessed bool
+	// Root：任务的根目录。归档一律以它为基准，
+	// 不能用"文件当前所在目录"，否则递归整理会一层层套娃
+	Root string
 }
 
 // MediaState 任务运行状态（供前端轮询）
@@ -270,6 +273,8 @@ func detectRolesByDir(files []string, tmpl string) map[string]audioRole {
 	}
 	left := map[string]map[string]int{}
 	right := map[string]map[string]int{}
+	knownLeft := map[string]int{}  // 左侧命中常用歌手名的文件数
+	knownRight := map[string]int{} // 右侧命中常用歌手名的文件数
 	inc := func(m map[string]map[string]int, dir, tok string) {
 		if m[dir] == nil {
 			m[dir] = map[string]int{}
@@ -294,6 +299,13 @@ func detectRolesByDir(files []string, tmpl string) map[string]audioRole {
 		if !isDigitsOnly(r) {
 			inc(right, dir, strings.ToLower(r))
 		}
+		if lk, rk := isKnownArtist(l), isKnownArtist(r); lk != rk {
+			if rk {
+				knownRight[dir]++
+			} else {
+				knownLeft[dir]++
+			}
+		}
 	}
 	out := map[string]audioRole{}
 	seen := map[string]bool{}
@@ -303,13 +315,17 @@ func detectRolesByDir(files []string, tmpl string) map[string]audioRole {
 				continue
 			}
 			seen[dir] = true
-			out[dir] = classifyRole(maxRepeat(left[dir]), maxRepeat(right[dir]), tmplTitleFirst)
+			out[dir] = classifyRole(maxRepeat(left[dir]), maxRepeat(right[dir]), knownLeft[dir], knownRight[dir], tmplTitleFirst)
 		}
 	}
 	return out
 }
 
-func classifyRole(maxLeft, maxRight int, tmplTitleFirst bool) audioRole {
+func classifyRole(maxLeft, maxRight, knownLeft, knownRight int, tmplTitleFirst bool) audioRole {
+	// 常用歌手名命中是最直接的证据，优先于重复度统计
+	if knownLeft != knownRight {
+		return audioRole{ArtistSecond: knownRight > knownLeft}
+	}
 	switch {
 	case maxRight >= 3 && maxRight > maxLeft*2:
 		return audioRole{ArtistSecond: true}
@@ -396,6 +412,7 @@ func previewMediaTask(t MediaTask, limit int) (map[string]any, error) {
 	opts := mediaOptions{
 		Kind: t.Kind, UseMeta: t.UseMeta, Fix: t.Fix, Online: t.Online,
 		WriteTag: t.WriteTag, Organize: t.Organize, Template: t.Template,
+		Root: t.Dir,
 	}
 	excludes := parseMediaExcludes(t.Exclude)
 	files, err := collectMediaFiles(t.Dir, t.Kind, t.Recursive, excludes, nil)
@@ -460,6 +477,7 @@ func runMediaTask(t MediaTask) {
 	opts := mediaOptions{
 		Kind: t.Kind, UseMeta: t.UseMeta, Fix: t.Fix, Online: t.Online,
 		WriteTag: t.WriteTag, Organize: t.Organize, Template: t.Template,
+		Root: t.Dir,
 	}
 	excludes := parseMediaExcludes(t.Exclude)
 
