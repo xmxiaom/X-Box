@@ -37,7 +37,7 @@ type audioNamePlan struct {
 // renderAudioName 用模板渲染文件名（不含目录部分）
 func renderAudioName(tmpl string, m MediaMeta) string {
 	if strings.TrimSpace(tmpl) == "" {
-		tmpl = "{artist} - {title}"
+		tmpl = "{title} - {artist}"
 	}
 	year := ""
 	if m.Year > 0 {
@@ -85,7 +85,8 @@ func planAudioRename(path string, opts mediaOptions, reserved map[string]bool) (
 	var cover []byte
 
 	meta, _ := ReadMediaMeta(path)
-	nameNoExt := strings.TrimSuffix(plan.OldName, filepath.Ext(plan.OldName))
+	// 文件名本身也可能是乱码（旧工具按西文页解过一遍），先还原再解析
+	nameNoExt := fixMojibake(strings.TrimSuffix(plan.OldName, filepath.Ext(plan.OldName)))
 
 	// 1) 字段纠错：文件名 + 现有标签交叉印证
 	corrected := correctedMeta{Meta: meta, Confidence: 0.5}

@@ -126,6 +126,13 @@ func loadMediaTasks() []MediaTask {
 	if json.Unmarshal(b, &out) != nil {
 		return nil
 	}
+	// 默认模板已改为「歌名 - 歌手」：仍停留在旧默认值的任务跟随新默认，
+	// 用户自定义过的模板原样保留
+	for i := range out {
+		if out[i].Template == "" || out[i].Template == "{artist} - {title}" {
+			out[i].Template = "{title} - {artist}"
+		}
+	}
 	return out
 }
 
@@ -537,7 +544,7 @@ func (s *Server) handleMediaSave(w http.ResponseWriter, r *http.Request) {
 		t.Name = filepath.Base(t.Dir) + " · " + label
 	}
 	if t.Template == "" && t.Kind == "audio" {
-		t.Template = "{artist} - {title}"
+		t.Template = "{title} - {artist}"
 	}
 
 	tasks := loadMediaTasks()
@@ -772,7 +779,7 @@ func applyMediaImport(tasks []MediaTask) error {
 			tasks[i].Kind = "video"
 		}
 		if tasks[i].Template == "" && tasks[i].Kind == "audio" {
-			tasks[i].Template = "{artist} - {title}"
+			tasks[i].Template = "{title} - {artist}"
 		}
 	}
 	if err := saveMediaTasks(tasks); err != nil {

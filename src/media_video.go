@@ -86,6 +86,7 @@ type mediaInfo struct {
 // parseVideoName 从文件名解析视频信息
 func parseVideoName(name string) mediaInfo {
 	var info mediaInfo
+	name = fixMojibake(name)
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	orig := base
 

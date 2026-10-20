@@ -311,6 +311,12 @@ func ReadMediaMeta(path string) (MediaMeta, error) {
 			m.Format = "asf"
 		}
 	}
+	// 早年中文工具常把 GBK 字节按单字节西文写进标签，这里统一还原
+	m.Title = fixMojibake(m.Title)
+	m.Artist = fixMojibake(m.Artist)
+	m.Album = fixMojibake(m.Album)
+	m.Genre = fixMojibake(m.Genre)
+	m.Comment = fixMojibake(m.Comment)
 	return m, nil
 }
 
