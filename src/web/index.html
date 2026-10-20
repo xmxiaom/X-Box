@@ -1096,6 +1096,7 @@ function renderMediaPage(){
     const st = mediaStates[t.id] || {};
     let badge = '<span class="badge badge-gray"><span class="dot"></span>待运行</span>';
     if(st.running) badge = '<span class="badge badge-blue"><span class="dot"></span>整理中</span>';
+    else if(st.stopped) badge = '<span class="badge" style="background:var(--warning-light);color:var(--warning)"><span class="dot"></span>已停止</span>';
     else if(st.lastAt) badge = st.lastOk
       ? '<span class="badge badge-green"><span class="dot"></span>已完成</span>'
       : '<span class="badge" style="background:var(--danger-light);color:var(--danger)"><span class="dot"></span>有错误</span>';
@@ -1109,7 +1110,9 @@ function renderMediaPage(){
     }else if(st.lastAt){
       detail = '扫描 ' + (st.total || 0) + ' · 重命名 ' + (st.renamed || 0) +
         (isV ? '' : (' · 写标签 ' + (st.tagged || 0))) +
-        ' · 跳过 ' + (st.skipped || 0) + ' · 失败 ' + (st.failed || 0) + ' · 耗时 ' + (st.duration || '—');
+        ' · 跳过 ' + (st.skipped || 0) +
+        (st.unsupported ? (' · 不支持写标签 ' + st.unsupported) : '') +
+        ' · 失败 ' + (st.failed || 0) + ' · 耗时 ' + (st.duration || '—');
     }else{
       detail = '尚未整理过';
     }
@@ -1131,6 +1134,7 @@ function renderMediaPage(){
       '</svg></div>' +
       '<div class="info"><div class="name">' + esc(t.name) + ' ' + badge + ' ' + tags.join(' ') + '</div>' +
         '<div class="desc mono" style="font-size:11.5px">' + esc(t.dir) + '</div>' +
+        (!isV && t.template ? '<div class="desc" style="font-size:11px;color:var(--text3)">命名模板：' + esc(t.template) + '</div>' : '') +
         '<div class="desc" style="font-size:11.5px;color:var(--text3)">' + esc(when) + ' · ' + detail + '</div>' +
       '</div>' +
       '<div class="actions">' +

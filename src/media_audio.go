@@ -32,6 +32,9 @@ type audioNamePlan struct {
 	Fixes      []mediaFix `json:"fixes,omitempty"`
 	Confidence float64    `json:"confidence,omitempty"`
 	Warn       string     `json:"warn,omitempty"`
+	// RoleGuessed 表示歌手/歌名在文件名里的位置是"猜"的（目录里没有重复证据），
+	// 这种文件只改名、不回写标签，避免把推断错的角色写进文件
+	RoleGuessed bool `json:"roleGuessed,omitempty"`
 }
 
 // renderAudioName 用模板渲染文件名（不含目录部分）
@@ -91,7 +94,11 @@ func planAudioRename(path string, opts mediaOptions, reserved map[string]bool) (
 	// 1) 字段纠错：文件名 + 现有标签交叉印证
 	corrected := correctedMeta{Meta: meta, Confidence: 0.5}
 	if opts.Fix {
-		corrected = correctAudioTags(meta, nameNoExt)
+		corrected = correctAudioTags(meta, nameNoExt, opts.ArtistSecond)
+	}
+	// 标签为空 + 角色靠猜：只改名不回写标签
+	if opts.RoleGuessed && strings.TrimSpace(meta.Title) == "" && strings.TrimSpace(meta.Artist) == "" {
+		plan.RoleGuessed = true
 	}
 
 	// 2) 在线补全（MusicBrainz → iTunes）
@@ -163,8 +170,11 @@ func writeMediaTags(path string, m MediaMeta, cover []byte) error {
 	case ".wma", ".asf", ".wmv":
 		return writeASFTags(path, m, cover)
 	}
-	return errors.New("该格式暂不支持写入标签")
+	return errTagUnsupported
 }
+
+// errTagUnsupported 格式本身不支持写标签（不是错误，不该标红）
+var errTagUnsupported = errors.New("该格式不支持写入标签")
 
 // moveMediaFile 移动文件（同设备改名，跨设备退回复制+删除）
 func moveMediaFile(oldPath, newPath string) error {

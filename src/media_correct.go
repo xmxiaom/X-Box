@@ -70,33 +70,40 @@ var (
 )
 
 // parseAudioCandidates 从音频文件名解析角色候选
-func parseAudioCandidates(filename string) mediaCandidates {
+// parseAudioCandidates 从文件名解析角色候选。
+// artistSecond=true 表示库里文件名是「歌名 - 歌手」顺序（由目录内重复度推断）。
+func parseAudioCandidates(filename string, artistSecond bool) mediaCandidates {
 	var c mediaCandidates
 	base := strings.TrimSuffix(filename, extOf(filename))
 	// 去掉站点后缀噪声
 	base = strings.TrimSpace(base)
 
-	// 优先"歌手 - 专辑 - 歌名"
-	if m := reArtistDashAlbumDashTitle.FindStringSubmatch(base); m != nil {
+	// 优先"歌手 - 专辑 - 歌名"（反序库里不套用，容易误判）
+	if m := reArtistDashAlbumDashTitle.FindStringSubmatch(base); m != nil && !artistSecond {
 		c.Artist = strings.TrimSpace(m[1])
 		c.Album = strings.TrimSpace(m[2])
 		c.Title = strings.TrimSpace(m[3])
 		c.HasArtist, c.HasTitle = true, true
 		return c
 	}
-	// "歌手 - 歌名"
+	// "歌手 - 歌名" / 反序时 "歌名 - 歌手"
 	if m := reArtistDashTitle.FindStringSubmatch(base); m != nil {
 		a, t := strings.TrimSpace(m[1]), strings.TrimSpace(m[2])
-		// 左边像歌手、右边像歌名才采纳
+		if artistSecond {
+			a, t = t, a // 右侧才是歌手
+		}
 		if looksLikeArtist(a) && looksLikeTitle(t) {
 			c.Artist, c.Title = a, t
 			c.HasArtist, c.HasTitle = true, true
 			return c
 		}
 	}
-	// "歌手 _ 歌名"
+	// "歌手 _ 歌名"（同样支持反序）
 	if m := reArtistUnderscore.FindStringSubmatch(base); m != nil {
 		a, t := strings.TrimSpace(m[1]), strings.TrimSpace(m[2])
+		if artistSecond {
+			a, t = t, a
+		}
 		if looksLikeArtist(a) && looksLikeTitle(t) {
 			c.Artist, c.Title = a, t
 			c.HasArtist, c.HasTitle = true, true
@@ -272,9 +279,9 @@ func levenshtein(a, b string) int {
 
 // correctAudioTags 对音频文件的标签做字段纠错
 // meta 为读到的原始标签，filename 为文件名
-func correctAudioTags(meta MediaMeta, filename string) correctedMeta {
+func correctAudioTags(meta MediaMeta, filename string, artistSecond bool) correctedMeta {
 	res := correctedMeta{Meta: meta, Confidence: 0.5}
-	cand := parseAudioCandidates(filename)
+	cand := parseAudioCandidates(filename, artistSecond)
 
 	// 收集现有字段值
 	origTitle, origArtist, origAlbum := meta.Title, meta.Artist, meta.Album

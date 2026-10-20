@@ -17,6 +17,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -48,13 +49,17 @@ type MediaTask struct {
 
 // mediaOptions 单次整理的行为开关（由任务派生）
 type mediaOptions struct {
-	Kind      string
-	UseMeta   bool
-	Fix       bool
-	Online    bool
-	WriteTag  bool
-	Organize  bool
-	Template  string
+	Kind     string
+	UseMeta  bool
+	Fix      bool
+	Online   bool
+	WriteTag bool
+	Organize bool
+	Template string
+	// ArtistSecond：文件名里歌手在右侧（「歌名 - 歌手」）
+	ArtistSecond bool
+	// RoleGuessed：角色来自模板顺序推断，目录内没有重复证据
+	RoleGuessed bool
 }
 
 // MediaState 任务运行状态（供前端轮询）
@@ -68,6 +73,8 @@ type MediaState struct {
 	Tagged   int       `json:"tagged"`
 	Skipped  int       `json:"skipped"`
 	Failed   int       `json:"failed"`
+	Unsupported int    `json:"unsupported"` // 该格式不支持写标签（不算失败）
+	Stopped     bool   `json:"stopped"`     // 用户手动停止（不算错误）
 	Current  string    `json:"current"`
 	LastAt   time.Time `json:"lastAt"`
 	LastOK   bool      `json:"lastOk"`
@@ -97,6 +104,7 @@ type mediaPlanItem struct {
 	Confidence float64    `json:"confidence,omitempty"`
 	Warn       string     `json:"warn,omitempty"`
 	Error      string     `json:"error,omitempty"`
+	RoleGuessed bool      `json:"roleGuessed,omitempty"`
 }
 
 var mediaStore struct {
@@ -129,7 +137,10 @@ func loadMediaTasks() []MediaTask {
 	// 默认模板已改为「歌名 - 歌手」：仍停留在旧默认值的任务跟随新默认，
 	// 用户自定义过的模板原样保留
 	for i := range out {
-		if out[i].Template == "" || out[i].Template == "{artist} - {title}" {
+		tpl := strings.TrimSpace(out[i].Template)
+		// 去掉空格后比较，兼容 "{artist}-{title}" 这类写法
+		flat := strings.ReplaceAll(tpl, " ", "")
+		if tpl == "" || flat == "{artist}-{title}" {
 			out[i].Template = "{title} - {artist}"
 		}
 	}
@@ -236,6 +247,100 @@ func collectMediaFiles(root, kind string, recursive bool, excludes []string, onS
 	return out, err
 }
 
+// audioRole 文件名中「歌手」所在的一侧
+type audioRole struct {
+	ArtistSecond bool
+	Guessed      bool
+}
+
+// detectRolesByDir 按目录判断文件名里歌手在左还是在右。
+// 依据：同一目录（通常是一张专辑）里歌手名会反复出现，歌名基本不重复。
+// 左侧重复多 → 歌手在左；右侧重复多 → 歌手在右（「歌名 - 歌手」）。
+// 证据不足时按模板顺序推断并标记 Guessed——这类文件只改名、不回写标签。
+func detectRolesByDir(files []string, tmpl string) map[string]audioRole {
+	tmplTitleFirst := true
+	if strings.TrimSpace(tmpl) != "" {
+		ti := strings.Index(tmpl, "{title}")
+		ai := strings.Index(tmpl, "{artist}")
+		if ti < 0 {
+			tmplTitleFirst = false
+		} else if ai >= 0 && ai < ti {
+			tmplTitleFirst = false
+		}
+	}
+	left := map[string]map[string]int{}
+	right := map[string]map[string]int{}
+	inc := func(m map[string]map[string]int, dir, tok string) {
+		if m[dir] == nil {
+			m[dir] = map[string]int{}
+		}
+		m[dir][tok]++
+	}
+	for _, p := range files {
+		dir := filepath.Dir(p)
+		base := fixMojibake(strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)))
+		i := strings.Index(base, " - ")
+		if i <= 0 {
+			continue
+		}
+		l := strings.TrimSpace(base[:i])
+		r := strings.TrimSpace(base[i+3:])
+		if l == "" || r == "" {
+			continue
+		}
+		if !isDigitsOnly(l) {
+			inc(left, dir, strings.ToLower(l))
+		}
+		if !isDigitsOnly(r) {
+			inc(right, dir, strings.ToLower(r))
+		}
+	}
+	out := map[string]audioRole{}
+	seen := map[string]bool{}
+	for _, m := range []map[string]map[string]int{left, right} {
+		for dir := range m {
+			if seen[dir] {
+				continue
+			}
+			seen[dir] = true
+			out[dir] = classifyRole(maxRepeat(left[dir]), maxRepeat(right[dir]), tmplTitleFirst)
+		}
+	}
+	return out
+}
+
+func classifyRole(maxLeft, maxRight int, tmplTitleFirst bool) audioRole {
+	switch {
+	case maxRight >= 3 && maxRight > maxLeft*2:
+		return audioRole{ArtistSecond: true}
+	case maxLeft >= 3 && maxLeft > maxRight*2:
+		return audioRole{ArtistSecond: false}
+	}
+	return audioRole{ArtistSecond: tmplTitleFirst, Guessed: true}
+}
+
+func maxRepeat(m map[string]int) int {
+	best := 0
+	for _, v := range m {
+		if v > best {
+			best = v
+		}
+	}
+	return best
+}
+
+func isDigitsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func parseMediaExcludes(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return nil
@@ -252,8 +357,10 @@ func parseMediaExcludes(s string) []string {
 // ---------- 计划与执行 ----------
 
 // buildMediaPlan 生成一个文件的整理计划
-func buildMediaPlan(path string, opts mediaOptions, reserved map[string]bool) (mediaPlanItem, MediaMeta, []byte) {
+func buildMediaPlan(path string, opts mediaOptions, reserved map[string]bool, role audioRole) (mediaPlanItem, MediaMeta, []byte) {
 	if opts.Kind == "audio" {
+		opts.ArtistSecond = role.ArtistSecond
+		opts.RoleGuessed = role.Guessed
 		ap, meta, cover := planAudioRename(path, opts, reserved)
 		return mediaPlanItem{
 			OldPath: ap.OldPath, NewPath: ap.NewPath,
@@ -262,6 +369,7 @@ func buildMediaPlan(path string, opts mediaOptions, reserved map[string]bool) (m
 			Year: ap.Year, Track: ap.Track,
 			Reason: ap.Reason, Changed: ap.Changed,
 			Fixes: ap.Fixes, Confidence: ap.Confidence, Warn: ap.Warn,
+			RoleGuessed: ap.RoleGuessed,
 		}, meta, cover
 	}
 	meta, _ := ReadMediaMeta(path)
@@ -299,9 +407,10 @@ func previewMediaTask(t MediaTask, limit int) (map[string]any, error) {
 	}
 	// 在线匹配有 1 req/s 节流，预览时只对前若干条联网，避免用户等几分钟
 	onlineCap := 8
+	roles := detectRolesByDir(files, t.Template)
 	reserved := map[string]bool{}
 	items := []mediaPlanItem{}
-	changed, fixed, warnN, onlineN := 0, 0, 0, 0
+	changed, fixed, warnN, onlineN, guessedN := 0, 0, 0, 0, 0
 	for _, p := range files {
 		o := opts
 		if o.Online && onlineN >= onlineCap {
@@ -310,7 +419,10 @@ func previewMediaTask(t MediaTask, limit int) (map[string]any, error) {
 		if o.Online {
 			onlineN++
 		}
-		it, _, _ := buildMediaPlan(p, o, reserved)
+		it, _, _ := buildMediaPlan(p, o, reserved, roles[filepath.Dir(p)])
+		if it.RoleGuessed {
+			guessedN++
+		}
 		if it.Changed {
 			changed++
 			reserved[it.NewPath] = true
@@ -324,12 +436,17 @@ func previewMediaTask(t MediaTask, limit int) (map[string]any, error) {
 			items = append(items, it)
 		}
 	}
-	note := ""
+	var notes []string
 	if opts.Online && len(files) > onlineCap {
-		note = fmt.Sprintf("联网匹配在预览阶段仅覆盖前 %d 个文件；实际执行时会全部联网补全（每首约 1 秒）", onlineCap)
+		notes = append(notes, fmt.Sprintf("联网匹配在预览阶段仅覆盖前 %d 个文件；实际执行时会全部联网补全（每首约 1 秒）", onlineCap))
 	}
+	if guessedN > 0 {
+		notes = append(notes, fmt.Sprintf("其中 %d 个文件没有标签、目录里也无法判断歌手在左还是右，已按模板顺序命名，且不会写入标签", guessedN))
+	}
+	note := strings.Join(notes, "；")
 	return map[string]any{
 		"total": len(files), "changed": changed, "fixed": fixed, "warn": warnN,
+		"roleGuessed": guessedN,
 		"items": items, "truncated": changed+fixed > len(items),
 		"onlineCapped": opts.Online && len(files) > onlineCap,
 		"note":         note,
@@ -374,21 +491,23 @@ func runMediaTask(t MediaTask) {
 	})
 	mediaLog(id, fmt.Sprintf("发现 %d 个待整理文件", len(files)))
 
+	roles := detectRolesByDir(files, t.Template)
 	reserved := map[string]bool{}
 	// 标签写入失败按原因聚合：同一原因只打前 3 条，末尾给汇总，避免刷屏
 	tagFailByReason := map[string]int{}
 	tagFailOrder := []string{}
+	unsupportedSeen := map[string]int{}
 	for i, p := range files {
 		select {
 		case <-cancel:
-			mediaLog(id, "已手动停止")
-			finishMediaTask(id, start, false, "已手动停止")
+			mediaLog(id, "已手动停止（已处理的不回滚）")
+			finishMediaStopped(id, start)
 			return
 		default:
 		}
 		setMediaState(id, func(st *MediaState) { st.Current = filepath.Base(p) })
 
-		it, meta, cover := buildMediaPlan(p, opts, reserved)
+		it, meta, cover := buildMediaPlan(p, opts, reserved, roles[filepath.Dir(p)])
 		if it.Error != "" {
 			setMediaState(id, func(st *MediaState) { st.Done = i + 1; st.Failed++ })
 			continue
@@ -397,8 +516,20 @@ func runMediaTask(t MediaTask) {
 		// 标签回写（在改名之前完成，写入用临时文件+原子改名）
 		// 仅在"名字要变"或"纠错改动了字段"时写，避免整库无谓重写
 		tagDone, tagErr := false, ""
-		if opts.WriteTag && opts.Kind == "audio" && (it.Changed || len(it.Fixes) > 0) {
+		// RoleGuessed：歌手/歌名位置是猜的，宁可不写标签，也不把错的信息写进文件
+		unsupported := false
+		if opts.WriteTag && opts.Kind == "audio" && (it.Changed || len(it.Fixes) > 0) && !it.RoleGuessed {
 			if err := writeMediaTags(it.OldPath, meta, cover); err != nil {
+				if errors.Is(err, errTagUnsupported) {
+					// 格式本身不支持（ape/dsf 等）：不是错误，单独计数
+					unsupported = true
+					if unsupportedSeen[err.Error()] == 0 {
+						unsupportedSeen[err.Error()] = 1
+						mediaLog(id, "· "+err.Error()+"（这类文件只改名，不改标签）")
+					}
+					unsupportedSeen[err.Error()]++
+					goto tagDone
+				}
 				tagErr = err.Error()
 				tagFailByReason[tagErr]++
 				if tagFailByReason[tagErr] <= 3 {
@@ -417,6 +548,7 @@ func runMediaTask(t MediaTask) {
 				tagDone = true
 			}
 		}
+	tagDone:
 
 		moved := false
 		if it.Changed {
@@ -430,8 +562,11 @@ func runMediaTask(t MediaTask) {
 		}
 
 		switch {
-		case moved:
+		case moved && it.NewName != it.OldName:
 			mediaLog(id, fmt.Sprintf("✓ %s → %s", it.OldName, it.NewName))
+		case moved:
+			// 只挪目录、名字没变：日志里写出相对目录，避免看起来"改了个寂寞"
+			mediaLog(id, fmt.Sprintf("✓ 归档 %s → %s", it.OldName, filepath.Join(filepath.Base(filepath.Dir(it.NewPath)), it.NewName)))
 		case tagDone:
 			mediaLog(id, fmt.Sprintf("✓ 标签已修正 %s", it.OldName))
 		}
@@ -446,6 +581,8 @@ func runMediaTask(t MediaTask) {
 			switch {
 			case tagErr != "":
 				st.Failed++ // 标签没写进去不算"跳过"，否则用户以为无事发生
+			case unsupported:
+				st.Unsupported++
 			case !moved && !tagDone:
 				st.Skipped++
 			}
@@ -470,8 +607,30 @@ func runMediaTask(t MediaTask) {
 	}
 	st := mediaStateOf(id)
 	finishMediaTask(id, start, st.Failed == 0, summary)
-	mediaLog(id, fmt.Sprintf("完成：重命名 %d，写标签 %d，跳过 %d，失败 %d",
-		st.Renamed, st.Tagged, st.Skipped, st.Failed))
+	mediaLog(id, fmt.Sprintf("完成：重命名 %d，写标签 %d，跳过 %d，不支持写标签 %d，失败 %d",
+		st.Renamed, st.Tagged, st.Skipped, st.Unsupported, st.Failed))
+}
+
+// finishMediaStopped 手动停止：不算错误，状态标记为「已停止」
+func finishMediaStopped(id string, start time.Time) {
+	mediaStore.mu.Lock()
+	if mediaStore.cancel != nil {
+		delete(mediaStore.cancel, id)
+	}
+	if mediaStore.busy != nil {
+		delete(mediaStore.busy, id)
+	}
+	mediaStore.mu.Unlock()
+	setMediaState(id, func(st *MediaState) {
+		st.Running = false
+		st.Phase = "done"
+		st.Current = ""
+		st.Stopped = true
+		st.LastAt = time.Now()
+		st.LastOK = true
+		st.LastErr = ""
+		st.Duration = time.Since(start).Round(time.Second).String()
+	})
 }
 
 // finishMediaTask 收尾：清运行标记、更新统计
@@ -558,6 +717,12 @@ func (s *Server) handleMediaSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if !found {
 		tasks = append(tasks, t)
+		// 新任务不该继承任何历史状态（否则可能一加进来就显示"有错误"）
+		mediaStore.mu.Lock()
+		if mediaStore.state != nil {
+			delete(mediaStore.state, t.ID)
+		}
+		mediaStore.mu.Unlock()
 	}
 	sort.Slice(tasks, func(i, j int) bool {
 		if tasks[i].Kind != tasks[j].Kind {
