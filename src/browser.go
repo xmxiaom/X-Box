@@ -262,13 +262,12 @@ func (s *Server) handleBrowserProxy(w http.ResponseWriter, r *http.Request) {
 		defer browserReleaseSlot()
 	}
 
-	// 防护 4：同一路径的页面导航限流。前端路由互相跳转（登录页↔首页）时，
-	// 浏览器会以极高频率重载同一文档；只限 HTML 导航，不影响静态资源。
-	// key 用路径部分：循环跳转时查询串会变化，用完整 URL 会漏判
+	// 防护 4：同一 URL（含查询串）的页面导航限流。浏览器前端路由/登录态互跳时，
+	// 会以极高频率重载同一文档；只限 HTML 导航，不影响静态资源。
+	// key 用完整 URL（含查询串）：真循环多为完全相同 URL 反复（同 key 累积触发）；
+	// 而 SPA 的"带不同查询串的正常路由跳转"会被拆成不同 key，不再被误判为循环——
+	// 旧实现去查询串把异 query 的正常跳转归并到同一键，导致百度地图等站点被误杀。
 	navKey := raw
-	if qi := strings.IndexByte(navKey, '?'); qi > 0 {
-		navKey = navKey[:qi]
-	}
 	if strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") &&
 		!browserNavAllowed(navKey) {
 		fail(w, 429, "该页面在代理下反复跳转，已暂停加载；请改用站点自身入口")

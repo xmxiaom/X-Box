@@ -2362,15 +2362,23 @@ function browserOnFrameLoad(t){
     }
     return;
   }
-  // 兜底：代理内的循环重载（例如登录页互相跳转）不会触发"逃逸"判断，
-  // 用短时间内的加载频次拦住，避免把客户端和 NAS 一起拖慢。
+  // 兜底：代理内完全同一 URL 的循环重载（真循环）用短时间内的加载频次拦住，
+  // 避免把客户端和 NAS 一起拖慢。注意：只对"本次 href 与上一次完全相同"的加载
+  // 累加——SPA 带不同查询串的正常路由跳转 href 不同，视为正常导航、重置计数，
+  // 不再被误判为循环（避免百度地图等站点被整页拦停）。
   const _now = Date.now();
-  t.loadTimes = (t.loadTimes || []).filter(function(x){ return _now - x < 10000; });
-  t.loadTimes.push(_now);
-  if(t.loadTimes.length > 6){
-    toast('该页面在代理下反复跳转，已停止加载；请改用站点自身入口','err');
-    try{ t.frame.src = 'about:blank'; }catch(e){}
-    return;
+  const sameHref = (t.lastLoadHref === href);
+  t.lastLoadHref = href;
+  if(sameHref){
+    t.loadTimes = (t.loadTimes || []).filter(function(x){ return _now - x < 10000; });
+    t.loadTimes.push(_now);
+    if(t.loadTimes.length > 6){
+      toast('该页面在代理下反复跳转，已停止加载；请改用站点自身入口','err');
+      try{ t.frame.src = 'about:blank'; }catch(e){}
+      return;
+    }
+  }else{
+    t.loadTimes = [];
   }
 
   let doc; try{ doc = t.frame.contentDocument; }catch(e){ return; }
