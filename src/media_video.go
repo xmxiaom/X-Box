@@ -89,6 +89,8 @@ func parseVideoName(name string) mediaInfo {
 	name = fixMojibake(name)
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	orig := base
+	// 重名序号先剥掉再解析（影片年份是 4 位，stripCollisionSuffix 只吃 1-3 位，不会误伤）
+	base = stripCollisionSuffix(base)
 
 	// 剧集号
 	if m := reSxxExx.FindStringSubmatch(base); m != nil {

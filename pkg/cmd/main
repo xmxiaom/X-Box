@@ -31,7 +31,7 @@ start_process() {
 
     log_msg "Starting X-Box (arch=$(uname -m)) ..."
 
-    # XBOX_DATA 指向持久数据卷：access_token / info.log 落于此处
+    # XBOX_DATA 指向持久数据卷：整理任务/DDNS/同步/测速历史等落于此处
     # XBOX_SOCKET / XBOX_BASE：fnOS 统一网关入口（网关校验登录态后转发到 socket）
     (
       export XBOX_DATA="${TRIM_PKGVAR}"
@@ -46,7 +46,6 @@ start_process() {
     pid=$(head -n1 "${PID_FILE}" | tr -d '[:space:]')
     if check_process "${pid}"; then
         log_msg "X-Box started (pid=${pid})"
-        log_msg "首次使用请从本日志或 ${TRIM_PKGVAR}/access_token 获取访问令牌"
     else
         log_msg "X-Box failed to start; see ${LOG_FILE}"
         rm -f "${PID_FILE}"

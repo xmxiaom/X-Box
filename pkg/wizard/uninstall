@@ -1,0 +1,24 @@
+[
+    {
+        "stepTitle": "确认卸载",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "您即将卸载 X-Box。卸载不会删除任何被整理过的媒体文件本身。应用自身的数据（整理任务、DDNS 配置、网盘同步配置、测速历史、界面设置与运行日志）默认保留，将来重新安装即可恢复；如选择删除则不可恢复。"
+            },
+            {
+                "type": "radio",
+                "field": "wizard_data_action",
+                "label": "应用数据",
+                "initValue": "keep",
+                "options": [
+                    { "label": "保留数据（推荐）—— 重新安装时可恢复任务与配置", "value": "keep" },
+                    { "label": "删除所有数据 —— 不可恢复！", "value": "delete" }
+                ],
+                "rules": [
+                    { "required": true, "message": "请选择数据处理方式" }
+                ]
+            }
+        ]
+    }
+]

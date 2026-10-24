@@ -1,5 +1,35 @@
 #!/bin/bash
 
 ### This script is called during the application lifecycle.
+###
+### 卸载流程：用户点卸载 → 向导 wizard/uninstall 询问数据处理方式 →
+### 系统停应用、删 target/tmp/home/etc → 本脚本收尾。
+### 系统默认保留 var（TRIM_PKGVAR）与 shares，用户选「删除所有数据」时
+### 由本脚本手动清理这些被保留的目录。
+###
+### X-Box 全部持久数据都落在 TRIM_PKGVAR（服务以 XBOX_DATA 指向它启动）：
+### 整理任务、DDNS 配置（含服务商凭据）、网盘同步配置、测速历史、
+### 界面设置、运行日志、更新下载的 fpk。
+
+DATA_ACTION="${wizard_data_action:-keep}"
+
+# 只清目录内容、保留目录本身；空值/根目录/不存在一律跳过（防御误删）
+safe_clean() {
+    local dir="$1"
+    if [ -n "$dir" ] && [ "$dir" != "/" ] && [ -d "$dir" ]; then
+        find "$dir" -mindepth 1 -delete 2>/dev/null || true
+    fi
+}
+
+if [ "$DATA_ACTION" = "delete" ]; then
+    safe_clean "$TRIM_PKGVAR"
+    safe_clean "$TRIM_PKGHOME"
+    if [ -n "$TRIM_DATA_SHARE_PATHS" ]; then
+        IFS=':' read -ra SHARE_PATHS <<< "$TRIM_DATA_SHARE_PATHS"
+        for share_path in "${SHARE_PATHS[@]}"; do
+            safe_clean "$share_path"
+        done
+    fi
+fi
 
 exit 0

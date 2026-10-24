@@ -1094,12 +1094,18 @@ function renderMediaPage(){
 
   const rows = list.map(t => {
     const st = mediaStates[t.id] || {};
+    // 错误状态只挂 30 秒：运行结束后不论成败都不该长期显示「有错误」，
+    // 到期后徽标收回中性态（明细里仍保留上次运行的失败数）
+    const errFresh = !st.running && !st.stopped && !!st.lastAt && !st.lastOk &&
+      (Date.now() - new Date(st.lastAt).getTime()) < 30000;
     let badge = '<span class="badge badge-gray"><span class="dot"></span>待运行</span>';
     if(st.running) badge = '<span class="badge badge-blue"><span class="dot"></span>整理中</span>';
     else if(st.stopped) badge = '<span class="badge" style="background:var(--warning-light);color:var(--warning)"><span class="dot"></span>已停止</span>';
     else if(st.lastAt) badge = st.lastOk
       ? '<span class="badge badge-green"><span class="dot"></span>已完成</span>'
-      : '<span class="badge" style="background:var(--danger-light);color:var(--danger)"><span class="dot"></span>有错误</span>';
+      : (errFresh
+        ? '<span class="badge" style="background:var(--danger-light);color:var(--danger)"><span class="dot"></span>有错误</span>'
+        : '<span class="badge badge-gray"><span class="dot"></span>待运行</span>');
 
     let detail;
     if(st.running){
@@ -1116,7 +1122,7 @@ function renderMediaPage(){
     }else{
       detail = '尚未整理过';
     }
-    if(st.lastErr) detail = '<span style="color:var(--danger)">' + esc(st.lastErr.slice(0, 100)) + '</span> · ' + detail;
+    if(st.lastErr && errFresh) detail = '<span style="color:var(--danger)">' + esc(st.lastErr.slice(0, 100)) + '</span> · ' + detail;
 
     const tags = [];
     if(t.recursive) tags.push('<span class="badge badge-blue"><span class="dot"></span>含子目录</span>');
@@ -1151,6 +1157,29 @@ function renderMediaPage(){
       '</div></div>';
   }).join('') || '<div class="empty">还没有' + (isV ? '视频' : '音频') + '整理任务，点右上角「添加」选择一个飞牛文件夹</div>';
   document.getElementById('media-rows').innerHTML = head + rows;
+  scheduleMediaErrExpiry();
+}
+
+// 错误徽标 30 秒到期后自动收回：到点直接重渲染（状态没变，不必重新拉接口）
+let mediaErrTimer = null;
+function scheduleMediaErrExpiry(){
+  if(mediaErrTimer){ clearTimeout(mediaErrTimer); mediaErrTimer = null; }
+  let soonest = 0;
+  const now = Date.now();
+  for(const t of mediaCache){
+    const st = mediaStates[t.id];
+    if(!st || st.running || st.stopped || !st.lastAt || st.lastOk) continue;
+    const at = new Date(st.lastAt).getTime();
+    if(!isFinite(at)) continue;
+    const left = at + 30000 - now;
+    if(left > 0 && (soonest === 0 || left < soonest)) soonest = left;
+  }
+  if(soonest > 0){
+    mediaErrTimer = setTimeout(()=>{
+      const pg = document.getElementById('page-media');
+      if(pg && pg.classList.contains('active')) renderMediaPage();
+    }, soonest + 300);
+  }
 }
 
 function openMediaForm(id){

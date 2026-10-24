@@ -68,12 +68,33 @@ var (
 	reTrackPrefix = regexp.MustCompile(`^(\d{1,3})[\s._-]+(.+)$`)
 	// "歌手 _ 歌名"
 	reArtistUnderscore = regexp.MustCompile(`^(.+?)\s*_\s*(.+)$`)
+	// uniquePath 追加重名时的尾巴：" (1)"、"(2)"、"[3]"（只认 1-3 位，
+	// 4 位的 "(2019)" 是影片年份不能误剥）
+	reCollisionSuffix = regexp.MustCompile(`\s*[\(\[]\d{1,3}[\)\]]$`)
 )
+
+// stripCollisionSuffix 去掉名字尾巴上的重名序号（可多层：" (1) (2)" → 全剥）。
+// 场景：uniquePath 把冲突文件改成「爱在西元前 - 周杰伦 (1).mp3」后，
+// 再次整理时 "(1)" 会被解析进歌手框变成「周杰伦 (1)」——歌手表匹配不上，
+// 归档时分裂出「周杰伦 (1)」新目录，且每轮整理再套一层序号（曾出现 (15)）。
+// 文件名、标签、目录名三条入口都要过这个函数。
+func stripCollisionSuffix(s string) string {
+	s = strings.TrimSpace(s)
+	for i := 0; i < 5; i++ {
+		t := strings.TrimSpace(reCollisionSuffix.ReplaceAllString(s, ""))
+		if t == s {
+			return s
+		}
+		s = t
+	}
+	return s
+}
 
 // cnArtist 把解析出的歌手名规范成中文名（有中文名时优先）。
 // 「邓紫棋 G.E.M.」→「邓紫棋」；「G.E.M.」→「邓紫棋」；「Zhuang Xinyan」→「庄心妍」；
 // 无中文名的（Taylor Swift）返回表中规范写法；不在表里的原样返回。
 func cnArtist(a string) string {
+	a = stripCollisionSuffix(a)
 	if cn := preferChineseArtist(a); cn != "" {
 		return cn
 	}
@@ -85,7 +106,7 @@ func cnArtist(a string) string {
 // artistSecond=true 表示库里文件名是「歌名 - 歌手」顺序（由目录内重复度推断）。
 func parseAudioCandidates(filename string, artistSecond bool) mediaCandidates {
 	var c mediaCandidates
-	base := strings.TrimSuffix(filename, extOf(filename))
+	base := stripCollisionSuffix(strings.TrimSuffix(filename, extOf(filename)))
 	// 去掉站点后缀噪声
 	base = strings.TrimSpace(base)
 
@@ -238,8 +259,10 @@ func looksLikeAlbum(s string) bool {
 // 专辑目录通常以歌手或专辑命名：若某个上级目录名恰好等于「歌名框」里的值，
 // 说明歌名/歌手两个字段互换了（目录名才是歌手）；等于歌手框则标签没问题。
 func dirArtistHint(path string, m MediaMeta) (string, bool) {
-	title := normalizeForCompare(m.Title)
-	artist := normalizeForCompare(m.Artist)
+	// 后缀要先剥再归一化：normalizeForCompare 保留数字，
+	// 「周杰伦 (1)」不剥会归一化成「周杰伦1」，与目录里的「周杰伦」对不上
+	title := normalizeForCompare(stripCollisionSuffix(m.Title))
+	artist := normalizeForCompare(stripCollisionSuffix(m.Artist))
 	if title == "" || artist == "" || title == artist {
 		return "", false
 	}
@@ -251,7 +274,7 @@ func dirArtistHint(path string, m MediaMeta) (string, bool) {
 		if base == "" || base == "." || base == string(filepath.Separator) {
 			break
 		}
-		nb := normalizeForCompare(base)
+		nb := normalizeForCompare(stripCollisionSuffix(base))
 		if nb == title {
 			titleDepth, titleName = i, base
 		}
@@ -466,6 +489,31 @@ func correctAudioTags(meta MediaMeta, filename string, artistSecond bool, dirPat
 				Why: "所在文件夹「" + name + "」是歌手名，歌名与歌手框内容互换",
 			})
 			res.Confidence = 0.9
+		}
+	}
+
+	// 情形 12：字段尾巴上挂着 uniquePath 的重名序号「(1)」
+	//（旧版解析缺陷把「周杰伦 (1)」写进标签/目录，先洗掉再走后续规范化）
+	if t := stripCollisionSuffix(res.Meta.Title); t != res.Meta.Title && t != "" {
+		old := res.Meta.Title
+		res.Meta.Title = t
+		res.Fixes = append(res.Fixes, mediaFix{
+			Field: "title", From: old, To: t,
+			Why: "去掉文件名重名序号后缀",
+		})
+		if res.Confidence < 0.8 {
+			res.Confidence = 0.8
+		}
+	}
+	if a := stripCollisionSuffix(res.Meta.Artist); a != res.Meta.Artist && a != "" {
+		old := res.Meta.Artist
+		res.Meta.Artist = a
+		res.Fixes = append(res.Fixes, mediaFix{
+			Field: "artist", From: old, To: a,
+			Why: "去掉文件名重名序号后缀",
+		})
+		if res.Confidence < 0.8 {
+			res.Confidence = 0.8
 		}
 	}
 

@@ -19,7 +19,14 @@ GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o "$PKG/app/server/
 chmod +x "$PKG/app/server/xbox-amd64" "$PKG/app/server/xbox-arm64"
 ls -la "$PKG/app/server/"
 
-echo "[3] 打包 fpk（platform=all）"
+echo "[3] 生成图标（纯 Python 无依赖；产物被 gitignore，源码目录静态保持干净）"
+# gen_icons.py 在仓库外 tools/（开发侧工具），输出 4 枚 256px 图标到 pkg/
+PYGEN="C:/Users/Administrator/.workbuddy/binaries/python/versions/3.13.12/python.exe"
+[ -x "$PYGEN" ] || PYGEN="$(command -v python3 || command -v python || echo python3)"
+cd "$BASE"
+"$PYGEN" "$BASE/../tools/gen_icons.py"
+
+echo "[4] 打包 fpk（platform=all）"
 cd "$BASE"
 # manifest 版本与界面版本（src/main.go 的 version 常量）强制同步：
 # fnOS 以 manifest version 判断能否覆盖安装，两处不一致会导致同版本号无法覆盖安装

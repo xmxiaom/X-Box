@@ -324,7 +324,9 @@ func detectRolesByDir(files []string, tmpl string) map[string]audioRole {
 	}
 	for _, p := range files {
 		dir := filepath.Dir(p)
+		// 重名序号先剥掉再统计：「周杰伦 (1)」不剥会污染重复度与歌手命中
 		base := fixMojibake(strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)))
+		base = stripCollisionSuffix(base)
 		i := strings.Index(base, " - ")
 		if i <= 0 {
 			continue
@@ -657,7 +659,9 @@ func runMediaTask(t MediaTask) {
 	}
 
 	// 平铺收尾：清理因移动而变空的子目录（只删空目录，不动任何文件）
-	if opts.Flatten {
+	// 平铺与归档都可能产生空目录（平铺清掉「歌手/专辑」残壳；
+	// 归档则清掉旧版缺陷生成的「周杰伦 (1)」这类污染目录被搬空后的壳）
+	if opts.Flatten || opts.Organize {
 		if n := pruneEmptyDirs(t.Dir); n > 0 {
 			mediaLog(id, fmt.Sprintf("已清理 %d 个空的子目录", n))
 		}

@@ -51,9 +51,9 @@ func renderAudioName(tmpl string, m MediaMeta) string {
 		track = fmt.Sprintf("%02d", m.Track)
 	}
 	r := strings.NewReplacer(
-		"{title}", m.Title,
-		"{artist}", m.Artist,
-		"{album}", m.Album,
+		"{title}", stripCollisionSuffix(m.Title),
+		"{artist}", stripCollisionSuffix(m.Artist),
+		"{album}", stripCollisionSuffix(m.Album),
 		"{year}", year,
 		"{track}", track,
 	)
@@ -66,8 +66,8 @@ func renderAudioName(tmpl string, m MediaMeta) string {
 
 // audioDirFor 计算归档目录：歌手/专辑；缺项时逐级退让
 func audioDirFor(root string, m MediaMeta) string {
-	artist := sanitizeName(m.Artist)
-	album := sanitizeName(m.Album)
+	artist := sanitizeName(stripCollisionSuffix(m.Artist))
+	album := sanitizeName(stripCollisionSuffix(m.Album))
 	if artist == "" {
 		artist = "未知歌手"
 	}

@@ -49,20 +49,27 @@ src/
   updater.go         版本检查与后台异步下载（进度轮询）
   nvme_sleep.go      掉盘修复（d3cold_allowed + udev 持久化）
   web/index.html     内嵌 Web UI（单文件，零构建）
-pkg/                 fpk 打包目录（manifest / cmd 脚本 / 图标资源）
-tests/               三层测试：真实二进制隧道测试（Python/WSL）+ 面板端到端 + 渲染冒烟
-build.sh             交叉编译 + fnpack 打包（自动同步 manifest 版本）
-selfcheck.sh         46 项自检
+pkg/                 fpk 打包目录（manifest / cmd 脚本 / 图标资源 / wizard 向导）
+build.sh             交叉编译 + fnpack 打包（自动同步 manifest 版本、生成图标）
 ```
+
+卸载时应用中心会弹出「是否清除应用数据」选项（`pkg/wizard/uninstall` 向导）：
+默认保留整理任务、DDNS 配置、网盘同步配置、测速历史与日志（重装可恢复），
+选择删除时才由 `pkg/cmd/uninstall_callback` 清空数据目录。卸载不会删除
+任何被整理过的媒体文件本身。
+
+源码目录只放产品源码与打包定义；开发侧的测试（`../tests/`）与工具脚本
+（`../tools/`：自检、图标生成、发布、歌手数据抓取）按约定放在仓库外，
+安装包产物输出到 `../dist/`。
 
 ## 构建
 
 ```bash
-bash build.sh      # 交叉编译 amd64/arm64 → fnpack 打包 → X-Box.fpk
-bash selfcheck.sh  # 46 项自检（结构/JSON/二进制/图标一致性/fpk/安全约束）
-python3 tests/tunnel_test.py       # 真实 linux 二进制：API 隧道/终端/浏览器代理/异步下载（建议 WSL）
-node tests/e2e_panel.test.js       # 端到端：无登录直开面板/三通道回退/隧道编解码/语法地板
-node tests/smoke_test.js           # 前端渲染冒烟测试（边界数据）
+bash build.sh      # 交叉编译 amd64/arm64 → fnpack 打包 → ../dist/X-Box.fpk
+bash ../tools/selfcheck.sh    # 46 项自检（结构/JSON/二进制/图标一致性/fpk/安全约束）
+python3 ../tests/tunnel_test.py       # 真实 linux 二进制：API 隧道/终端/浏览器代理/异步下载（建议 WSL）
+node ../tests/e2e_panel.test.js       # 端到端：无登录直开面板/三通道回退/隧道编解码/语法地板
+node ../tests/smoke_test.js           # 前端渲染冒烟测试（边界数据）
 ```
 
 依赖：Go 1.22+（`CGO_ENABLED=0` 交叉编译）、fnpack 1.2.3。
