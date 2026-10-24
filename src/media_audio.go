@@ -137,7 +137,17 @@ func planAudioRename(path string, opts mediaOptions, reserved map[string]bool) (
 	newName += ext
 
 	newDir := filepath.Dir(path)
-	if opts.Organize {
+	switch {
+	case opts.Flatten:
+		// 去除子目录：所有音乐平铺到任务根目录（与 Organize 互斥，UI 已保证）。
+		// 基准同样必须是任务根目录，不能用文件当前目录——否则深层的文件
+		// 只会被提到它的上一级，永远平不干净
+		base := strings.TrimSpace(opts.Root)
+		if base == "" {
+			base = filepath.Dir(path)
+		}
+		newDir = base
+	case opts.Organize:
 		// 基准必须是任务根目录：用当前所在目录会在每次整理时把
 		// 「歌手/专辑」再套一层，越整理越深
 		base := strings.TrimSpace(opts.Root)
@@ -153,6 +163,8 @@ func planAudioRename(path string, opts mediaOptions, reserved map[string]bool) (
 	plan.Changed = target != path
 	if plan.Changed {
 		switch {
+		case opts.Flatten:
+			plan.Reason = "去除子目录，平铺到任务目录"
 		case plan.NewName != plan.OldName:
 			plan.Reason = "按规范重命名"
 		default:

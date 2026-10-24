@@ -434,6 +434,8 @@ func writeFLACComment(path string, m MediaMeta, cover []byte) error {
 	out.Sync()
 	out.Close()
 	os.Chtimes(tmp, fi.ModTime(), fi.ModTime())
+	// 先关源文件再改名：Windows 不允许覆盖打开中的文件（Access denied）
+	src.Close()
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err

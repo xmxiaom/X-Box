@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # X-Box 构建脚本：交叉编译双架构 → 打包 fpk
 set -e
-BASE="/e/软件/开发/WorkBuddy/飞牛应用/x-box"
-TOOL="/e/软件/开发/WorkBuddy/飞牛应用/linksstar-fnos/.toolchain"
+BASE="/g/软件/开发/WorkBuddy/飞牛应用/x-box"
+TOOL="/g/软件/开发/WorkBuddy/飞牛应用/linksstar-fnos/.toolchain"
 SRC="$BASE/src"
 PKG="$BASE/pkg"
 export GOROOT="$TOOL/go"
@@ -28,7 +28,11 @@ if [ -n "$APP_VER" ]; then
   sed -i "s/^version  *= .*/version               = $APP_VER/" "$PKG/manifest"
   echo "manifest version -> $APP_VER"
 fi
-rm -f X-Box.fpk
+# 产物输出到仓库外的 dist/：源码目录只放源码，不放安装包
+DIST="$BASE/../dist"
+mkdir -p "$DIST"
+rm -f "$DIST/X-Box.fpk"
 "$TOOL/fnpack.exe" build -d "$PKG"
-ls -la "$BASE/"*.fpk
+mv -f "$BASE/X-Box.fpk" "$DIST/X-Box.fpk"
+ls -la "$DIST/"*.fpk
 echo "=== $(date) X-Box build DONE ==="

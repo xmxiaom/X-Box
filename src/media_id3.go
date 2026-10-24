@@ -449,6 +449,9 @@ func writeID3Tags(path string, m MediaMeta, cover []byte) error {
 	if fi, err := os.Stat(path); err == nil {
 		os.Chtimes(tmp, fi.ModTime(), fi.ModTime())
 	}
+	// 先关源文件再改名：POSIX 允许覆盖打开中的文件，Windows 会直接
+	// "Access is denied"（defer 的 Close 要到函数返回才执行，赶不上）
+	src.Close()
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err

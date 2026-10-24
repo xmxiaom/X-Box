@@ -242,7 +242,7 @@ func isAllZero(hexStr string) bool {
 	return true
 }
 
-// hexLeToIPv4 解析 /proc/net/route 的网关字段：十六进制小端（如 0101A8C0 = 192.168.1.1），
+// hexLeToIPv4 解析 /proc/net/route 的网关字段：十六进制小端（如 0101A8C0 = 192.168.0.1），
 // 必须把字节序反转后才得到点分十进制。
 func hexLeToIPv4(h string) string {
 	if len(h) != 8 {

@@ -42,6 +42,7 @@ type MediaTask struct {
 	Online    bool   `json:"online"`    // 音频：联网匹配元数据
 	WriteTag  bool   `json:"writeTag"`  // 音频：回写标签
 	Organize  bool   `json:"organize"`  // 归档到 歌手/专辑 或 剧集/Season
+	Flatten   bool   `json:"flatten"`   // 音频：去除子目录，全部平铺到任务目录（与 Organize 互斥）
 	Template  string `json:"template"`  // 音频命名模板
 	Exclude   string `json:"exclude"`   // 逗号分隔通配
 	Enabled   bool   `json:"enabled"`
@@ -55,6 +56,8 @@ type mediaOptions struct {
 	Online   bool
 	WriteTag bool
 	Organize bool
+	// Flatten：去除子目录，所有音频平铺到 Root（与 Organize 互斥）
+	Flatten  bool
 	Template string
 	// ArtistSecond：文件名里歌手在右侧（「歌名 - 歌手」）
 	ArtistSecond bool
@@ -250,6 +253,44 @@ func collectMediaFiles(root, kind string, recursive bool, excludes []string, onS
 	return out, err
 }
 
+// pruneEmptyDirs 删除 root 下因平铺而变空的子目录（自底向上，只删空目录）。
+// 不删 root 本身，不碰任何文件；删不了的（权限/占用）静默跳过。
+func pruneEmptyDirs(root string) int {
+	if strings.TrimSpace(root) == "" {
+		return 0
+	}
+	var dirs []string
+	filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil || p == root || !info.IsDir() {
+			return nil
+		}
+		dirs = append(dirs, p)
+		return nil
+	})
+	// 深的先删：父目录清空子目录后才能变空，一层轮不完就再来一轮
+	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+	removed := 0
+	for pass := 0; pass < 8 && len(dirs) > 0; pass++ {
+		var left []string
+		for _, d := range dirs {
+			ents, err := os.ReadDir(d)
+			if err != nil {
+				continue
+			}
+			if len(ents) == 0 && os.Remove(d) == nil {
+				removed++
+				continue
+			}
+			left = append(left, d)
+		}
+		if len(left) == len(dirs) {
+			break // 一轮没有任何进展：剩下的都非空
+		}
+		dirs = left
+	}
+	return removed
+}
+
 // audioRole 文件名中「歌手」所在的一侧
 type audioRole struct {
 	ArtistSecond bool
@@ -411,7 +452,7 @@ func buildMediaPlan(path string, opts mediaOptions, reserved map[string]bool, ro
 func previewMediaTask(t MediaTask, limit int) (map[string]any, error) {
 	opts := mediaOptions{
 		Kind: t.Kind, UseMeta: t.UseMeta, Fix: t.Fix, Online: t.Online,
-		WriteTag: t.WriteTag, Organize: t.Organize, Template: t.Template,
+		WriteTag: t.WriteTag, Organize: t.Organize, Flatten: t.Flatten, Template: t.Template,
 		Root: t.Dir,
 	}
 	excludes := parseMediaExcludes(t.Exclude)
@@ -454,6 +495,9 @@ func previewMediaTask(t MediaTask, limit int) (map[string]any, error) {
 		}
 	}
 	var notes []string
+	if opts.Flatten {
+		notes = append(notes, "平铺模式：所有子目录里的音乐将集中到任务目录，整理后产生的空目录会自动清理")
+	}
 	if opts.Online && len(files) > onlineCap {
 		notes = append(notes, fmt.Sprintf("联网匹配在预览阶段仅覆盖前 %d 个文件；实际执行时会全部联网补全（每首约 1 秒）", onlineCap))
 	}
@@ -476,7 +520,7 @@ func runMediaTask(t MediaTask) {
 	start := time.Now()
 	opts := mediaOptions{
 		Kind: t.Kind, UseMeta: t.UseMeta, Fix: t.Fix, Online: t.Online,
-		WriteTag: t.WriteTag, Organize: t.Organize, Template: t.Template,
+		WriteTag: t.WriteTag, Organize: t.Organize, Flatten: t.Flatten, Template: t.Template,
 		Root: t.Dir,
 	}
 	excludes := parseMediaExcludes(t.Exclude)
@@ -609,6 +653,13 @@ func runMediaTask(t MediaTask) {
 		// 联网模式下每首之间有节流（MusicBrainz 1 req/s），避免被封
 		if opts.Online && i+1 < len(files) {
 			time.Sleep(120 * time.Millisecond)
+		}
+	}
+
+	// 平铺收尾：清理因移动而变空的子目录（只删空目录，不动任何文件）
+	if opts.Flatten {
+		if n := pruneEmptyDirs(t.Dir); n > 0 {
+			mediaLog(id, fmt.Sprintf("已清理 %d 个空的子目录", n))
 		}
 	}
 
@@ -809,6 +860,22 @@ func (s *Server) handleMediaRun(w http.ResponseWriter, r *http.Request) {
 	if !found {
 		fail(w, 404, "任务不存在")
 		return
+	}
+
+	// flat=1：一次性「去除子目录」——不改任务配置，按平铺模式跑一遍。
+	// 归档到「歌手/专辑」之后想收回平铺，点任务行的「平铺」按钮即走这里
+	if r.URL.Query().Get("flat") == "1" {
+		if task.Kind != "audio" {
+			fail(w, 400, "去除子目录只支持音频任务")
+			return
+		}
+		task.Flatten = true
+		task.Organize = false
+		task.Recursive = true // 平铺必须递归，否则只收得到根目录里的文件
+		task.Online = false   // 一次性操作不联网，避免大量请求拖慢
+		if strings.TrimSpace(task.Template) == "" {
+			task.Template = "{title} - {artist}"
+		}
 	}
 
 	if dry {

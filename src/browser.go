@@ -3,14 +3,14 @@ package main
 // 浏览器模块：同源网页代理（路径式 + <base> 注入 + 全量 URL 重写 + JS 运行时接管）。
 //
 // 端点形态：/b/{scheme}/{host}/{path}?{query}，如
-//   /b/http/192.168.1.1/            → http://192.168.1.1/
+//   /b/http/192.168.0.1/            → http://192.168.0.1/
 //   /b/https/example.com/a/b.html   → https://example.com/a/b.html
 //
 // 为什么必须"全量重写"而不只是注入 <base>：
 //   面板通常经 fnOS 远程域名访问（https://xxx.fnos.net），用户的设备并不在
-//   NAS 局域网内。页面里任何**绝对 URL**（<a href="http://192.168.1.1/x">、
-//   JS 里写死的 fetch("http://192.168.1.1/cgi-bin/x")、location 跳转、302 的
-//   Location 头）一旦原样落到用户浏览器，就会被拿去直连 192.168.1.1 —— 结果
+//   NAS 局域网内。页面里任何**绝对 URL**（<a href="http://192.168.0.1/x">、
+//   JS 里写死的 fetch("http://192.168.0.1/cgi-bin/x")、location 跳转、302 的
+//   Location 头）一旦原样落到用户浏览器，就会被拿去直连 192.168.0.1 —— 结果
 //   就是"拒绝连接"/CORS 失败/页面残缺。所以必须把所有出口都改写成代理路径。
 //
 // 三层防线：
@@ -33,7 +33,7 @@ package main
 //
 // 安全模型：与终端模块一致——面板本身仅 fnOS 账号体系可达（127.0.0.1 +
 // 局域网私网 IPv4 + fnOS 远程访问），代理不做额外鉴权/白名单：它是用户主动
-// 输入网址的通用浏览工具，内网设备（192.168.1.1 等）是合法目标。
+// 输入网址的通用浏览工具，内网设备（192.168.0.1 等）是合法目标。
 
 import (
 	"bytes"
@@ -578,7 +578,7 @@ func (s *Server) proxyCore(w http.ResponseWriter, r *http.Request, target string
 
 	// 304/204 无响应体：必须原样返回，绝不重写也不写 body。
 	// v1.2.53 修复：此前对 304 也走了 HTML 分支，把注入脚本写进了"无 body"的
-	// 304 响应，浏览器收到带 body 的 304 会反复重新加载（实测 192.168.1.50
+	// 304 响应，浏览器收到带 body 的 304 会反复重新加载（实测 192.168.0.50
 	// 每秒几十次 304 循环，页面永远刷不出来）。
 	if resp.StatusCode == http.StatusNotModified || resp.StatusCode == http.StatusNoContent {
 		browserWriteStatus(w, resp.StatusCode)
@@ -993,7 +993,7 @@ func browserRewriteCSSOutsideScripts(doc string, tu *url.URL, direct bool) strin
 // browserRewriteRefreshValue 重写 Refresh 头/meta 里的 url=。
 // 引号只在原文有引号时才补：meta 的 content 本身已被一层引号包着，
 // 再补一层会变成 content="0; URL="cgi-bin/luci/"" —— 浏览器解析成"0 秒刷新到
-// 空地址"，于是无限刷新自己（实测 192.168.1.50 的 LuCI 首页循环卡死）。
+// 空地址"，于是无限刷新自己（实测 192.168.0.50 的 LuCI 首页循环卡死）。
 func browserRewriteRefreshValue(v string, tu *url.URL, direct bool) string {
 	return browserReRefreshU.ReplaceAllStringFunc(v, func(m string) string {
 		sub := browserReRefreshU.FindStringSubmatch(m)
@@ -1043,7 +1043,7 @@ func panelPort(host string) string {
 	return ""
 }
 
-// lastSite 最近一次经代理成功加载主文档的站点（"http://192.168.1.1" 形态），
+// lastSite 最近一次经代理成功加载主文档的站点（"http://192.168.0.1" 形态），
 // 供孤儿路径兜底重定向使用。多标签同时开不同站点时可能归错站点——单站点场景
 // （路由器管理页）不受影响。
 var lastSite atomic.Value // string
@@ -1434,7 +1434,7 @@ func browserFail(w http.ResponseWriter, target string, err error) {
 		`<div>原因：` + html.EscapeString(reason) + `</div>` +
 		`<div>时间：` + time.Now().Format("2006-01-02 15:04:05") + `（NAS 本地时间）</div>` +
 		`<div class="tip">说明：页面由 <b>NAS 上的 X-Box 代为访问</b>（你的设备并不直连目标），所以这里失败说明 <b>NAS 到目标不通</b>，与你电脑能否访问无关。</div>` +
-		`<ol><li>确认目标已开机、端口正确（路由器管理页若非 80 端口，请写成 <code>192.168.1.1:8080</code>）；</li>` +
+		`<ol><li>确认目标已开机、端口正确（路由器管理页若非 80 端口，请写成 <code>192.168.0.1:8080</code>）；</li>` +
 		`<li>确认目标未限制只允许特定 IP / MAC 访问；</li>` +
 		`<li>到「终端」执行 <code>curl -v --max-time 8 ` + html.EscapeString(target) + `</code> 看 NAS 侧的真实报错；也可 <code>ping -c 3 ` + html.EscapeString(tu_host(target)) + `</code> 看是否可达。</li></ol>` +
 		`<div class="tip" style="margin-top:16px">` +

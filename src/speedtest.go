@@ -1670,7 +1670,7 @@ func stDetectOne(v4 bool) (res struct {
 					res.region = strings.TrimSpace(loc[1])
 				}
 				if len(loc) >= 5 {
-					res.isp = strings.TrimSpace(loc[4])
+					res.isp = stISPName(loc[4])
 				}
 				if res.isp == "" {
 					res.isp = "未知"
@@ -1693,7 +1693,7 @@ func stDetectOne(v4 bool) (res struct {
 		resp.Body.Close()
 		if json.Unmarshal(b, &j) == nil && j.Status == "success" && j.Query != "" {
 			res.ip = j.Query
-			res.isp = strings.TrimSpace(j.ISP)
+			res.isp = stISPName(j.ISP)
 			if res.isp == "" {
 				res.isp = "未知"
 			}
@@ -1702,6 +1702,31 @@ func stDetectOne(v4 bool) (res struct {
 		}
 	}
 	return
+}
+
+// stISPName 把探测源给的原始 ISP 文本规范成中文运营商名。
+// ipip.net 对部分出口只给反查域名（如 chinaunicom.com），原样展示就是"网址"，
+// 用户看不懂；按关键词归一，认不出来退回原值（海外/小众运营商）。
+func stISPName(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return "未知"
+	}
+	switch {
+	case strings.Contains(s, "telecom") || strings.Contains(s, "电信") || strings.Contains(s, "chinanet"):
+		return "中国电信"
+	case strings.Contains(s, "unicom") || strings.Contains(s, "联通"):
+		return "中国联通"
+	case strings.Contains(s, "mobile") || strings.Contains(s, "移动") || strings.Contains(s, "cmcc"):
+		return "中国移动"
+	case strings.Contains(s, "cbn") || strings.Contains(s, "广电"):
+		return "中国广电"
+	case strings.Contains(s, "tietong") || strings.Contains(s, "铁通"):
+		return "中国铁通"
+	case strings.Contains(s, "教育") || strings.Contains(s, "cernet") || strings.Contains(s, "dr.peng"):
+		return "教育网"
+	}
+	return strings.TrimSpace(raw)
 }
 
 // ispNormalize 归一 ISP 名到节点分组口径（电信/联通/移动/广电），

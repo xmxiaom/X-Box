@@ -37,11 +37,10 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.31"
-	// 面板监听策略：回环 + 首个局域网私网 IPv4（运行时探测）。
-	// 不绑定 0.0.0.0/通配地址——避免对公网/所有网卡（含 docker 桥)暴露；
-	// 局域网私网 IP 保证 fnOS 桌面门户（经 NAS 地址嵌入 iframe）与本机访问可达；
-	// 外网访问仍只能经 fnOS 远程访问体系（需飞牛账号）。请勿改为 ":8899" 通配绑定。
+	version = "1.3.32"
+	// 面板监听策略：生产形态只监听 fnOS 统一网关 unix socket（XBOX_SOCKET），
+	// 登录态由网关注入；不监听任何 TCP 端口。仅 XBOX_DEV=1 时开 127.0.0.1 回环
+	// 端口供本地开发/自动化测试。请勿改为 ":8899" 通配绑定。
 	listenPort = "8899"
 )
 
@@ -190,7 +189,11 @@ func main() {
 	if listened == 0 && !gatewayUp {
 		log.Fatalf("服务无可用的监听入口（网关 socket 与 TCP 均失败）")
 	}
-	log.Printf("X-Box v%s 启动，监听 %v（回环+局域网私网，不对公网暴露；外部经 fnOS 远程访问体系）", version, addrs)
+	if gatewayUp {
+		log.Printf("X-Box v%s 启动，网关入口：%s", version, os.Getenv("XBOX_SOCKET"))
+	} else {
+		log.Printf("X-Box v%s 启动，本地调试入口：%v", version, addrs)
+	}
 	select {} // 主协程驻留：服务在监听协程中运行
 }
 

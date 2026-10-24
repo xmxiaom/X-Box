@@ -4,7 +4,9 @@
 set -u
 BASE="$(cd "$(dirname "$0")" && pwd)"
 PKG="$BASE/pkg"
-PY="C:/Users/xiaom/.workbuddy/binaries/python/versions/3.13.12/python.exe"
+PY="C:/Users/Administrator/.workbuddy/binaries/python/versions/3.13.12/python.exe"
+# 换机器后上面这条可能不存在：回退到系统 python，保证自检仍能跑
+[ -x "$PY" ] || PY="$(command -v python3 || command -v python || echo python3)"
 PASS=0; FAIL=0
 
 ok()   { echo "  ✅ $1"; PASS=$((PASS+1)); }
@@ -46,17 +48,18 @@ check "二进制监听 8899" "grep -qa '8899' pkg/app/server/xbox-amd64"
 check "无登录/令牌逻辑（应用户要求）" "! grep -qa 'access_token' pkg/app/server/xbox-amd64 && ! grep -q 'handleLogin' src/main.go"
 
 echo "[5] 图标（内外统一）"
-check "ICON.PNG 256px（与 ui 同源高清，见 gen_icons.py 说明）" "\"$PY\" -c \"import struct;d=open('pkg/ICON.PNG','rb').read();assert struct.unpack('>II',d[16:24])==(256,256)\""
+check "ICON.PNG 256px（与 ui 同源高清，见 ../tools/gen_icons.py 说明）" "\"$PY\" -c \"import struct;d=open('pkg/ICON.PNG','rb').read();assert struct.unpack('>II',d[16:24])==(256,256)\""
 check "ICON_256.PNG 256px" "\"$PY\" -c \"import struct;d=open('pkg/ICON_256.PNG','rb').read();assert struct.unpack('>II',d[16:24])==(256,256)\""
 check "ui icon_64/icon_256 齐备" "[ -f 'pkg/app/ui/images/icon_64.png' ] && [ -f 'pkg/app/ui/images/icon_256.png' ]"
 check "根图标与 ui 图标字节一致" "\"$PY\" -c \"assert open('pkg/ICON.PNG','rb').read()==open('pkg/app/ui/images/icon_64.png','rb').read();assert open('pkg/ICON_256.PNG','rb').read()==open('pkg/app/ui/images/icon_256.png','rb').read()\""
 check "UI 图标由外部文件承载（config 引用 images/icon_256.png）" "grep -q 'images/icon_256.png' pkg/app/ui/config"
 
 echo "[6] fpk 包结构"
-FPK="X-Box.fpk"
+# 安装包产物在仓库外 dist/（build.sh 输出位置），源码目录不放 fpk
+FPK="$BASE/../dist/X-Box.fpk"
 check "fpk 存在" "[ -s '$FPK' ]"
-check "fpk 为 gzip" "\"$PY\" -c \"assert open('X-Box.fpk','rb').read(2)==b'\x1f\x8b'\""
-check "fpk 含 app.tgz/manifest/ICON/cmd/config" "\"$PY\" -c \"import tarfile;names=set(tarfile.open('X-Box.fpk').getnames());need={'app.tgz','manifest','ICON.PNG','ICON_256.PNG','cmd/main','config/privilege'};assert need.issubset(names),names-need\""
+check "fpk 为 gzip" "\"$PY\" -c \"assert open('$FPK','rb').read(2)==b'\x1f\x8b'\""
+check "fpk 含 app.tgz/manifest/ICON/cmd/config" "\"$PY\" -c \"import tarfile;names=set(tarfile.open('$FPK').getnames());need={'app.tgz','manifest','ICON.PNG','ICON_256.PNG','cmd/main','config/privilege'};assert need.issubset(names),names-need\""
 
 echo "[7] 安全约束（清理白名单硬闸）"
 check "清理复核 Lstat（不跟随符号链接）" "grep -q 'os.Lstat' src/junk.go"

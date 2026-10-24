@@ -14,7 +14,42 @@ package main
 // 表不追求穷尽，覆盖主流华语（80 年代至今）、港台、日韩、欧美即可；
 // 冷门歌手仍由重复度与目录名证据兜底。
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
+
+// artistManualAliases 手工维护的英文名 / 罗马字 / 艺名 → 中文规范名（高频、易错，优先于生成表）。
+// 两个用途：
+//  1. 判方向：「邓紫棋 G.E.M.」这类中英双名写在同一个片段里，拆段后任一段命中即可；
+//  2. 规范显示：标签或联网结果里只有英文名（G.E.M.、Jane Zhang）时换回中文名，
+//     归档目录与文件名才不会同一个歌手分裂成两个文件夹。
+//
+// 键是 normalizeForCompare 之后的形式（小写、去标点空格），所以 "G.E.M." → "gem"。
+var artistManualAliases = map[string]string{
+	// 华语
+	"jaychou": "周杰伦", "jjlin": "林俊杰", "easonchan": "陈奕迅", "eason": "陈奕迅",
+	"fayewong": "王菲", "gem": "邓紫棋", "janezhang": "张靓颖", "leehomwang": "王力宏",
+	"wangleehom": "王力宏", "ronghaoli": "李荣浩", "jokerxue": "薛之谦", "huachenyu": "华晨宇",
+	"maobuyi": "毛不易", "zhoushen": "周深", "charliezhou": "周深", "naying": "那英",
+	"hanhong": "韩红", "sadinding": "萨顶顶", "karenmok": "莫文蔚", "jolintsai": "蔡依林",
+	"stefaniesun": "孙燕姿", "fishleong": "梁静茹", "elvahsiao": "萧亚轩", "amei": "张惠妹",
+	"lalahsu": "徐佳莹", "hebetien": "田馥甄", "cheerchen": "陈绮贞", "tanyachua": "蔡健雅",
+	"rainieyang": "杨丞琳", "cyndiwang": "王心凌", "angelachang": "张韶涵", "reneeliu": "刘若英",
+	"chrislee": "李宇春", "bibizhou": "周笔畅", "zhangbichen": "张碧晨", "yisayu": "郁可唯",
+	"tanweiwei": "谭维维", "summerjike": "吉克隽逸", "tiaray": "袁娅维", "alin": "黄丽玲",
+	"leehom": "王力宏",
+	"mayday": "五月天", "sodagreen": "苏打绿",
+	"phoenixlegend": "凤凰传奇", "accusefive": "告五人", "eggplantegg": "茄子蛋",
+	// 日韩
+	"hikaruutada": "宇多田光", "utadahikaru": "宇多田光", "ayumihamasaki": "滨崎步",
+	"namieamuro": "安室奈美惠", "mikanakashima": "中岛美嘉", "maikuraki": "仓木麻衣",
+	"ryuichisakamoto": "坂本龙一", "joehisaishi": "久石让", "kenshiyonezu": "米津玄师",
+	"girlsgeneration": "少女时代", "snsd": "少女时代", "taeyeon": "金泰妍",
+	"yoona": "林允儿", "suzy": "裴秀智",
+	// 欧美（同一艺人的常见省略/变体写法）
+	"beyonce": "Beyoncé", "pink": "P!nk", "weeknd": "The Weeknd",
+}
 
 // 华语男歌手
 var artistCNMale = []string{
@@ -38,7 +73,10 @@ var artistCNMale = []string{
 	"方力申", "邓健泓", "梁汉文", "苏有朋", "吴奇隆", "陈志朋", "林志颖", "郑源",
 	"欢子", "六哲", "冷漠", "祁隆", "王铮亮", "李代沫", "张赫宣", "梁博",
 	"周深", "毛宁", "林依轮", "解晓东", "孙浩", "满江", "黄格选", "戴军",
-	"火风", "尹相杰", "臧天朔", "崔健", "张岭", "汪苏泷", "后弦", "逃跑计划",
+	"火风", "尹相杰", "臧天朔", "崔健", "张岭", "后弦", "逃跑计划",
+	// 近年网络/热门男歌手（抖音热歌、古风、网络流行）
+	"半阳", "河图", "音频怪物", "李常超", "白小白", "王赫野", "李袁杰",
+	"井胧", "张紫豪", "徐秉龙", "王北车", "王巨星", "陈雅森",
 }
 
 // 华语女歌手
@@ -65,7 +103,12 @@ var artistCNFemale = []string{
 	"卫诗", "吴若希", "菊梓乔", "谷娅溦", "谭嘉仪", "戴祖仪", "梁文音", "郭静",
 	"卓文萱", "曾沛慈", "魏如萱", "张艾嘉", "刘惜君", "曾轶可", "黄英", "江映蓉",
 	"李霄云", "苏运莹", "张钰琪", "希林娜依高", "单依纯", "黄霄雲", "阿兰", "陈雪凝",
-	"王贰浪", "孟慧圆", "李佳薇", "刘美麟", "袁娅维", "吉克隽逸", "张含韵", "安又琪",
+	"王贰浪", "孟慧圆", "刘美麟", "袁娅维", "吉克隽逸", "张含韵", "安又琪",
+	// 近年网络/热门女歌手（用户库常见：抖音热歌、古风、网络流行）
+	"黄丽玲", "麦小兜", "程响", "门丽", "龙梅子", "王奕心", "苏谭谭",
+	"双笙", "银临", "王梓钰", "阿YueYue", "蒋雪儿",
+	"云菲菲", "洋澜一", "曲肖冰", "en", "邓寓君", "等什么君", "闻人听書",
+	"井迪", "陈子晴", "王大毛", "鱼大仙儿",
 }
 
 // 华语组合 / 乐队 / 合唱团
@@ -152,14 +195,120 @@ var commonArtistSet = func() map[string]bool {
 	return m
 }()
 
+// artistAliases 全量别名表 = 手工表 + MusicBrainz 生成表（artist_alias_data.go，
+// 由 tools/fetch_artist_aliases.py 抓取生成，含权威罗马字与英文艺名/拼音）。
+// 冲突以手工表为准；生成表只补手工表没有的键。
+var artistAliases = mergeAliasMaps(artistManualAliases, artistDataAliases)
+
+// mergeAliasMaps 合并别名表：primary 优先，secondary 只补没有的键
+func mergeAliasMaps(primary, secondary map[string]string) map[string]string {
+	out := make(map[string]string, len(primary)+len(secondary))
+	for k, v := range secondary {
+		out[k] = v
+	}
+	for k, v := range primary {
+		out[k] = v
+	}
+	return out
+}
+
 // artistNameCount 预置歌手名总数（归一化去重后），供测试与诊断
 func artistNameCount() int { return len(commonArtistSet) }
 
-// isKnownArtist 判断是否命中常用歌手名（支持多人合作写法）
+// artistCanonical 归一化歌手名 → 表中的原始写法（把别名/英文名换回中文规范名时用）
+var artistCanonical = func() map[string]string {
+	m := make(map[string]string)
+	for _, g := range [][]string{artistCNMale, artistCNFemale, artistCNGroups, artistJKKR, artistWestern, artistInstrumental} {
+		for _, n := range g {
+			if k := normalizeForCompare(n); k != "" {
+				if _, dup := m[k]; !dup {
+					m[k] = n
+				}
+			}
+		}
+	}
+	return m
+}()
+
+// canonicalArtistName 把单个片段解析成歌手规范名：别名（英文/艺名）或表中名（中文），
+// 都不命中返回空串。只认整段精确匹配，不做包含匹配。
+func canonicalArtistName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	k := normalizeForCompare(s)
+	if cn, ok := artistAliases[k]; ok {
+		return cn
+	}
+	if orig, ok := artistCanonical[k]; ok {
+		return orig
+	}
+	return ""
+}
+
+// preferChineseArtist 歌手同时有中文名与英文名/艺名/拼音时，取中文规范名。
+// 例：「邓紫棋 G.E.M.」→「邓紫棋」；「G.E.M.」→「邓紫棋」；
+// 「庄心妍 Zhuang Xinyan」→「庄心妍」；「Zhuang Xinyan」→「庄心妍」；
+// 「Taylor Swift」→「Taylor Swift」（无中文名，返回表中规范写法）；
+// 完全不在表里 → 空串（保持原样）。
+//
+// 只在"单个片段就是歌手"或"多个片段解析出同一个歌手"时出手，
+// 所以「周杰伦 feat. 袁咏琳」这类合作写法会原样保留，不会被砍成一个人。
+func preferChineseArtist(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if cn := canonicalArtistName(s); cn != "" {
+		return cn
+	}
+	parts := splitArtistParts(s)
+	// 单段 + 相邻两段组合都查一遍别名表：「周杰伦 Jay Chou」的 "Jay Chou"
+	// 是两词别名，拆成单段谁都查不到
+	canon, hits := "", 0
+	consider := func(p string) {
+		cn := canonicalArtistName(p)
+		if cn == "" {
+			return
+		}
+		if canon == "" {
+			canon = cn
+		}
+		if canon == cn {
+			hits++
+		} else {
+			canon, hits = "", -1<<30 // 两个不同歌手名：是合作，不是双名
+		}
+	}
+	for _, p := range parts {
+		consider(p)
+	}
+	for i := 0; i+1 < len(parts); i++ {
+		consider(strings.Join(parts[i:i+2], " "))
+	}
+	if hits >= 2 {
+		return canon
+	}
+	return ""
+}
+
+// splitArtistParts 按空白与间隔号切分（中英双名之间通常是空格）
+func splitArtistParts(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '·' || r == '•'
+	})
+}
+
+// isKnownArtist 判断是否命中常用歌手名（支持多人合作写法、中英双名、拼音/英文别名）
 func isKnownArtist(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return false
+	}
+	// 整体就是歌手名或别名（含 "Jane Zhang" 这类多词英文名/拼音名）
+	if canonicalArtistName(s) != "" {
+		return true
 	}
 	if commonArtistSet[normalizeForCompare(s)] {
 		return true
@@ -190,6 +339,13 @@ func isKnownArtist(s string) bool {
 			return true
 		}
 		if tail != "" && isKnownArtist(tail) {
+			return true
+		}
+	}
+	// 中英双名 / 空白分段：「邓紫棋 G.E.M.」「王力宏 Leehom」——
+	// 任一段命中歌手表或别名表即视为歌手名（判方向时最需要的一票）
+	for _, p := range splitArtistParts(s) {
+		if canonicalArtistName(p) != "" {
 			return true
 		}
 	}

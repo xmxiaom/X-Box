@@ -70,6 +70,16 @@ var (
 	reArtistUnderscore = regexp.MustCompile(`^(.+?)\s*_\s*(.+)$`)
 )
 
+// cnArtist 把解析出的歌手名规范成中文名（有中文名时优先）。
+// 「邓紫棋 G.E.M.」→「邓紫棋」；「G.E.M.」→「邓紫棋」；「Zhuang Xinyan」→「庄心妍」；
+// 无中文名的（Taylor Swift）返回表中规范写法；不在表里的原样返回。
+func cnArtist(a string) string {
+	if cn := preferChineseArtist(a); cn != "" {
+		return cn
+	}
+	return a
+}
+
 // parseAudioCandidates 从音频文件名解析角色候选
 // parseAudioCandidates 从文件名解析角色候选。
 // artistSecond=true 表示库里文件名是「歌名 - 歌手」顺序（由目录内重复度推断）。
@@ -81,7 +91,7 @@ func parseAudioCandidates(filename string, artistSecond bool) mediaCandidates {
 
 	// 优先"歌手 - 专辑 - 歌名"（反序库里不套用，容易误判）
 	if m := reArtistDashAlbumDashTitle.FindStringSubmatch(base); m != nil && !artistSecond {
-		c.Artist = strings.TrimSpace(m[1])
+		c.Artist = cnArtist(strings.TrimSpace(m[1]))
 		c.Album = strings.TrimSpace(m[2])
 		c.Title = strings.TrimSpace(m[3])
 		c.HasArtist, c.HasTitle = true, true
@@ -94,7 +104,8 @@ func parseAudioCandidates(filename string, artistSecond bool) mediaCandidates {
 		if artistSecond {
 			a, t = r, l // 右侧才是歌手
 		}
-		// 命中常用歌手名时以它为准（比目录统计更直接）
+		// 命中常用歌手名时以它为准（比目录统计更直接）。
+		// 中英双名（「邓紫棋 G.E.M.」）也走这里：isKnownArtist 支持空白分段
 		if lk, rk := isKnownArtist(l), isKnownArtist(r); lk != rk {
 			if rk {
 				a, t = r, l
@@ -103,7 +114,7 @@ func parseAudioCandidates(filename string, artistSecond bool) mediaCandidates {
 			}
 		}
 		if looksLikeArtist(a) && looksLikeTitle(t) {
-			c.Artist, c.Title = a, t
+			c.Artist, c.Title = cnArtist(a), t
 			c.HasArtist, c.HasTitle = true, true
 			return c
 		}
@@ -115,7 +126,7 @@ func parseAudioCandidates(filename string, artistSecond bool) mediaCandidates {
 			a, t = t, a
 		}
 		if looksLikeArtist(a) && looksLikeTitle(t) {
-			c.Artist, c.Title = a, t
+			c.Artist, c.Title = cnArtist(a), t
 			c.HasArtist, c.HasTitle = true, true
 			return c
 		}
@@ -136,10 +147,30 @@ func parseAudioCandidates(filename string, artistSecond bool) mediaCandidates {
 	return c
 }
 
-// extOf 取扩展名（含点）
+// mediaExtSet 已知媒体扩展名集合（音频表 + 视频表合并，键含点、小写）
+var mediaExtSet = func() map[string]bool {
+	m := make(map[string]bool, len(mediaAudioExts)+len(mediaVideoExts))
+	for k := range mediaAudioExts {
+		m[k] = true
+	}
+	for k := range mediaVideoExts {
+		m[k] = true
+	}
+	return m
+}()
+
+// extOf 取扩展名（含点），只认已知媒体扩展名。
+// 文件名里常有点号缩写（G.E.M.、S.H.E、a.k.a.）和「01. 歌名」这类序号：
+// 无脑取最后一段会把「邓紫棋 G.E.M. - 泡沫」剥成「邓紫棋 G.E.M」、
+// 「01. 爱你爱不够」剥成「01」，整条名字的歌手/歌名解析随之崩坏。
+// 调用方（planAudioRename）通常已剥过扩展名，这里主要防御直接传全名的场景。
 func extOf(p string) string {
 	i := strings.LastIndexByte(p, '.')
-	if i < 0 {
+	if i <= 0 || i == len(p)-1 {
+		return ""
+	}
+	ext := strings.ToLower(p[i:])
+	if len(ext) > 6 || !mediaExtSet[ext] {
 		return ""
 	}
 	return p[i:]
@@ -438,6 +469,22 @@ func correctAudioTags(meta MediaMeta, filename string, artistSecond bool, dirPat
 		}
 	}
 
+	// 情形 11：歌手的英文名/艺名/拼音按内置歌手表规范成中文名
+	//（「G.E.M.」→「邓紫棋」，「Zhuang Xinyan」→「庄心妍」）。
+	// 下载站、转码工具与部分在线元数据只写英文/拼音名；不规范化的话，
+	// 归档时同一个歌手会分裂成两个文件夹，文件名也会前后不一致。
+	if cn := preferChineseArtist(res.Meta.Artist); cn != "" && cn != res.Meta.Artist {
+		old := res.Meta.Artist
+		res.Meta.Artist = cn
+		res.Fixes = append(res.Fixes, mediaFix{
+			Field: "artist", From: old, To: cn,
+			Why: "歌手英文名/艺名按内置歌手表规范为中文名",
+		})
+		if res.Confidence < 0.85 {
+			res.Confidence = 0.85
+		}
+	}
+
 	// 情形 7：年份非法
 	if res.Meta.Year < 1900 || res.Meta.Year > 2100 {
 		res.Meta.Year = 0
@@ -545,9 +592,25 @@ func correctVideoTags(meta MediaMeta, filename string) correctedMeta {
 
 // mergeCorrected 把在线匹配到的权威元数据合并进纠错结果
 // online 为空时只返回纠错结果；置信度取两者较高值
+//
+// 歌手字段由「内置歌手库」参与仲裁（用户明确要求）：
+//   - 本地能解析出中文规范歌手名、在线不能 → 保留本地（在线库对华语歌手
+//     常返回英文名/罗马字，也可能张冠李戴成另一个艺人）；
+//   - 两边都命中歌手库 → 取中文规范名，同一个歌手不会分裂成两个文件夹；
+//   - 只有在线命中 → 采用在线结果（同样规范成中文名）。
 func mergeCorrected(c correctedMeta, online MediaMeta, onlineOK bool) correctedMeta {
 	if !onlineOK {
 		return c
+	}
+	// 在线结果本身可能把歌手/歌名写反（合辑、古典乐、Various Artists 常见）：
+	// 歌名命中歌手表而歌手框没有 → 先互换再合并
+	if strings.TrimSpace(online.Artist) != "" && isKnownArtist(online.Title) && !isKnownArtist(online.Artist) {
+		oldT, oldA := online.Title, online.Artist
+		online.Title, online.Artist = oldA, oldT
+		c.Fixes = append(c.Fixes, mediaFix{
+			Field: "title", From: oldT, To: online.Title,
+			Why: "在线结果歌手/歌名写反，已按内置歌手表纠正",
+		})
 	}
 	// 在线结果优先，但保留本地有而在线没有的（如时长）
 	if online.Title != "" && online.Title != c.Meta.Title {
@@ -557,12 +620,31 @@ func mergeCorrected(c correctedMeta, online MediaMeta, onlineOK bool) correctedM
 		})
 		c.Meta.Title = online.Title
 	}
-	if online.Artist != "" && online.Artist != c.Meta.Artist {
-		c.Fixes = append(c.Fixes, mediaFix{
-			Field: "artist", From: c.Meta.Artist, To: online.Artist,
-			Why: "在线元数据库匹配结果（更权威）",
-		})
-		c.Meta.Artist = online.Artist
+	if online.Artist != "" {
+		loc := strings.TrimSpace(c.Meta.Artist)
+		on := strings.TrimSpace(online.Artist)
+		locCN := preferChineseArtist(loc)
+		onCN := preferChineseArtist(on)
+		final, why := on, "在线元数据库匹配结果（更权威）"
+		switch {
+		case locCN != "" && onCN == "":
+			// 本地命中歌手库、在线没有：以本地为准，不把在线的错歌手写进文件
+			final, why = loc, "在线歌手与内置歌手库不符，保留本地歌手"
+		case locCN != "" && onCN != "" && locCN != onCN:
+			// 两边命中不同歌手（在线张冠李戴）：仍以本地为准
+			final, why = loc, "在线歌手与内置歌手库不符，保留本地歌手"
+		case locCN != "" && onCN != "":
+			final, why = locCN, "歌手按内置歌手表规范为中文名"
+		case onCN != "":
+			final, why = onCN, "歌手按内置歌手表规范为中文名"
+		}
+		if final != loc {
+			c.Fixes = append(c.Fixes, mediaFix{
+				Field: "artist", From: loc, To: final,
+				Why: why,
+			})
+			c.Meta.Artist = final
+		}
 	}
 	if online.Album != "" && online.Album != c.Meta.Album {
 		c.Fixes = append(c.Fixes, mediaFix{
