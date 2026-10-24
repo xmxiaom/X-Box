@@ -102,6 +102,7 @@ type mediaPlanItem struct {
 	Track      int        `json:"track,omitempty"`
 	Season     int        `json:"season,omitempty"`
 	Episode    int        `json:"episode,omitempty"`
+	Part       int        `json:"part,omitempty"`
 	Res        string     `json:"res,omitempty"`
 	Source     string     `json:"source,omitempty"`
 	Reason     string     `json:"reason,omitempty"`
@@ -111,6 +112,9 @@ type mediaPlanItem struct {
 	Warn       string     `json:"warn,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	RoleGuessed bool      `json:"roleGuessed,omitempty"`
+	// Skip：示例/预览文件等不整理的条目（视频）
+	Skip       bool   `json:"skip,omitempty"`
+	SkipReason string `json:"skipReason,omitempty"`
 }
 
 var mediaStore struct {
@@ -433,6 +437,14 @@ func buildMediaPlan(path string, opts mediaOptions, reserved map[string]bool, ro
 	}
 	meta, _ := ReadMediaMeta(path)
 	vp := planVideoRename(path, meta, opts.UseMeta, opts.Organize)
+	if vp.Skip {
+		// 示例/预览文件：不整理，也不计入失败
+		return mediaPlanItem{
+			OldPath: vp.OldPath, NewPath: vp.OldPath,
+			OldName: vp.OldName, NewName: vp.OldName,
+			Reason: vp.SkipReason, Skip: true,
+		}, meta, nil
+	}
 	// 同批次内再避让一次：planVideoRename 只能看到磁盘现状，
 	// 本批前几个文件尚未落盘时可能撞名
 	if np := uniquePath(path, vp.NewPath, reserved); np != vp.NewPath {
@@ -444,7 +456,7 @@ func buildMediaPlan(path string, opts mediaOptions, reserved map[string]bool, ro
 		OldPath: vp.OldPath, NewPath: vp.NewPath,
 		OldName: vp.OldName, NewName: vp.NewName,
 		Title: vp.Title, Year: vp.Year,
-		Season: vp.Season, Episode: vp.Episode,
+		Season: vp.Season, Episode: vp.Episode, Part: vp.Part,
 		Res: vp.Res, Source: vp.Source,
 		Reason: vp.Reason, Changed: vp.Changed,
 	}, meta, nil
@@ -492,7 +504,7 @@ func previewMediaTask(t MediaTask, limit int) (map[string]any, error) {
 		if it.Warn != "" {
 			warnN++
 		}
-		if (it.Changed || len(it.Fixes) > 0) && len(items) < limit {
+		if (it.Changed || len(it.Fixes) > 0 || it.Skip) && len(items) < limit {
 			items = append(items, it)
 		}
 	}
@@ -505,6 +517,9 @@ func previewMediaTask(t MediaTask, limit int) (map[string]any, error) {
 	}
 	if guessedN > 0 {
 		notes = append(notes, fmt.Sprintf("其中 %d 个文件没有标签、目录里也无法判断歌手在左还是右，已按模板顺序命名，且不会写入标签", guessedN))
+	}
+	if opts.Kind == "video" && opts.Organize {
+		notes = append(notes, "归档规则：剧集进「剧名 (年份)/Season 01」，电影进「电影」，预告/花絮进「extras」；示例文件自动跳过")
 	}
 	note := strings.Join(notes, "；")
 	return map[string]any{
@@ -572,6 +587,12 @@ func runMediaTask(t MediaTask) {
 		setMediaState(id, func(st *MediaState) { st.Current = filepath.Base(p) })
 
 		it, meta, cover := buildMediaPlan(p, opts, reserved, roles[filepath.Dir(p)])
+		if it.Skip {
+			// 示例/预览文件：跳过（不算失败，也不动文件）
+			mediaLog(id, fmt.Sprintf("· 跳过 %s（%s）", it.OldName, it.SkipReason))
+			setMediaState(id, func(st *MediaState) { st.Done = i + 1; st.Skipped++ })
+			continue
+		}
 		if it.Error != "" {
 			setMediaState(id, func(st *MediaState) { st.Done = i + 1; st.Failed++ })
 			continue

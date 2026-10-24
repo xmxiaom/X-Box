@@ -1087,7 +1087,7 @@ function renderMediaPage(){
   const list = mediaCache.filter(t => t.kind === mediaTab);
   document.getElementById('media-sub').textContent = '共 ' + list.length + ' 个' + (isV ? '视频' : '音频') + '任务';
   const hint = isV
-    ? '原理：读文件名与影片内嵌信息（MP4/MKV），按 Jellyfin/Plex 规范重命名——电影「片名 (年份) [分辨率] [来源]」，剧集「剧名 (年份) - S01E01 - 标题」并自动建 Season 目录。只改文件名与位置，不删除文件，重名自动加序号不覆盖。'
+    ? '原理：读文件名、所在目录名与影片内嵌信息（MP4/MKV），按 Jellyfin/Plex 规范重命名——电影「片名 (年份) [分辨率] [来源]」，剧集「剧名 (年份) - S01E01 - 标题」。「剧名 (年份)/01.mp4」这类只有集数的文件会从目录名补全片名；示例文件自动跳过，预告/花絮归入 extras。只改文件名与位置，不删除文件，重名自动加序号不覆盖。'
     : '原理：读音频标签（MP3/FLAC/M4A/WMA）并与文件名交叉印证，内置常用歌手/组合名表（含中英文双名，如「邓紫棋 G.E.M.」优先取中文名），配合目录内重复度判断歌手在哪一侧；纠正「歌名与歌手填成同一个值」「标题框是原始文件名」这类可判定的错位；联网匹配 MusicBrainz/iTunes 的结果会与内置歌手库核对，不一致时以本地歌手为准；按「歌名 - 歌手」重命名（模板可改），可选归档到「歌手/专辑」或去除子目录平铺回一层。只改文件名与标签，不删除文件。';
   const head = '<div class="proxy-hint">' + hint + '</div>' +
     '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openMediaForm(null)">+ 添加' + (isV ? '视频' : '音频') + '整理任务</button></div>';
@@ -1200,7 +1200,7 @@ function openMediaForm(id){
     '<label class="field-check"><input type="checkbox" id="md-recursive" ' + ((!t || t.recursive) ? 'checked' : '') + '> 包含子目录</label>' +
     (isV ? optV : optA) +
     (!isV ? '<label class="field-check"><input type="checkbox" id="md-flatten" ' + ((t && t.flatten) ? 'checked' : '') + '> 去除子目录（把子文件夹里的音乐全部平铺到任务目录，归档生成的「歌手/专辑」空目录会自动清理；与自动归档二选一）</label>' : '') +
-    '<label class="field-check"><input type="checkbox" id="md-organize" ' + ((t && t.organize && !t.flatten) ? 'checked' : '') + '> ' + (isV ? '按剧集自动建「剧名 (年份)/Season 01」目录' : '归档到「歌手/专辑」目录') + '</label>' +
+    '<label class="field-check"><input type="checkbox" id="md-organize" ' + ((t && t.organize && !t.flatten) ? 'checked' : '') + '> ' + (isV ? '自动归档：剧集建「剧名 (年份)/Season 01」目录，电影归入「电影」，预告/花絮归入「extras」' : '归档到「歌手/专辑」目录') + '</label>' +
     '<div class="form-row"><label>排除规则<span style="color:var(--muted);font-weight:normal">（逗号分隔，如 Sample,*.tmp）</span></label><input type="text" id="md-exclude" value="' + esc(t ? t.exclude : '') + '" placeholder="Sample,*.tmp"></div>' +
     '<div style="font-size:12px;color:var(--text3);margin-top:6px">整理前建议先点「预览」看清改名结果；执行时只改名/移动/写标签，不会删除任何文件。</div>';
   confirmDialog(id ? '编辑整理任务' : ('添加' + (isV ? '视频' : '音频') + '整理任务'), body, async ()=>{
@@ -1242,10 +1242,30 @@ async function mediaPreview(id, flat){
     html += '<div class="mplan">' + items.map(it => {
       const fixes = (it.fixes || []).map(f => '<div class="fx">纠错 ' + esc(f.field) + '：' + esc(f.from || '空') + ' → ' + esc(f.to) + '（' + esc(f.why || '') + '）</div>').join('');
       const warn = it.warn ? '<div class="fx">⚠ ' + esc(it.warn) + '</div>' : '';
-      const nameBlock = it.changed
+      const nameBlock = it.skip
+        ? ('<div class="new" style="font-weight:normal">' + esc(it.oldName) + '</div>')
+        : it.changed
         ? ('<div class="old">' + esc(it.oldName) + '</div><div class="new">' + esc(it.newName) + '</div>')
         : ('<div class="new" style="font-weight:normal">' + esc(it.oldName) + '</div><div class="fx" style="color:var(--text3)">文件名已规范，仅写回纠错后的标签</div>');
-      return '<div class="it">' + nameBlock +
+      // 解析结果行（视频）：片名/年份/季集/分辨率/来源，便于判断解析是否正确
+      let metaLine = '';
+      if(!it.skip && !it.artist){
+        const mp = [];
+        if(it.title) mp.push('片名 ' + esc(it.title));
+        if(it.year) mp.push(it.year + ' 年');
+        if(it.season || it.episode) mp.push('S' + String(it.season || 1).padStart(2, '0') + 'E' + String(it.episode || 0).padStart(2, '0'));
+        if(it.res) mp.push(esc(it.res));
+        if(it.source) mp.push(esc(it.source));
+        if(mp.length) metaLine = '<div class="fx" style="color:var(--text3)">解析：' + mp.join(' · ') + '</div>';
+      }
+      // 目标目录变化时提示去向（视频归档/音频归档与平铺）
+      let dirLine = '';
+      if(it.changed && it.oldPath && it.newPath){
+        const od = it.oldPath.slice(0, it.oldPath.lastIndexOf('/'));
+        const nd = it.newPath.slice(0, it.newPath.lastIndexOf('/'));
+        if(nd !== od) dirLine = '<div class="fx" style="color:var(--text3)">归档到：' + esc(nd) + '</div>';
+      }
+      return '<div class="it">' + nameBlock + metaLine + dirLine +
         (it.reason ? '<div class="fx" style="color:var(--text3)">' + esc(it.reason) + '</div>' : '') + fixes + warn + '</div>';
     }).join('') + '</div>';
     if(j.truncated) html += '<div style="font-size:12px;color:var(--text3);margin-top:8px">列表仅显示前 ' + items.length + ' 条，实际将处理 ' + (j.changed||0) + ' 个文件。</div>';
