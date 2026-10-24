@@ -60,12 +60,13 @@ build.sh             交叉编译 + fnpack 打包（自动同步 manifest 版本
 
 源码目录只放产品源码与打包定义；开发侧的测试（`../tests/`）与工具脚本
 （`../tools/`：自检、图标生成、发布、歌手数据抓取）按约定放在仓库外，
-安装包产物输出到 `../dist/`。
+安装包产物 `X-Box.fpk` 直接生成在源码目录根下（便于取用，已被 `.gitignore`
+排除不会上传 GitHub）。
 
 ## 构建
 
 ```bash
-bash build.sh      # 交叉编译 amd64/arm64 → fnpack 打包 → ../dist/X-Box.fpk
+bash build.sh      # 交叉编译 amd64/arm64 → fnpack 打包 → X-Box.fpk（源码目录根下）
 bash ../tools/selfcheck.sh    # 46 项自检（结构/JSON/二进制/图标一致性/fpk/安全约束）
 python3 ../tests/tunnel_test.py       # 真实 linux 二进制：API 隧道/终端/浏览器代理/异步下载（建议 WSL）
 node ../tests/e2e_panel.test.js       # 端到端：无登录直开面板/三通道回退/隧道编解码/语法地板

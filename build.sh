@@ -35,11 +35,9 @@ if [ -n "$APP_VER" ]; then
   sed -i "s/^version  *= .*/version               = $APP_VER/" "$PKG/manifest"
   echo "manifest version -> $APP_VER"
 fi
-# 产物输出到仓库外的 dist/：源码目录只放源码，不放安装包
-DIST="$BASE/../dist"
-mkdir -p "$DIST"
-rm -f "$DIST/X-Box.fpk"
+# 产物 X-Box.fpk 直接放在源码目录根下（用户要求，便于取用）；
+# 已被 .gitignore 的 *.fpk 规则排除，不会上传 GitHub
+rm -f "$BASE/X-Box.fpk"
 "$TOOL/fnpack.exe" build -d "$PKG"
-mv -f "$BASE/X-Box.fpk" "$DIST/X-Box.fpk"
-ls -la "$DIST/"*.fpk
+ls -la "$BASE/"*.fpk
 echo "=== $(date) X-Box build DONE ==="
