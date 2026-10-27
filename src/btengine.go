@@ -34,15 +34,46 @@ import (
 )
 
 const (
-	btMaxTasks       = 8  // 引擎同时任务数
+	btMaxTasks       = 8 // 引擎同时任务数
 	btMaxConns       = 10 // 单种并发下载连接
-	btMetaTryTimeout = 50 * time.Second
+	btMetaTryTimeout = 3 * time.Minute    // 元数据阶段总窗口（DHT 冷启动/冷门做种需要余地）
+	btMetaMaxPeers   = 8                  // 元数据阶段并发拨号上限（先到先得）
+	btMaxTrackers    = 10                 // 合并磁力自带 + 公共 tracker 的上限
 	btMaxTorrentSz   = int64(4) << 30
 	btBlockLen       = 16 << 10 // 分块 16KB
 	btPipelineBlocks = 8        // 单连接挂起块数
 	btStalePiece     = 40 * time.Second
 	btPeersChCap     = 256
 )
+
+// btDefaultTrackers 公共 tracker 兜底：磁力自带 tr 列表薄时保证 peer 发现半径。
+// 只用 http/https（btTrackerLoop 不实现 udp tracker）。
+var btDefaultTrackers = []string{
+	"http://tracker.opentrackr.org:1337/announce",
+	"http://tracker.openbittorrent.com:6969/announce",
+	"http://exodus.desync.com:6969/announce",
+	"http://open.tracker.cl:1337/announce",
+	"https://tracker.tamersunion.org:443/announce",
+	"http://tracker.bt4g.com:2095/announce",
+}
+
+// btMergeTrackers 磁力自带 tr 优先，公共 tracker 兜底，去重截断。
+func btMergeTrackers(tr []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range append(append([]string{}, tr...), btDefaultTrackers...) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] || strings.HasPrefix(s, "udp:") {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+		if len(out) >= btMaxTrackers {
+			break
+		}
+	}
+	return out
+}
 
 // btTask 单个种子任务
 type btTask struct {
@@ -230,6 +261,7 @@ func runTask(t *btTask, trackers []string) {
 			}
 		}()
 	} else {
+		trackers = btMergeTrackers(trackers)
 		for _, tr := range trackers {
 			go btTrackerLoop(ctx, tr, t.hash, feed)
 		}
@@ -238,27 +270,43 @@ func runTask(t *btTask, trackers []string) {
 		}
 	}
 
-	// ---- 阶段 1：元数据（先到先得 + infohash 核对） ----
+	// ---- 阶段 1：元数据（每 peer 一路并发先到先得 + infohash 核对） ----
 	var meta *btMeta
 	deadline := time.Now().Add(btMetaTryTimeout)
 	tried := map[string]bool{}
+	type btMetaTry struct {
+		ok bool
+		m  *btMeta
+	}
+	resCh := make(chan btMetaTry, 16)
+	inflight := 0
 	for meta == nil && time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			t.setLock("stopped", "")
 			return
+		case r := <-resCh:
+			inflight--
+			if r.ok {
+				meta = r.m
+			}
 		case a := <-peerCh:
 			addr := a.String()
-			if tried[addr] {
+			if tried[addr] || inflight >= btMetaMaxPeers {
 				continue
 			}
 			tried[addr] = true
-			m, err := btFetchMetaFromPeer(ctx, addr, t.hash)
-			if err != nil || m == nil {
-				continue
-			}
-			meta = m
-		case <-time.After(6 * time.Second):
+			inflight++
+			go func(addr string) {
+				defer func() { recover() }()
+				m, err := btFetchMetaFromPeer(ctx, addr, t.hash)
+				r := btMetaTry{ok: err == nil && m != nil, m: m}
+				select {
+				case resCh <- r:
+				case <-ctx.Done():
+				}
+			}(addr)
+		case <-time.After(2 * time.Second):
 		}
 	}
 	if meta == nil {

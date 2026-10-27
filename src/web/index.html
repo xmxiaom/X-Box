@@ -907,7 +907,7 @@ function confirmDialog(title, bodyHTML, onOK, okText){
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
 /* ---------- 导航 ---------- */
-const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, sync:loadSyncTasks, media:()=>{ renderMediaPage(); loadMediaTasks(); }, speedtest:stInit, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接；媒体页先进渲染（搜索框免点击）再拉列表
+const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, sync:loadSyncTasks, media:()=>{ mediaSwitch(mediaTab); loadMediaTasks(); }, speedtest:stInit, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接；媒体页经 mediaSwitch 应用当前 tab（vdl 面板初始 display:none，必须走一次 switch 才可见）再拉列表
 document.getElementById('menu').addEventListener('click', e => {
   const item = e.target.closest('.menu-item'); if(!item) return;
   document.querySelectorAll('.menu-item').forEach(m=>m.classList.remove('active'));
@@ -3140,13 +3140,12 @@ function dlVideoRender(){
     '<div style="display:flex;gap:8px;margin-bottom:12px">' +
       '<input type="text" id="dlv-kw" placeholder="搜索电影 / 剧集 / 动漫资源名（支持中英文）" style="flex:1" onkeydown="if(event.key===\'Enter\')dlVideoSearch()">' +
       '<button class="btn btn-primary" id="dlv-go" onclick="dlVideoSearch()">搜索</button>' +
+      '<button class="btn btn-outline" onclick="dlListModalOpen(\'video\')">下载列表</button>' +
       '<button class="btn btn-outline" onclick="dlVideoOpenSettings()">设置</button>' +
     '</div>' +
     '<div id="dlv-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>' +
-    '<div id="dlv-results"></div>' +
-    '<div id="dlv-list" style="margin-top:14px"></div>';
+    '<div id="dlv-results"></div>';
   if(!dlVCfg) dlVideoLoadCfg(true);
-  dlVideoLoadList();
   const kw = document.getElementById('dlv-kw');
   if(kw && !kw.value && dlVLastKw) kw.value = dlVLastKw;
 }
@@ -3221,7 +3220,7 @@ async function dlVideoSubmit(idx){
   toast('已加入下载列表');
   try{
     await apiRetry('/api/dl/start', {method:'POST', body: JSON.stringify({magnet: it.magnet, title: it.title, kind: 'video'}), timeoutMs: 20000});
-    dlVideoLoadList();
+    dlListRefresh();
   }catch(e){ toast(e.message,'err'); }
 }
 
@@ -3281,26 +3280,41 @@ function dlTaskRow(t, showType){
   '</div>';
 }
 
-// dlVideoLoadList 拉统一任务列表并渲染（运行中 2s 轮询）
-let dlListTimer = null;
+// ---------- 统一「下载列表」弹窗（视频下载 / 音乐下载 两个 tab 共用） ----------
+// dlListKind = 当前打开的列表类型（'video' | 'music'）；null = 未打开
+let dlListKind = null, dlListTimer = null;
+
+function dlListModalOpen(kind){
+  dlListKind = kind;
+  const title = kind === 'music' ? '音乐下载列表' : '下载列表';
+  confirmDialog(title, '<div class="empty">加载中…</div>', ()=>{}, '关闭');
+  dlListRefresh();
+}
+
+function dlListRefresh(){
+  if(dlListKind === 'video') dlVideoLoadList();
+  else if(dlListKind === 'music') dlMusicLoadTasks();
+}
+
+// dlListModalRefresh 把任务视图写进弹窗；弹窗已关或类型不符时静默丢弃
+function dlListModalRefresh(kind, j, showType){
+  const modal = document.getElementById('modal');
+  if(dlListKind !== kind || !modal.classList.contains('show')) return;
+  const list = j.tasks || [];
+  document.getElementById('modal-body').innerHTML = list.length
+    ? '<div style="max-height:55vh;overflow:auto">' + list.map(t => dlTaskRow(t, showType)).join('') + '</div>'
+    : '<div class="empty">暂无任务（点搜索结果里的「下载」加入后在此查看进度）</div>';
+}
+
+// dlVideoLoadList 拉统一任务列表并渲染进弹窗（运行中 2s 轮询）
 async function dlVideoLoadList(){
   try{
     const j = await apiRetry('/api/dl/tasks');
-    const box = document.getElementById('dlv-list');
-    if(box){
-      const list = j.tasks || [];
-      if(list.length){
-        box.innerHTML = '<div class="card"><h3>下载列表</h3>' + list.map(t => dlTaskRow(t, true)).join('') + '</div>';
-      }else{
-        box.innerHTML = '';
-      }
-    }
+    dlListModalRefresh('video', j, true);
+    const modal = document.getElementById('modal');
     if(dlListTimer) clearTimeout(dlListTimer);
-    if(j.running){
-      dlListTimer = setTimeout(()=>{
-        const pg = document.getElementById('page-media');
-        if(pg && pg.classList.contains('active') && mediaTab === 'vdl') dlVideoLoadList();
-      }, 2000);
+    if(j.running && dlListKind === 'video' && modal.classList.contains('show')){
+      dlListTimer = setTimeout(dlVideoLoadList, 2000);
     }
   }catch(e){}
 }
@@ -3309,14 +3323,14 @@ async function dlTaskCancel(id){
   try{
     await apiRetry('/api/dl/cancel?id=' + encodeURIComponent(id), {method:'POST'});
     toast('已请求取消','ok');
-    dlVideoLoadList();
+    dlListRefresh();
   }catch(e){ toast(e.message,'err'); }
 }
 
 async function dlTaskRemove(id){
   try{
     await apiRetry('/api/dl/remove?id=' + encodeURIComponent(id), {method:'POST'});
-    dlVideoLoadList();
+    dlListRefresh();
   }catch(e){ toast(e.message,'err'); }
 }
 
@@ -3352,12 +3366,11 @@ function dlMusicRender(){
     '<div style="display:flex;gap:8px;margin-bottom:12px">' +
       '<input type="text" id="dlm-kw" placeholder="搜索歌名 / 歌手" style="flex:1" onkeydown="if(event.key===\'Enter\')dlMusicSearch()">' +
       '<button class="btn btn-primary" id="dlm-go" onclick="dlMusicSearch()">搜索</button>' +
+      '<button class="btn btn-outline" onclick="dlListModalOpen(\'music\')">下载列表</button>' +
       '<button class="btn btn-outline" onclick="dlMusicOpenSettings()">设置</button>' +
     '</div>' +
     '<div id="dlm-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>' +
-    '<div id="dlm-results"></div>' +
-    '<div id="dlm-tasks" style="margin-top:14px"></div>';
-  dlMusicLoadTasks(true);
+    '<div id="dlm-results"></div>';
   const kw = document.getElementById('dlm-kw');
   if(kw && dlMLastQ) kw.value = dlMLastQ;
 }
@@ -3447,6 +3460,7 @@ async function dlMusicBT(idx){
   toast('已加入下载列表');
   try{
     await apiRetry('/api/dl/start', {method:'POST', body: JSON.stringify({magnet: it.magnet, title: it.title, kind: 'music'}), timeoutMs: 20000});
+    dlListRefresh();
   }catch(e){
     toast(e.message,'err');
   }
@@ -3456,38 +3470,21 @@ async function dlMusicDL(s){
   toast('已加入下载列表：' + s.name);
   try{
     await apiRetry('/api/dlmusic/start', {method:'POST', body: JSON.stringify(s)});
-    dlMusicLoadTasks();
+    dlListRefresh();
   }catch(e){ toast(e.message,'err'); }
 }
 
+// dlMusicLoadTasks 拉音乐任务并渲染进弹窗（运行中 2s 轮询）
 async function dlMusicLoadTasks(silent){
   try{
     const j = await apiRetry('/api/dlmusic/tasks');
-    const box = document.getElementById('dlm-tasks');
-    if(box){
-      const list = j.tasks || [];
-      if(list.length){
-        box.innerHTML = '<div class="card"><h3>下载列表</h3>' + list.map(t => dlTaskRow(t, false)).join('') + '</div>';
-      }else{
-        box.innerHTML = '';
-      }
-    }
+    dlListModalRefresh('music', j, false);
+    const modal = document.getElementById('modal');
     if(dlMTimer) clearTimeout(dlMTimer);
-    if(j.running){
-      dlMTimer = setTimeout(()=>{
-        const pg = document.getElementById('page-media');
-        if(pg && pg.classList.contains('active') && mediaTab === 'mdl') dlMusicLoadTasks();
-      }, 2000);
+    if(j.running && dlListKind === 'music' && modal.classList.contains('show')){
+      dlMTimer = setTimeout(dlMusicLoadTasks, 2000);
     }
   }catch(e){ if(!silent && !/HTTP (0|5\d\d)/.test(String(e.message))) toast(e.message,'err'); }
-}
-
-async function dlMusicCancel(id){
-  try{
-    await apiRetry('/api/dlmusic/cancel?id=' + encodeURIComponent(id), {method:'POST'});
-    toast('已请求取消','ok');
-    dlMusicLoadTasks();
-  }catch(e){ toast(e.message,'err'); }
 }
 
 /* 音乐下载设置弹窗（目录） */
