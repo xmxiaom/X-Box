@@ -477,6 +477,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           <div class="proc-pane on" id="pane-procs">
             <div class="proc-toolbar">
               <input type="text" id="proc-search" placeholder="搜索进程名 / 用户 / PID / 命令行">
+              <label class="field-check" style="margin:0;font-size:13px"><input type="checkbox" id="proc-hide-kernel" checked> 隐藏系统线程</label>
               <span class="count" id="proc-count"></span>
             </div>
             <div class="tblwrap"><table class="tbl"><thead><tr>
@@ -2127,7 +2128,7 @@ async function loadProcs(){
     servicesData = s.services||[];
     appsData = s.apps||[];
     dockerData = s.docker||[];
-    document.getElementById('procs-sub').textContent = `${p.processCount||procsData.length} 个进程 · ${servicesData.length} 个服务单元 · ${appsData.length} 个应用`;
+    document.getElementById('procs-sub').textContent = `${p.processCount||procsData.length} 个进程（活跃 ${procsData.filter(procActive).length}） · ${servicesData.length} 个服务单元 · ${appsData.length} 个应用`;
     renderApps(); renderDocker(); renderServices(); renderProcs();
   }catch(e){ toast(e.message,'err'); }
   startProcsRefresh(); // CPU 占用率实时刷新
@@ -2184,9 +2185,25 @@ function renderServices(){
      <td style="color:var(--text2)">${esc(x.desc)}</td></tr>`;
   }).join('') || '<tr><td colspan="3"><div class="empty">无匹配服务</div></td></tr>';
 }
-// 进程排序 / 搜索 / 状态映射（仿飞牛资源监控进程管理）
-const PROC_STATE = {R:['运行中','sd-run'],S:['睡眠','sd-sleep'],D:['磁盘等待','sd-wait'],Z:['僵尸','sd-zombie'],T:['已停止','sd-stop'],t:['跟踪','sd-stop'],I:['空闲','sd-idle'],X:['已退出','sd-dead'],x:['已退出','sd-dead'],K:['可唤醒','sd-run'],P:['驻页','sd-idle'],W:['换页','sd-wait']};
-let procQuery='', procSortKey='cpuPercent', procSortAsc=false;
+// 进程状态映射：这一列表达的是「这个进程是否在正常运行」，不是直译内核状态码。
+// 关键：/proc 的 S = 可中断等待，是「服务进程正在运行、等事件/请求」的常态；
+// 直接标成「睡眠」会让用户以为应用没在跑（这正是老版本被反馈的问题）。
+// 于是 R/S 一律显示「运行中」，具体内核态放进悬停提示；CPU 列反映是否真在干活。
+const PROC_STATE = {
+  R:['运行中','sd-run','正在 CPU 上执行'],
+  S:['运行中','sd-run','正在等待事件或请求（常驻服务的常态，非未运行）'],
+  D:['IO 等待','sd-wait','不可中断等待，通常卡在磁盘 IO；进程仍在运行'],
+  Z:['僵尸','sd-zombie','已结束但父进程未回收'],
+  T:['已暂停','sd-stop','收到 SIGSTOP，已暂停'],
+  t:['跟踪中','sd-stop','正被调试器跟踪'],
+  I:['空闲','sd-idle','内核线程空闲'],
+  X:['已退出','sd-dead',''], x:['已退出','sd-dead',''],
+  K:['运行中','sd-run','可唤醒睡眠'], P:['空闲','sd-idle','驻留页状态'], W:['IO 等待','sd-wait','换页等待']
+};
+function procStateOf(p){ return PROC_STATE[p.state] || [p.state||'—','sd-idle','']; }
+// 「活跃」= 采样窗口内确实吃过 CPU（与状态列分开，避免「运行中」满屏却看不出谁在干活）
+function procActive(p){ return (p.cpuPercent||0) >= 0.5; }
+let procQuery='', procSortKey='cpuPercent', procSortAsc=false, hideKernelThreads=true;
 /* 进程页顶部分类切换：进程/飞牛应用/Docker 容器/系统服务（对齐端口管理筛选交互） */
 document.getElementById('proc-tabs').addEventListener('click',e=>{
   const c = e.target.closest('.chip'); if(!c) return;
@@ -2196,6 +2213,7 @@ document.getElementById('proc-tabs').addEventListener('click',e=>{
   document.querySelectorAll('#page-procs .proc-pane').forEach(p=>p.classList.toggle('on', p.id==='pane-'+t));
 });
 document.getElementById('proc-search').addEventListener('input', function(){ procQuery=this.value.trim().toLowerCase(); renderProcs(); });
+document.getElementById('proc-hide-kernel').addEventListener('change', function(){ hideKernelThreads=this.checked; renderProcs(); });
 document.querySelectorAll('#page-procs th.sortable').forEach(th=>{
   th.addEventListener('click', ()=>{
     const k=th.dataset.k;
@@ -2211,11 +2229,15 @@ document.querySelectorAll('#page-procs th.sortable').forEach(th=>{
   if(th) th.querySelector('.arr').textContent='▼';
 })();
 function renderProcs(){
-  let rows = procsData.filter(p=>{
+  const all = procsData || [];
+  const kernels = all.filter(p=>p.kernel).length;
+  let rows = all.filter(p=>{
+    if(hideKernelThreads && p.kernel) return false;
     if(!procQuery) return true;
     return (p.name||'').toLowerCase().includes(procQuery)
       || (p.user||'').toLowerCase().includes(procQuery)
       || (p.cmdline||'').toLowerCase().includes(procQuery)
+      || (p.app||'').toLowerCase().includes(procQuery)
       || String(p.pid).includes(procQuery);
   });
   const dir = procSortAsc?1:-1;
@@ -2225,19 +2247,27 @@ function renderProcs(){
     return ((va||0)-(vb||0))*dir;
   });
   const total = rows.length;
-  document.getElementById('proc-count').textContent = total>200 ? `显示前 200 / 共 ${total} 个` : `共 ${total} 个进程`;
+  // 「活跃」按采样窗口内是否真吃到 CPU 统计，与状态列的存活语义区分开
+  const active = all.filter(procActive).length;
+  let countTxt = total>200 ? `显示前 200 / 共 ${total} 个` : `共 ${total} 个进程`;
+  countTxt += ` · 活跃 ${active}`;
+  if(kernels>0 && hideKernelThreads) countTxt += ` · 已隐藏 ${kernels} 个系统线程`;
+  document.getElementById('proc-count').textContent = countTxt;
   rows = rows.slice(0,200);
   document.getElementById('proc-body').innerHTML = rows.map(p=>{
     const cpu=p.cpuPercent||0, mem=p.memKB||0, mp=p.memPercent||0;
     const cpuCls = cpu>50?'cpu-hot':cpu>20?'cpu-warm':cpu>5?'cpu-mild':'';
-    const st = PROC_STATE[p.state]||[p.state||'—','sd-idle'];
+    const st = procStateOf(p);
+    // 能关联到 fnOS 应用时标出来，用户一眼看出这条进程属于哪个应用
+    const appTag = p.app ? `<span class="badge badge-blue" style="margin-left:6px">${esc(p.app)}</span>` : '';
+    const kTag = p.kernel ? '<span class="badge badge-gray" style="margin-left:6px">系统</span>' : '';
     return `<tr>
       <td class="mono" style="color:var(--text3)">${p.pid}</td>
-      <td style="font-weight:500">${esc(p.name)}</td>
+      <td style="font-weight:500">${esc(p.name)}${appTag}${kTag}</td>
       <td>${esc(p.user||'—')}</td>
       <td class="${cpuCls}">${cpu.toFixed(1)}</td>
       <td>${fmtKB(mem)} <span style="color:var(--text3);font-size:12px">${mp.toFixed(1)}%</span></td>
-      <td><span class="state-dot ${st[1]}"></span>${esc(st[0])}</td>
+      <td title="${esc(st[2]||'')}"><span class="state-dot ${st[1]}"></span>${esc(st[0])}</td>
       <td style="color:var(--text2)">${fmtUp(p.startedSeconds)}</td>
       <td style="text-align:right;white-space:nowrap"><button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="askKillProc(${p.pid},'${esc(p.name)}')">结束进程</button></td>
     </tr>`;
