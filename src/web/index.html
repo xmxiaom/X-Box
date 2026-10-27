@@ -437,7 +437,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           <div class="rows" id="clean-rows">
             <div class="empty" id="clean-empty">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
-              <div>尚未扫描 · 白名单机制保证只清理可安全再生成的文件</div>
+              <div>尚未扫描 · 白名单机制保证只清理白名单目录内的文件</div>
             </div>
           </div>
         </div>
@@ -1733,8 +1733,8 @@ async function runNAT(force){
 }
 
 /* ---------- 垃圾清理（可选文件） ---------- */
-const CAT_ICON = {aptCache:'📦','apt-cache':'📦','log-rotated':'📋',journal:'🧾','tmp':'🗑️',crash:'💥','appdata-logs':'📄','appdata-tmp':'📁',thumbnails:'🖼️'};
-const CAT_COLOR = {aptCache:'#165DFF','apt-cache':'#165DFF','log-rotated':'#722ED1',journal:'#722ED1','tmp':'#FF7D00',crash:'#F53F3F','appdata-logs':'#165DFF','appdata-tmp':'#14C9C9',thumbnails:'#722ED1'};
+const CAT_ICON = {aptCache:'📦','apt-cache':'📦','log-rotated':'📋',journal:'🧾','tmp':'🗑️',crash:'💥','appdata-logs':'📄','appdata-tmp':'📁',thumbnails:'🖼️','app-orphan':'🧩'};
+const CAT_COLOR = {aptCache:'#165DFF','apt-cache':'#165DFF','log-rotated':'#722ED1',journal:'#722ED1','tmp':'#FF7D00',crash:'#F53F3F','appdata-logs':'#165DFF','appdata-tmp':'#14C9C9',thumbnails:'#722ED1','app-orphan':'#FF7D00'};
 async function startScan(){
   const btn = document.getElementById('btn-scan');
   btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 扫描中…';
@@ -1747,6 +1747,7 @@ async function startScan(){
 function catCardHTML(c){
   const hasPaths = (c.paths||[]).length>0;
   const disabled = !hasPaths || !c.files;
+  const unit = c.unit || '文件';
   const safeBadge = c.safe ? '<span class="badge badge-green"><span class="dot"></span>安全</span>' : '<span class="badge badge-orange"><span class="dot"></span>需注意</span>';
   const sizeV = !hasPaths ? '—' : (c.files>0? fmtB(c.bytes) : '0 B');
   const filesV = !hasPaths ? '—' : String(c.files||0);
@@ -1762,13 +1763,13 @@ function catCardHTML(c){
       </div>
       <div class="meta">
         <div class="m"><div class="v">${sizeV}</div><div class="k">可释放</div></div>
-        <div class="m"><div class="v">${filesV}</div><div class="k">文件数</div></div>
+        <div class="m"><div class="v">${filesV}</div><div class="k">${unit}数</div></div>
         <div class="m"><div class="v">${c.minAgeDays>0?'≥'+c.minAgeDays+' 天':'不限'}</div><div class="k">年龄阈值</div></div>
       </div>
     </div>
     <div class="cat-toolbar">
       <label class="field-check" style="margin:0"><input type="checkbox" class="all-cb" data-cat="${esc(c.id)}"> 全选</label>
-      <span class="sel-info" id="sel-info-${esc(c.id)}">未选择文件</span>
+      <span class="sel-info" id="sel-info-${esc(c.id)}">未选择${unit}</span>
       <div style="flex:1"></div>
       <button class="btn btn-outline btn-sm" id="btn-sel-${esc(c.id)}" ${disabled?'disabled':''} onclick="cleanSelected('${esc(c.id)}')">清理所选</button>
       <button class="btn btn-danger-outline btn-sm" ${disabled?'disabled':''} onclick="askCleanAll('${esc(c.id)}','${esc(c.name)}',${c.files},'${fmtB(c.bytes)}',${c.safe})">全清</button>
@@ -1784,10 +1785,10 @@ function renderClean(){
   // 第二次起必须判空（否则 null.style 崩溃、列表渲染中断）
   const emptyEl = document.getElementById('clean-empty');
   if(emptyEl) emptyEl.style.display='none';
-  document.getElementById('clean-sub').textContent = `扫描于 ${cleanData.scannedAt} · 共 ${cleanData.totalFiles} 个文件 · ${fmtB(cleanData.totalBytes)}`;
+  document.getElementById('clean-sub').textContent = `扫描于 ${cleanData.scannedAt} · 共 ${cleanData.totalFiles} 项 · ${fmtB(cleanData.totalBytes)}`;
   const total = document.getElementById('clean-total');
   total.style.display='block';
-  total.innerHTML = `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><div style="font-size:15px;font-weight:600">可清理合计：<span style="color:var(--primary)">${fmtB(cleanData.totalBytes)}</span>（${cleanData.totalFiles} 个文件）</div><div style="font-size:12.5px;color:var(--text3)">勾选文件后可选择性清理；所有删除仅限白名单目录中的普通文件，且清理时逐条复核年龄</div></div>`;
+  total.innerHTML = `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><div style="font-size:15px;font-weight:600">可清理合计：<span style="color:var(--primary)">${fmtB(cleanData.totalBytes)}</span>（${cleanData.totalFiles} 项）</div><div style="font-size:12.5px;color:var(--text3)">勾选文件后可选择性清理；所有删除仅限白名单目录中的普通文件，且清理时逐条复核年龄</div></div>`;
   // 逐卡独立解析：每张卡单独 innerHTML 再挂载，单卡解析异常不会吞掉其他分类；
   // 渲染计数写入副标题自证（若与后端分类数不符，一眼可见）
   el.innerHTML = '';
@@ -1816,34 +1817,46 @@ function renderClean(){
 function updateSelInfo(cat){
   const n = document.querySelectorAll(`#clean-files-${cat} .file-cb:checked`).length;
   const el = document.getElementById('sel-info-'+cat);
-  if(el) el.textContent = n>0 ? `已选择 ${n} 个文件` : '未选择文件';
+  if(el) el.textContent = n>0 ? `已选择 ${n} 个${catUnit(cat)}` : `未选择${catUnit(cat)}`;
   const btn = document.getElementById('btn-sel-'+cat);
   if(btn) btn.disabled = n===0; // 未勾选文件时禁用，勾选后可用
+}
+// 分类计数单位（已卸载应用残留按目录算）
+function catUnit(id){
+  const c = ((cleanData&&cleanData.categories)||[]).find(x=>x.id===id);
+  return (c && c.unit) || '文件';
 }
 function collectSelected(cat){
   return [...document.querySelectorAll(`#clean-files-${cat} .file-cb:checked`)].map(cb=>cb.dataset.path);
 }
 function cleanSelected(cat){
   const paths = collectSelected(cat);
-  if(!paths.length){ toast('请先勾选要清理的文件','err'); return; }
-  confirmDialog('确认清理所选文件', `即将删除 <b>${paths.length}</b> 个文件。此操作不可恢复，且清理时仍会逐条复核白名单与年龄阈值。`, async ()=>{
+  const unit = catUnit(cat);
+  if(!paths.length){ toast('请先勾选要清理的'+unit,'err'); return; }
+  const warn = cat==='app-orphan'
+    ? `<div class="warn-box">将<b>整目录永久删除</b>：这些应用的设置、数据库、缓存、上传文件都会随之消失，<b>无法恢复</b>。删除前会再复核一次——若该应用已重新安装，会自动拒绝。</div>`
+    : '此操作不可恢复，且清理时仍会逐条复核白名单与年龄阈值。';
+  confirmDialog('确认清理所选'+unit, `即将删除 <b>${paths.length}</b> 个${unit}。${warn}`, async ()=>{
     try{
       const j = await api('/api/clean',{method:'POST',body:JSON.stringify({category:cat, paths})});
-      toast(`已清理 ${j.files} 个文件，释放 ${j.freedText}`, j.failures&&j.failures.length?'':'good');
+      toast(`已清理 ${j.files} 个${unit}，释放 ${j.freedText}`, j.failures&&j.failures.length?'':'good');
       if(j.failures && j.failures.length) console.warn('清理失败项:', j.failures);
       startScanSilent();
     }catch(e){ toast(e.message,'err'); }
   });
 }
 function askCleanAll(id,name,files,size,safe){
+  const unit = catUnit(id);
+  const warn = id==='app-orphan'
+    ? '<div class="warn-box">将<b>永久删除</b>这些已卸载应用的全部数据目录（设置、数据库、缓存、上传的文件），<b>无法恢复</b>。若其中某个应用只是暂时卸载、以后还想装回来继续用，请先单个勾选清理。</div>'
+    : (safe ? '<div class="warn-box">该分类内容均可自动再生成，删除不影响系统与应用运行。</div>'
+            : '<div class="warn-box">该分类标记为「需注意」：删除后短期内（如缩略图重建期间）相关功能体验会略慢，确认无碍后继续。</div>');
   confirmDialog('确认全清「'+name+'」',
-    `即将删除该分类 <b>${files}</b> 个文件，预计释放 <b style="color:var(--primary)">${size}</b>。` +
-    (safe ? '<div class="warn-box">该分类内容均可自动再生成，删除不影响系统与应用运行。</div>'
-          : '<div class="warn-box">该分类标记为「需注意」：删除后短期内（如缩略图重建期间）相关功能体验会略慢，确认无碍后继续。</div>'),
+    `即将删除该分类 <b>${files}</b> 个${unit}，预计释放 <b style="color:var(--primary)">${size}</b>。` + warn,
     async ()=>{
       try{
         const j = await api('/api/clean',{method:'POST',body:JSON.stringify({category:id})});
-        toast(`已清理 ${j.files} 个文件，释放 ${j.freedText}`, j.failures&&j.failures.length?'':'good');
+        toast(`已清理 ${j.files} 个${unit}，释放 ${j.freedText}`, j.failures&&j.failures.length?'':'good');
         if(j.failures && j.failures.length) console.warn('清理失败项:', j.failures);
         startScanSilent();
       }catch(e){ toast(e.message,'err'); }
@@ -2128,7 +2141,7 @@ async function loadProcs(){
     servicesData = s.services||[];
     appsData = s.apps||[];
     dockerData = s.docker||[];
-    document.getElementById('procs-sub').textContent = `${p.processCount||procsData.length} 个进程（活跃 ${procsData.filter(procActive).length}） · ${servicesData.length} 个服务单元 · ${appsData.length} 个应用`;
+    document.getElementById('procs-sub').textContent = `${p.processCount||procsData.length} 个进程（活跃 ${procsData.filter(procActive).length}） · ${servicesData.length} 个服务单元 · ${appsData.filter(a=>!a.orphan).length} 个应用${appsData.filter(a=>a.orphan).length?'（另有 '+appsData.filter(a=>a.orphan).length+' 个卸载残留）':''}`;
     renderApps(); renderDocker(); renderServices(); renderProcs();
   }catch(e){ toast(e.message,'err'); }
   startProcsRefresh(); // CPU 占用率实时刷新
@@ -2153,13 +2166,45 @@ function startProcsRefresh(){
     }catch(e){}
   }, 3000);
 }
+/* 飞牛应用列表：默认只显示「已安装」，卸载后只剩数据目录的残留单独收起来
+   （飞牛卸载应用时通常保留 @appdata 数据目录，混在应用列表里会让人以为没卸载成功） */
+let showOrphanApps = false;
 function renderApps(){
   const el = document.getElementById('apps-rows');
-  el.innerHTML = appsData.map(a=>`<div class="row" style="padding:11px 18px">
-    <div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
-    <div class="info"><div class="name">${esc(a.name)}</div><div class="desc mono" style="font-size:11.5px">${esc(a.path)}</div></div>
-    ${a.running?`<span class="badge badge-green"><span class="dot"></span>运行中</span><span style="font-size:12px;color:var(--text3)">PID ${(a.pids||[]).join(', ')}</span>`:'<span class="badge badge-gray"><span class="dot"></span>未运行</span>'}
-  </div>`).join('') || '<div class="empty">未检测到应用数据目录</div>';
+  const installed = appsData.filter(a=>!a.orphan);
+  const orphans = appsData.filter(a=>a.orphan);
+  let html = '';
+  if(orphans.length){
+    html += `<div class="proc-toolbar">
+      <label class="field-check" style="margin:0;font-size:13px"><input type="checkbox" id="show-orphan-apps" ${showOrphanApps?'checked':''}> 显示已卸载应用的残留数据（${orphans.length}）</label>
+      <span class="count">卸载后数据目录被保留，可在垃圾清理中彻底删除</span>
+    </div>`;
+  }
+  const rows = showOrphanApps ? installed.concat(orphans) : installed;
+  html += rows.map(a=>{
+    if(a.orphan){
+      return `<div class="row" style="padding:11px 18px;opacity:.85">
+        <div class="icon" style="background:rgba(255,125,0,.12);color:#FF7D00"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></div>
+        <div class="info"><div class="name">${esc(a.name)}</div><div class="desc mono" style="font-size:11.5px">${esc(a.path)}</div></div>
+        <span class="badge badge-orange"><span class="dot"></span>已卸载 · 残留</span>
+        <button class="btn btn-outline btn-sm" onclick="gotoCleanScan()">去清理</button>
+      </div>`;
+    }
+    return `<div class="row" style="padding:11px 18px">
+      <div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+      <div class="info"><div class="name">${esc(a.name)}</div><div class="desc mono" style="font-size:11.5px">${esc(a.path)}</div></div>
+      ${a.running?`<span class="badge badge-green"><span class="dot"></span>运行中</span><span style="font-size:12px;color:var(--text3)">PID ${(a.pids||[]).join(', ')}</span>`:'<span class="badge badge-gray"><span class="dot"></span>未运行</span>'}
+    </div>`;
+  }).join('') || '<div class="empty">未检测到已安装的飞牛应用</div>';
+  el.innerHTML = html;
+  const cb = document.getElementById('show-orphan-apps');
+  if(cb) cb.addEventListener('change', ()=>{ showOrphanApps = cb.checked; renderApps(); });
+}
+// 从「已卸载残留」跳到垃圾清理并直接扫描
+function gotoCleanScan(){
+  const item = document.querySelector('.menu-item[data-page="clean"]');
+  if(item) item.click();
+  setTimeout(()=>{ const b=document.getElementById('btn-scan'); if(b) startScan(); }, 80);
 }
 function renderDocker(){
   const el = document.getElementById('docker-box');

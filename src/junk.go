@@ -21,6 +21,7 @@ type JunkCategory struct {
 	Paths      []string `json:"paths"`
 	Safe       bool     `json:"safe"`       // true=安全 false=需注意
 	MinAgeDays int      `json:"minAgeDays"` // 0 = 不限
+	Unit       string   `json:"unit,omitempty"` // 计数单位：文件/目录（默认文件）
 	// 扫描结果
 	Available  bool       `json:"available"`
 	Files      int64      `json:"files"`
@@ -36,6 +37,7 @@ type JunkFile struct {
 	Path    string `json:"path"`
 	Size    int64  `json:"size"`
 	AgeDays int    `json:"ageDays"`
+	Dir     bool   `json:"dir,omitempty"` // 整目录删除项（已卸载应用残留）
 }
 
 type junkRule struct {
@@ -44,6 +46,7 @@ type junkRule struct {
 	match          func(rel, name string) bool
 	minAge         time.Duration
 	safe           bool
+	dirMode        bool // true=按目录整棵删除（清理走 RemoveAll + 孤儿目录复核）
 }
 
 // 分类规则：路径白名单 + 匹配模式 + 最小年龄。
@@ -117,6 +120,13 @@ var junkRules = []junkRule{
 		match: func(rel, name string) bool { return true },
 		minAge: 0, safe: false,
 	},
+	{
+		id: "app-orphan", name: "已卸载应用残留",
+		desc:  "已卸载应用留下的数据与临时目录（@appdata、@apptemp）里的整棵目录。飞牛卸载应用时通常保留数据目录，久了会越积越多；删除后该应用的设置与数据不可恢复",
+		roots: nil, // 运行时按「无程序目录的应用」动态展开
+		match: func(rel, name string) bool { return true },
+		minAge: 0, safe: false, dirMode: true,
+	},
 }
 
 // ruleRoots 动态展开分类的扫描根：appdata 三类按 fnOS 实际路径现查。
@@ -126,18 +136,45 @@ var junkRules = []junkRule{
 //   - FPK 应用临时文件：/vol*/@apptemp/<app>
 //   - 相册缩略图与人脸缓存：/vol*/@appmeta/trim.photos/data/thumb 与 data/face（不在 @appdata！）
 func ruleRoots(rule junkRule) []string {
+	orphans := fnosOrphanAppDirs()
+	// 已卸载应用残留：每个孤儿应用目录自身就是一个待删根，
+	// 判定与进程页共用 scanFnosAppDirs（程序目录 + 悬空符号链接都算「已卸载」）
+	if rule.id == "app-orphan" {
+		var out []string
+		for _, d := range orphans {
+			// 目录内有独立挂载点时不提供清理：RemoveAll 会删到挂载进来的数据
+			if hasMountUnder(d) {
+				continue
+			}
+			out = append(out, d)
+		}
+		return out
+	}
+	// 已卸载应用的数据目录已归「已卸载应用残留」整棵处理，
+	// 日志/临时/缩略图三类不再钻进去扫，否则同一批字节被重复计入「可释放合计」。
+	underOrphan := func(p string) bool {
+		for _, o := range orphans {
+			if p == o || strings.HasPrefix(p, o+string(filepath.Separator)) {
+				return true
+			}
+		}
+		return false
+	}
+
 	// 缩略图分类：精确匹配可再生缓存子目录，绝不扫整棵 @appmeta（内有 photo.db 等数据库）
 	if rule.id == "thumbnails" {
 		var out []string
-		for _, pattern := range []string{
-			"/vol*/@appmeta/*/data/thumb",           // 相册缩略图（列表/时间线预览）
-			"/vol*/@appmeta/*/data/face",            // 人脸识别小图
-			"/vol*/@appdata/*/thumbnails",           // FPK 应用常规缩略图目录
-			"/usr/local/apps/@appdata/*/thumbnails", // 系统应用缩略图目录
-		} {
+		patterns := []string{
+			"/vol*/@appmeta/*/data/thumb", // 相册缩略图（列表/时间线预览）
+			"/vol*/@appmeta/*/data/face",  // 人脸识别小图
+		}
+		for _, pat := range fnosDataPatterns {
+			patterns = append(patterns, pat+"/thumbnails") // 应用常规缩略图目录
+		}
+		for _, pattern := range patterns {
 			hits, _ := filepath.Glob(pattern)
 			for _, v := range hits {
-				if fi, err := os.Stat(v); err == nil && fi.IsDir() {
+				if fi, err := os.Stat(v); err == nil && fi.IsDir() && !underOrphan(v) {
 					out = append(out, v)
 				}
 			}
@@ -156,22 +193,27 @@ func ruleRoots(rule junkRule) []string {
 	}
 	var out []string
 	appendDir := func(p string) {
+		if underOrphan(p) {
+			return
+		}
 		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
 			out = append(out, p)
 		}
 	}
 	// 两种 appdata 布局下的同名子目录
-	for _, pattern := range []string{"/vol*/@appdata/*/", "/usr/local/apps/@appdata/*/"} {
-		hits, _ := filepath.Glob(pattern + sub)
+	for _, pattern := range fnosDataPatterns {
+		hits, _ := filepath.Glob(pattern + "/" + sub)
 		for _, v := range hits {
 			appendDir(v)
 		}
 	}
 	// FPK 应用临时目录：/vol*/@apptemp/<app> 整棵纳入 tmp 规则
 	if rule.id == "appdata-tmp" {
-		hits, _ := filepath.Glob("/vol*/@apptemp/*")
-		for _, v := range hits {
-			appendDir(v)
+		for _, pattern := range fnosTempPatterns {
+			hits, _ := filepath.Glob(pattern)
+			for _, v := range hits {
+				appendDir(v)
+			}
 		}
 	}
 	return out
@@ -194,6 +236,9 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 			Safe: rule.safe, MinAgeDays: int(rule.minAge.Hours() / 24),
 			Paths: ruleRoots(rule),
 		}
+		if rule.dirMode {
+			cat.Unit = "目录"
+		}
 		if len(cat.Paths) == 0 {
 			cat.SkipNote = "本机无相关目录"
 			cats = append(cats, cat)
@@ -201,9 +246,12 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		}
 		cat.Available = true
 
-		if rule.id == "journal" {
+		switch {
+		case rule.dirMode:
+			scanAppOrphans(&cat, now, candidates)
+		case rule.id == "journal":
 			scanJournal(&cat, now)
-		} else {
+		default:
 			for _, root := range cat.Paths {
 				walkJunk(root, rule, &cat, candidates)
 			}
@@ -284,6 +332,93 @@ func walkJunk(root string, rule junkRule, cat *JunkCategory, out map[string]map[
 		out[rule.id][path] = info.Size()
 		return nil
 	})
+}
+
+// scanAppOrphans 已卸载应用残留：每个孤儿目录按整棵统计，一条明细 = 一个目录。
+// 不做年龄门槛（卸载残留多久都该清），但要求目录内有内容。
+func scanAppOrphans(cat *JunkCategory, now time.Time, out map[string]map[string]int64) {
+	for _, root := range cat.Paths {
+		if fi, err := os.Lstat(root); err != nil || !fi.IsDir() {
+			continue // 符号链接或已消失：不提供删除
+		}
+		var bytes, files int64
+		var newest time.Time
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			files++
+			bytes += info.Size()
+			if info.ModTime().After(newest) {
+				newest = info.ModTime()
+			}
+			return nil
+		})
+		if bytes == 0 && files == 0 {
+			continue // 空目录交给系统清理，不占列表
+		}
+		cat.Files++
+		cat.Bytes += bytes
+		age := int(now.Sub(newest).Hours() / 24)
+		if age > cat.OldestDays {
+			cat.OldestDays = age
+		}
+		if len(cat.FileList) < maxFileList {
+			cat.FileList = append(cat.FileList, JunkFile{
+				Path:    root,
+				Size:    bytes,
+				AgeDays: age,
+				Dir:     true,
+			})
+		}
+		if out[cat.ID] == nil {
+			out[cat.ID] = map[string]int64{}
+		}
+		out[cat.ID][root] = bytes
+	}
+}
+
+// hasMountUnder 目录自身或内部是否存在挂载点。
+// 判据来自 /proc/self/mountinfo（第五列是挂载点）。读不到（非 Linux）时返回 false。
+func hasMountUnder(dir string) bool {
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false
+	}
+	clean := filepath.Clean(dir)
+	prefix := clean + "/"
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 {
+			continue
+		}
+		mp := strings.ReplaceAll(f[4], `\040`, " ")
+		if mp == clean || strings.HasPrefix(mp, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFnosAppDirPath 路径是否形如 .../@appdata/<名> 或 .../@apptemp/<名>。
+// 整目录删除的最后一道形状闸：只允许删应用数据/临时目录的最外层一级。
+func isFnosAppDirPath(p string) bool {
+	clean := filepath.Clean(p)
+	parent := filepath.Dir(clean)
+	switch filepath.Base(parent) {
+	case "@appdata", "@apptemp":
+	default:
+		return false
+	}
+	name := filepath.Base(clean)
+	return name != "" && name != "." && name != ".." && !strings.HasPrefix(name, ".")
 }
 
 // scanJournal journal 特殊规则：按修改时间从新到旧累计，保留最近 500MB。
@@ -392,6 +527,30 @@ func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 「已卸载应用残留」按目录整棵删除：删除前重新判定一次孤儿集合——
+	// 若用户刚好重装了该应用（程序目录回来了），这里就不该再删它的数据。
+	if rule.dirMode {
+		freed, dirs, failures := cleanOrphanAppDirs(snap, selected)
+		s.scanMu.Lock()
+		if s.candidate[req.Category] != nil {
+			for path := range snap {
+				if len(selected) > 0 && !selected[path] {
+					continue
+				}
+				delete(s.candidate[req.Category], path)
+			}
+			if len(s.candidate[req.Category]) == 0 {
+				delete(s.candidate, req.Category)
+			}
+		}
+		s.scanMu.Unlock()
+		ok(w, map[string]any{
+			"freedBytes": freed, "files": dirs, "failures": failures,
+			"freedText": fmtBytes(freed),
+		})
+		return
+	}
+
 	var freed, files int64
 	var failures []string
 	for path, size := range snap {
@@ -446,6 +605,49 @@ func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
 		"failures":   failures,
 		"freedText":  fmtBytes(freed),
 	})
+}
+
+// cleanOrphanAppDirs 整目录删除已卸载应用残留。
+// 三重复核：①候选路径必须仍在「当前孤儿集合」里（重装过就不删）；
+// ②路径形状必须是 @appdata/@apptemp 的直接子级；③必须是非符号链接的真实目录。
+func cleanOrphanAppDirs(snap map[string]int64, selected map[string]bool) (freed, dirs int64, failures []string) {
+	current := map[string]bool{}
+	for _, d := range fnosOrphanAppDirs() {
+		current[filepath.Clean(d)] = true
+	}
+	for path, size := range snap {
+		if len(selected) > 0 && !selected[path] {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if !current[clean] {
+			failures = append(failures, path+": 应用已重新安装或目录已不存在（拒绝）")
+			continue
+		}
+		if !isFnosAppDirPath(clean) {
+			failures = append(failures, path+": 路径形状不符（拒绝）")
+			continue
+		}
+		if hasMountUnder(clean) {
+			failures = append(failures, path+": 目录内有挂载点（拒绝，避免删到挂载数据）")
+			continue
+		}
+		fi, err := os.Lstat(clean)
+		if err != nil {
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			failures = append(failures, path+": 不是真实目录（拒绝）")
+			continue
+		}
+		if err := os.RemoveAll(clean); err != nil {
+			failures = append(failures, path+": "+err.Error())
+			continue
+		}
+		freed += size
+		dirs++
+	}
+	return freed, dirs, failures
 }
 
 // underWhitelist 清理前的最后一道硬闸：路径必须精确落在该分类白名单根之下。

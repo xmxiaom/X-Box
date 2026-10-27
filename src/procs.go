@@ -330,10 +330,124 @@ func listSystemdServices() []ServiceEntry {
 
 // FnosApp fnOS 应用：程序/数据目录 + 是否有进程在运行
 type FnosApp struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	Running bool   `json:"running"`
-	PIDs    []int  `json:"pids"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Running   bool   `json:"running"`
+	PIDs      []int  `json:"pids"`
+	Installed bool   `json:"installed"`      // 有有效程序目录 = 应用仍在安装状态
+	Orphan    bool   `json:"orphan"`         // 仅剩数据目录：应用已卸载，数据没删干净
+	DataPath  string `json:"dataPath,omitempty"` // 数据目录（未被卸载清理）
+	ProgPath  string `json:"progPath,omitempty"` // 程序目录
+}
+
+// fnOS 应用目录的扫描位置。抽成变量是为了让测试能把它们指到临时目录，
+// 同时保证「进程页判活」与「垃圾清理找残留」用的是同一份路径定义。
+var (
+	fnosProgPatterns = []string{"/usr/local/apps/*", "/var/apps/*"}
+	fnosDataPatterns = []string{"/vol*/@appdata/*", "/usr/local/apps/@appdata/*"}
+	fnosTempPatterns = []string{"/vol*/@apptemp/*"}
+	fnosProcRoot     = "/proc"
+)
+
+// fnosSystemAppPrefixes 系统内置应用名前缀：这类应用的数据目录即使没有同名程序目录，
+// 也属于系统自带数据，绝不能当「卸载残留」清掉。
+var fnosSystemAppPrefixes = []string{"trim.", "sys.", "fnos.", "system."}
+
+// isFnosSystemApp 是否系统内置应用（按名字前缀判定）
+func isFnosSystemApp(name string) bool {
+	low := strings.ToLower(name)
+	for _, p := range fnosSystemAppPrefixes {
+		if strings.HasPrefix(low, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// realDir 返回真实存在的目录路径（跟随符号链接）。
+// 关键：/var/apps/<名> 是符号链接，卸载后常留下悬空链接——
+// 旧实现用 Glob 直接收下，导致已卸载的应用仍以「已安装」身份出现。
+func realDir(path string) string {
+	fi, err := os.Stat(path) // Stat 会跟随符号链接
+	if err != nil || !fi.IsDir() {
+		return ""
+	}
+	return path
+}
+
+// fnosAppDirs 扫描 fnOS 应用目录，返回「小写应用名 → 目录集合」。
+// 程序目录只收真实存在的目录（悬空符号链接丢弃），数据/临时目录按原样收。
+type fnosAppDirs struct {
+	name string
+	prog string
+	data string
+	temp string
+}
+
+func scanFnosAppDirs() map[string]*fnosAppDirs {
+	apps := map[string]*fnosAppDirs{}
+	get := func(name string) *fnosAppDirs {
+		k := strings.ToLower(name)
+		a, ok := apps[k]
+		if !ok {
+			a = &fnosAppDirs{name: name}
+			apps[k] = a
+		}
+		return a
+	}
+	collect := func(patterns []string, assign func(a *fnosAppDirs, dir string)) {
+		for _, pat := range patterns {
+			hits, _ := filepath.Glob(pat)
+			for _, d := range hits {
+				name := filepath.Base(d)
+				// @appdata / @apptemp 这类聚合目录本身不是应用
+				if name == "" || name == "." || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "@") {
+					continue
+				}
+				assign(get(name), d)
+			}
+		}
+	}
+	// 程序目录：只认真实目录（悬空符号链接 = 已卸载）
+	collect(fnosProgPatterns, func(a *fnosAppDirs, dir string) {
+		if a.prog == "" {
+			if real := realDir(dir); real != "" {
+				a.prog = real
+			}
+		}
+	})
+	collect(fnosDataPatterns, func(a *fnosAppDirs, dir string) {
+		if a.data == "" && realDir(dir) != "" {
+			a.data = dir
+		}
+	})
+	collect(fnosTempPatterns, func(a *fnosAppDirs, dir string) {
+		if a.temp == "" && realDir(dir) != "" {
+			a.temp = dir
+		}
+	})
+	return apps
+}
+
+// fnosOrphanAppDirs 已卸载应用的残留目录：有数据/临时目录，但没有有效程序目录。
+// 系统内置应用（trim.* 等）一律排除，避免把人家的数据清掉。
+func fnosOrphanAppDirs() []string {
+	dirs := scanFnosAppDirs()
+	var out []string
+	for _, a := range dirs {
+		if a.prog != "" || isFnosSystemApp(a.name) {
+			continue
+		}
+		// 只有 @appdata 残留才算「应用数据」；@apptemp 也算残留（临时目录）
+		if a.data != "" {
+			out = append(out, a.data)
+		}
+		if a.temp != "" {
+			out = append(out, a.temp)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // fnosAppCache 缓存应用清单：进程页每 3s 拉一次，扫描 /proc 读 cmdline/cwd/exe 不便宜，
@@ -378,79 +492,48 @@ func appNameByPID() map[int]string {
 //   - 程序目录：/usr/local/apps/<名>/（/var/apps/<名> 多为其符号链接）
 //   - 数据目录：/vol*/@appdata/<名>/ 或 /usr/local/apps/@appdata/<名>/
 //
-// 旧实现只扫数据目录、且只按「cmdline 含 /@appdata/<名>/」判活，
-// 导致装在程序目录的应用整条缺失、运行中的应用被误判为未运行。
-// 现合并两类目录建清单，判活改为三重匹配：
-// cmdline 命中路径别名 / cwd 落在应用目录下 / exe 落在应用目录下。
+// 只有程序目录有效才算「已安装」；只剩数据目录的是卸载残留（Orphan），
+// 进程页默认不展示，垃圾清理里可整目录删除。
+// 判活三重匹配：cmdline 命中路径 / cwd 落在目录下 / exe 落在目录下。
 func listFnosApps() []FnosApp {
-	type appInfo struct {
-		name    string   // 首次出现的原始名
-		progDir string   // 程序目录
-		dataDir string   // 数据目录
-		markers []string // 判活用路径前缀（均带尾斜杠）
-		running bool
-		pids    []int
-	}
-	apps := map[string]*appInfo{}
-	get := func(name string) *appInfo {
-		k := strings.ToLower(name)
-		a, ok := apps[k]
-		if !ok {
-			a = &appInfo{name: name}
-			apps[k] = a
+	dirs := scanFnosAppDirs()
+
+	out := make([]FnosApp, 0, len(dirs))
+	for _, a := range dirs {
+		if a.prog == "" && a.data == "" {
+			// 只有 @apptemp 的条目不是应用（纯临时残留，归垃圾清理）
+			continue
 		}
-		return a
-	}
-	add := func(dir string, prog bool) {
-		name := filepath.Base(dir)
-		if name == "" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "@") {
-			return // @appdata 等非应用目录
+		app := FnosApp{
+			Name:      a.name,
+			Installed: a.prog != "",
+			Orphan:    a.prog == "" && a.data != "",
+			ProgPath:  a.prog,
+			DataPath:  a.data,
 		}
-		a := get(name)
-		if prog {
-			if a.progDir == "" {
-				a.progDir = dir
-			}
-		} else if a.dataDir == "" {
-			a.dataDir = dir
+		if a.data != "" {
+			app.Path = a.data // 有数据目录时优先展示数据目录（沿用旧展示）
+		} else {
+			app.Path = a.prog
 		}
+		out = append(out, app)
 	}
 
-	// 程序目录（/usr/local/apps 优先；/var/apps 符号链接按名去重）
-	if dirs, err := filepath.Glob("/usr/local/apps/*"); err == nil {
-		for _, d := range dirs {
-			add(d, true)
+	// 判活标记：程序目录 + /var/apps 别名 + 数据目录
+	markers := make(map[string][]string, len(out))
+	for _, a := range out {
+		var ms []string
+		if a.ProgPath != "" {
+			ms = append(ms, a.ProgPath+"/", "/var/apps/"+a.Name+"/")
 		}
-	}
-	if dirs, err := filepath.Glob("/var/apps/*"); err == nil {
-		for _, d := range dirs {
-			add(d, true)
+		if a.DataPath != "" {
+			ms = append(ms, a.DataPath+"/")
 		}
-	}
-	// 数据目录
-	if dirs, err := filepath.Glob("/vol*/@appdata/*"); err == nil {
-		for _, d := range dirs {
-			add(d, false)
-		}
-	}
-	if dirs, err := filepath.Glob("/usr/local/apps/@appdata/*"); err == nil {
-		for _, d := range dirs {
-			add(d, false)
-		}
-	}
-
-	// 每个应用的判活标记：程序目录 + /var/apps 别名 + 数据目录
-	for _, a := range apps {
-		if a.progDir != "" {
-			a.markers = append(a.markers, a.progDir+"/", "/var/apps/"+a.name+"/")
-		}
-		if a.dataDir != "" {
-			a.markers = append(a.markers, a.dataDir+"/")
-		}
+		markers[a.Name] = ms
 	}
 
 	// 扫描 /proc，按标记判活
-	pids, _ := filepath.Glob("/proc/[0-9]*")
+	pids, _ := filepath.Glob(fnosProcRoot + "/[0-9]*")
 	for _, pdir := range pids {
 		pid, _ := strconv.Atoi(filepath.Base(pdir))
 		cmdline := ""
@@ -459,9 +542,9 @@ func listFnosApps() []FnosApp {
 		}
 		cwd, _ := os.Readlink(filepath.Join(pdir, "cwd"))
 		exe, _ := os.Readlink(filepath.Join(pdir, "exe"))
-		for _, a := range apps {
+		for i := range out {
 			hit := false
-			for _, m := range a.markers {
+			for _, m := range markers[out[i].Name] {
 				dir := strings.TrimSuffix(m, "/")
 				if strings.Contains(cmdline, m) ||
 					(cwd != "" && (cwd == dir || strings.HasPrefix(cwd, m))) ||
@@ -471,31 +554,26 @@ func listFnosApps() []FnosApp {
 				}
 			}
 			if hit {
-				a.running = true
-				a.pids = append(a.pids, pid)
+				out[i].Running = true
+				out[i].PIDs = append(out[i].PIDs, pid)
 			}
 		}
 	}
 
-	out := make([]FnosApp, 0, len(apps))
-	for _, a := range apps {
-		app := FnosApp{Name: a.name, Running: a.running}
-		if a.dataDir != "" {
-			app.Path = a.dataDir // 有数据目录时优先展示数据目录（沿用旧展示）
-		} else {
-			app.Path = a.progDir
+	for i := range out {
+		if len(out[i].PIDs) > 1 {
+			sort.Ints(out[i].PIDs)
 		}
-		app.PIDs = a.pids
-		if len(app.PIDs) > 1 {
-			sort.Ints(app.PIDs)
-		}
-		out = append(out, app)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		// 已安装的排前面，残留的沉底
+		if out[i].Installed != out[j].Installed {
+			return out[i].Installed
+		}
 		if out[i].Running != out[j].Running {
 			return out[i].Running
 		}
-		return out[i].Name < out[j].Name
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out
 }
