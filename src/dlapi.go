@@ -3,16 +3,17 @@ package main
 // 下载板块 HTTP 接口（/api/dl/* 与 /api/dlmusic/*）。
 //
 // 路由：
-//   GET  /api/dl/search?q=       磁力聚合搜索（多源并发）
-//   GET  /api/dl/config          配置（目录 + 三种下载器连接信息）
-//   POST /api/dl/config          保存配置
-//   POST /api/dl/probe           立即探测各下载器
-//   POST /api/dl/start           提交磁力到下载器
-//   GET  /api/dl/tasks           提交历史（会话级）
-//   GET  /api/dlmusic/search?q=&page=  网易云搜索
-//   POST /api/dlmusic/start      下载一首（免费曲直下到音乐目录）
-//   GET  /api/dlmusic/tasks      音乐下载任务/进度
-//   POST /api/dlmusic/cancel     取消一个音乐下载任务
+//   GET  /api/dl/search?q=        磁力聚合搜索（多源并发）
+//   GET  /api/dl/config           配置（视频/音乐目录）
+//   POST /api/dl/config           保存配置
+//   POST /api/dl/start            提交磁力到内置 BT 引擎（kind=video/music）
+//   GET  /api/dl/tasks            统一任务列表（BT 视频/音乐 + 直链音乐）
+//   POST /api/dl/remove?id=       移除一个终态任务
+//   POST /api/dl/cancel?id=       取消任务（BT/音乐通用）
+//   GET  /api/dlmusic/search      网易云+酷我+BT 并行搜索
+//   POST /api/dlmusic/start       音乐直链下载入队
+//   GET  /api/dlmusic/tasks       音乐任务列表（分页兼容旧前端）
+//   POST /api/dlmusic/cancel      取消一个音乐任务
 
 import (
 	"context"
@@ -45,47 +46,20 @@ func (s *Server) handleDlSearch(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"items": items, "sources": stats})
 }
 
-// dlCfgView 配置给前端看时隐藏密码（只报是否已配置）
-func dlCfgView(cfg DlConfig, hidePass bool) map[string]any {
-	clients := map[string]any{}
-	one := func(kind string, c DlClientCfg) map[string]any {
-		v := map[string]any{"base": c.Base, "user": c.User, "secret": c.Secret}
-		if hidePass {
-			v["pass"] = boolStrMask(c.Pass)
-		} else {
-			v["pass"] = c.Pass
-		}
-		return v
-	}
-	clients["qbittorrent"] = one("qbittorrent", cfg.Clients.QBittorrent)
-	clients["transmission"] = one("transmission", cfg.Clients.Transmission)
-	clients["aria2"] = one("aria2", cfg.Clients.Aria2)
-	return map[string]any{
+// handleDlConfigGet GET /api/dl/config
+func (s *Server) handleDlConfigGet(w http.ResponseWriter, r *http.Request) {
+	cfg := loadDlConfig()
+	ok(w, map[string]any{
 		"videoDir": cfg.VideoDir,
 		"musicDir": cfg.MusicDir,
-		"clients":  clients,
 		"suggest": map[string]string{
 			"video": dlDefaultDir("video"),
 			"music": dlDefaultDir("music"),
 		},
-	}
+	})
 }
 
-// boolStrMask 密码掩码（未配置为空串）
-func boolStrMask(s string) string {
-	if s == "" {
-		return ""
-	}
-	return "已设置"
-}
-
-// handleDlConfigGet GET /api/dl/config
-func (s *Server) handleDlConfigGet(w http.ResponseWriter, r *http.Request) {
-	cfg := loadDlConfig()
-	ok(w, dlCfgView(cfg, false))
-}
-
-// handleDlConfigSave POST /api/dl/config —— 应用成组校验后落盘
+// handleDlConfigSave POST /api/dl/config
 func (s *Server) handleDlConfigSave(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
 	if err != nil {
@@ -124,63 +98,18 @@ func (s *Server) handleDlConfigSave(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.MusicDir = ms
 	}
-	if cl, has := in["clients"]; has {
-		if m, isMap := cl.(map[string]any); isMap {
-			pick := func(kind string) (DlClientCfg, bool) {
-				raw, ok0 := m[kind]
-				if !ok0 || raw == nil {
-					return DlClientCfg{}, false
-				}
-				sub, ok1 := raw.(map[string]any)
-				if !ok1 {
-					return DlClientCfg{}, false
-				}
-				// 前端提交的密码是掩码值「已设置」：保留旧密码
-				pass := toStr(sub["pass"])
-				if pass == "" || pass == "已设置" {
-					pass = ""
-				}
-				if pass == "" {
-					switch kind {
-					case "qbittorrent":
-						pass = cfg.Clients.QBittorrent.Pass
-					case "transmission":
-						pass = cfg.Clients.Transmission.Pass
-					case "aria2":
-						pass = cfg.Clients.Aria2.Secret
-					}
-				}
-				out := DlClientCfg{
-					Base:   strings.TrimSpace(toStr(sub["base"])),
-					User:   strings.TrimSpace(toStr(sub["user"])),
-					Secret: strings.TrimSpace(toStr(sub["secret"])),
-				}
-				switch kind {
-				case "qbittorrent":
-					out.Pass = pass
-				case "transmission":
-					out.Pass = pass
-				case "aria2":
-					out.Secret = pass
-				}
-				return out, true
-			}
-			if v, ok2 := pick("qbittorrent"); ok2 {
-				cfg.Clients.QBittorrent = v
-			}
-			if v, ok2 := pick("transmission"); ok2 {
-				cfg.Clients.Transmission = v
-			}
-			if v, ok2 := pick("aria2"); ok2 {
-				cfg.Clients.Aria2 = v
-			}
-		}
-	}
 	if err := saveDlConfig(cfg); err != nil {
 		fail(w, 500, "配置写入失败："+err.Error())
 		return
 	}
-	ok(w, dlCfgView(cfg, true))
+	ok(w, map[string]any{
+		"videoDir": cfg.VideoDir,
+		"musicDir": cfg.MusicDir,
+		"suggest": map[string]string{
+			"video": dlDefaultDir("video"),
+			"music": dlDefaultDir("music"),
+		},
+	})
 }
 
 // toStr json any → 字符串
@@ -191,13 +120,8 @@ func toStr(v any) string {
 	return ""
 }
 
-// handleDlProbe POST /api/dl/probe
-func (s *Server) handleDlProbe(w http.ResponseWriter, r *http.Request) {
-	cfg := loadDlConfig()
-	ok(w, map[string]any{"results": dlProbeAll(cfg)})
-}
-
-// handleDlStart POST /api/dl/start {magnet, title}
+// handleDlStart POST /api/dl/start {magnet, title, kind}
+// kind=video（默认）用 videoDir；kind=music 用 musicDir（音乐 BT 兜底）。
 func (s *Server) handleDlStart(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 256<<10))
 	if err != nil {
@@ -207,6 +131,7 @@ func (s *Server) handleDlStart(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Magnet string `json:"magnet"`
 		Title  string `json:"title"`
+		Kind   string `json:"kind"`
 	}
 	if json.Unmarshal(body, &in) != nil || strings.TrimSpace(in.Magnet) == "" {
 		fail(w, 400, "缺少磁力链接")
@@ -216,34 +141,89 @@ func (s *Server) handleDlStart(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "不是有效的磁力链接")
 		return
 	}
-	if len(in.Magnet) > 240<<10 {
+	if len(in.Magnet) > 4<<20 {
 		fail(w, 400, "磁力链接过长")
 		return
 	}
 	cfg := loadDlConfig()
-	dir := strings.TrimSpace(cfg.VideoDir)
-	if dir == "" {
-		dir = dlDefaultDir("video")
+	kind := in.Kind
+	if kind != "music" {
+		kind = "video"
 	}
-	kind, err := dlSubmit(cfg, in.Magnet, dir)
+	dir := strings.TrimSpace(cfg.VideoDir)
+	defMsg := ""
+	if kind == "music" {
+		dir = strings.TrimSpace(cfg.MusicDir)
+		if dir == "" {
+			dir = dlDefaultDir("music")
+		}
+		if dir == "" {
+			fail(w, 400, "请先在「音乐下载」的设置里选择音乐目录")
+			return
+		}
+	} else {
+		if dir == "" {
+			dir = dlDefaultDir("video")
+			defMsg = "（未设置目录，使用缺省 " + dir + "）"
+		}
+		if dir == "" {
+			fail(w, 400, "请先在「设置」里选择视频下载目录")
+			return
+		}
+	}
+	t, err := dlStartBT(in.Magnet, dir, in.Title)
 	if err != nil {
-		dlHistPush(dlHistEntry{At: time.Now(), Title: in.Title, OK: false, Msg: err.Error()})
 		fail(w, 500, err.Error())
 		return
 	}
-	msg := "已提交到 " + kind
-	if dir != "" {
-		msg += "，目标目录 " + dir
-	} else {
-		msg += "（保存目录跟随下载器默认设置）"
+	msg := "已加入下载列表"
+	if defMsg != "" {
+		msg += defMsg
 	}
-	dlHistPush(dlHistEntry{At: time.Now(), Title: in.Title, Client: kind, OK: true, Msg: msg})
-	ok(w, map[string]any{"client": kind, "msg": msg, "dir": dir})
+	ok(w, map[string]any{"taskId": t.ID, "msg": msg, "dir": dir})
 }
 
-// handleDlTasks GET /api/dl/tasks
+// handleDlTasks GET /api/dl/tasks —— 统一任务列表
 func (s *Server) handleDlTasks(w http.ResponseWriter, r *http.Request) {
-	ok(w, map[string]any{"tasks": dlHistList()})
+	tasks := dlUnifiedTasks()
+	running := false
+	for _, t := range tasks {
+		switch t.Status {
+		case "running", "fetching", "downloading", "pending":
+			running = true
+		}
+	}
+	ok(w, map[string]any{"tasks": tasks, "running": running})
+}
+
+// handleDlRemove POST /api/dl/remove?id=
+func (s *Server) handleDlRemove(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		fail(w, 400, "缺少任务 id")
+		return
+	}
+	if strings.HasPrefix(id, "bt") {
+		btRemove(id)
+	} else {
+		dlMusRemove(id)
+	}
+	ok(w, nil)
+}
+
+// handleDlCancel POST /api/dl/cancel?id= —— 统一取消（BT / 音乐）
+func (s *Server) handleDlCancel(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		fail(w, 400, "缺少任务 id")
+		return
+	}
+	if strings.HasPrefix(id, "bt") {
+		btCancel(id)
+	} else {
+		dlMusCancel(id)
+	}
+	ok(w, nil)
 }
 
 // ---------- 音乐 ----------
@@ -388,15 +368,19 @@ func (s *Server) handleDlMusicStart(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"task": st})
 }
 
-// handleDlMusicTasks GET /api/dlmusic/tasks
+// handleDlMusicTasks GET /api/dlmusic/tasks（数据源同一视图，music 过滤）
 func (s *Server) handleDlMusicTasks(w http.ResponseWriter, r *http.Request) {
-	tasks := dlMusTaskList()
+	var tasks []DlTaskView
 	running := false
-	for _, t := range tasks {
-		if t.Status == "running" {
-			running = true
-			break
+	for _, t := range dlUnifiedTasks() {
+		if t.Type != "music" {
+			continue
 		}
+		switch t.Status {
+		case "running", "downloading":
+			running = true
+		}
+		tasks = append(tasks, t)
 	}
 	ok(w, map[string]any{"tasks": tasks, "running": running})
 }
@@ -410,4 +394,17 @@ func (s *Server) handleDlMusicCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	dlMusCancel(id)
 	ok(w, nil)
+}
+
+// dlMusRemove 移除音乐终态任务（与 DlTaskView 状态对齐）
+func dlMusRemove(id string) {
+	dlMusInit()
+	dlMusStore.mu.Lock()
+	t, ok0 := dlMusStore.tasks[id]
+	dlMusStore.mu.Unlock()
+	if ok0 && t.Status != "running" {
+		dlMusStore.mu.Lock()
+		delete(dlMusStore.tasks, id)
+		dlMusStore.mu.Unlock()
+	}
 }

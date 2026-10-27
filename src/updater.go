@@ -263,8 +263,17 @@ func safeDownloadDir(dir string) (string, bool) {
 		return "", false
 	}
 	// 系统敏感目录黑名单（这些位置一律不接受）
-	for _, bad := range []string{"/", "/etc", "/usr", "/bin", "/sbin", "/boot", "/sys", "/proc", "/dev", "/lib", "/lib64", "/var/lib"} {
+	badSys := []string{"/", "/etc", "/usr", "/bin", "/sbin", "/boot", "/sys", "/proc", "/dev", "/lib", "/lib64", "/var/lib"}
+	lower := strings.ToLower(clean)
+	for _, bad := range badSys {
 		if clean == bad || strings.HasPrefix(clean, bad+"/") {
+			return "", false
+		}
+	}
+	// Windows 系统盘敏感目录（运行环境是 Linux fnOS，跑 Windows 单测时也守住底线；
+	// 注意不含 C:\USERS：用户目录下本就是合法的下载位置）
+	for _, bad := range []string{"C:\\WINDOWS", "C:\\PROGRAM FILES", "C:\\PROGRAM FILES (X86)", "C:\\PROGRAMDATA"} {
+		if lower == strings.ToLower(bad) || strings.HasPrefix(lower, strings.ToLower(bad)+"\\") {
 			return "", false
 		}
 	}
