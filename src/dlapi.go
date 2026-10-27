@@ -247,6 +247,7 @@ func (s *Server) handleDlStart(w http.ResponseWriter, r *http.Request) {
 	if defMsg != "" && !dup {
 		msg += defMsg
 	}
+	dlPersistTouch() // 立刻落盘：任务刚建就被杀（升级重启）也不丢
 	ok(w, map[string]any{"taskId": t.ID, "msg": msg, "dir": dir, "dup": dup})
 }
 
@@ -283,6 +284,7 @@ func (s *Server) handleDlRemove(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, err.Error())
 		return
 	}
+	dlPersistTouch()
 	ok(w, map[string]any{"files": n})
 }
 
@@ -298,6 +300,7 @@ func (s *Server) handleDlCancel(w http.ResponseWriter, r *http.Request) {
 	} else {
 		dlMusCancel(id)
 	}
+	dlPersistTouch()
 	ok(w, nil)
 }
 
@@ -317,6 +320,7 @@ func (s *Server) handleDlPause(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "该任务当前不可暂停")
 		return
 	}
+	dlPersistTouch()
 	ok(w, nil)
 }
 
@@ -336,6 +340,7 @@ func (s *Server) handleDlResume(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "该任务当前不可继续")
 		return
 	}
+	dlPersistTouch()
 	ok(w, nil)
 }
 
@@ -349,6 +354,7 @@ func (s *Server) handleDlPauseAll(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	dlPersistTouch()
 	ok(w, map[string]any{"count": n})
 }
 
@@ -362,6 +368,7 @@ func (s *Server) handleDlResumeAll(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	dlPersistTouch()
 	ok(w, map[string]any{"count": n})
 }
 
@@ -374,6 +381,7 @@ func (s *Server) handleDlCancelAll(w http.ResponseWriter, r *http.Request) {
 			n++
 		}
 	}
+	dlPersistTouch()
 	ok(w, map[string]any{"count": n})
 }
 
@@ -381,6 +389,7 @@ func (s *Server) handleDlCancelAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDlClearDone(w http.ResponseWriter, r *http.Request) {
 	n := btClearDone()
 	n += dlMusClearDone()
+	dlPersistTouch()
 	ok(w, map[string]any{"count": n})
 }
 
@@ -388,6 +397,8 @@ func (s *Server) handleDlClearDone(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDlClearAll(w http.ResponseWriter, r *http.Request) {
 	n := btClearAll()
 	n += dlMusClearAll()
+	dlPendingClear() // 待重试（目录未就绪）的记录也一并丢弃，否则下次快照又写回去
+	dlPersistTouch() // 清空必须立刻落盘，否则重启后任务又冒回来
 	ok(w, map[string]any{"count": n})
 }
 
@@ -537,6 +548,7 @@ func (s *Server) handleDlMusicStart(w http.ResponseWriter, r *http.Request) {
 	if dup {
 		msg = "该歌曲已在下载列表中，无需重复添加"
 	}
+	dlPersistTouch()
 	ok(w, map[string]any{"task": st, "msg": msg, "dup": dup})
 }
 
@@ -565,6 +577,7 @@ func (s *Server) handleDlMusicCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dlMusCancel(id)
+	dlPersistTouch()
 	ok(w, nil)
 }
 

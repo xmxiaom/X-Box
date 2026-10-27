@@ -233,6 +233,8 @@ type btTask struct {
 	prep       *btPrepared        // 文件布局（续传复用，避免 uniquePath 改名/截断）
 	trackers   []string           // 合并后的 tracker 列表（续传重新拉起时复用）
 
+	reuseFiles bool // 断点恢复（v1.3.52）：预创建文件时沿用原文件名，不再造「xxx (1)」副本
+
 	testPeers []string // 测试注入：只直连这些地址（跳过 tracker/DHT）
 }
 
@@ -1094,12 +1096,16 @@ func btPrepareFiles(t *btTask, meta *btMeta) (*btPrepared, error) {
 	}
 	var off int64
 	var outs []btFileOut
+	reuse := t.reuseFiles // 断点恢复：沿用原文件名（否则每次重启都会多一个「xxx (1)」）
 	if len(meta.Files) == 0 {
 		base := btCleanName(meta.Name)
 		if base == "" {
 			return nil, fmt.Errorf("种子文件名异常")
 		}
-		path := dlMusUniquePath(t.Dir, base)
+		path := filepath.Join(t.Dir, base)
+		if !reuse {
+			path = dlMusUniquePath(t.Dir, base)
+		}
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
 			return nil, fmt.Errorf("创建文件失败：%s", err.Error())

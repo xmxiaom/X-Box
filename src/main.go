@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.51"
+	version = "1.3.52"
 	// 面板监听策略：生产形态只监听 fnOS 统一网关 unix socket（XBOX_SOCKET），
 	// 登录态由网关注入；不监听任何 TCP 端口。仅 XBOX_DEV=1 时开 127.0.0.1 回环
 	// 端口供本地开发/自动化测试。请勿改为 ":8899" 通配绑定。
@@ -171,6 +171,8 @@ func main() {
 
 	initAppBase()
 	btInit()                 // 内置 BT 引擎（DHT + 元数据抓取 + 下载到配置目录）
+	dlRestoreTasks()         // 恢复上次退出/升级前的下载任务并自动续传（v1.3.52）
+	dlPersistHandleExit()    // SIGTERM/SIGINT 时先把下载任务快照落盘再退出
 	startPTYIdleReaper()     // 终端 PTY 空闲会话回收
 	srv.startSyncScheduler() // 网盘同步定时任务
 	cleanupLegacyReverseProxy() // 反向代理功能已移除，清掉早期版本留下的实例
