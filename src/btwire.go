@@ -33,7 +33,7 @@ const (
 	btMetaPieceLen = 16 << 10                           // 元数据分片 16KB
 	btMaxMetaSize  = 16 << 20                           // 元数据上限 16MB
 	btIOTimeout    = 45 * time.Second
-	btMetaPeerCap  = 30 * time.Second // 单个 peer 抓元数据全程上限（拨+握+取）；压制坏 peer 占坑
+	btMetaPeerCap  = 20 * time.Second // 单个 peer 抓元数据全程上限（拨+握+取）；压制坏 peer 占坑（v1.3.49 从 30s 收紧：配合的 seeder 1-2s 内就该给全元数据）
 )
 
 // btSelfID 进程级 peer id（-XB 前缀 + 随机 16 字节）
@@ -199,7 +199,7 @@ func btFetchMetaFromPeerRaw(ctx context.Context, addr string, ih [20]byte) (*btM
 	if vp := os.Getenv("XBOX_META_DIAG_VERBOSE"); vp != "" && os.Getenv("XBOX_DEV") == "1" {
 		verbose = regexp.MustCompile(vp).MatchString(addr)
 	}
-	dialer := &net.Dialer{Timeout: 6 * time.Second}
+	dialer := &net.Dialer{Timeout: 3 * time.Second} // v1.3.49 从 6s 收紧：可连 peer 的 SYN 应答远快于此，死 peer 尽早吐回并发槽
 	dialOK := time.Now()
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {

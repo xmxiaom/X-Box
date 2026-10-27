@@ -466,7 +466,18 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // runDownload 执行后台下载（结果写回全局状态）。
+// v1.3.49 起改用与音乐下载器同源的断点续传方案（.part + HTTP Range + 自动重试）：
+// 此前是一次性 GET（10min 总超时、无续传），GitHub 大文件传输途中任何一次抖动
+// 都整单作废——这就是「更新下载不稳定」的根因。现在：网络中断自动从 .part 续传，
+// 30s 无进展判定空转主动重试，全部字节到齐才落正名。
 var downloadInProgress int64 // atomic：后台下载 fpk 进行中（同步引擎让路）
+
+const (
+	updDlMaxAttempts = 12               // 单次任务最多尝试轮数（每轮失败都从 .part 续）
+	updDlDeadline    = 30 * time.Minute // 整体时限（防死循环占后台）
+	updDlIdleWatch   = 30 * time.Second // 读空转看门狗：30s 一个字节都没来就断开重试
+	updDlMaxSize     = 512 << 20        // fpk 大小上限
+)
 
 func runDownload(rawURL string, isAPI bool, dst string) {
 	atomic.StoreInt64(&downloadInProgress, 1)
@@ -476,49 +487,148 @@ func runDownload(rawURL string, isAPI bool, dst string) {
 		dlRun, dlDone, dlErr = false, true, msg
 		dlMu.Unlock()
 	}
-	client := &http.Client{Timeout: 10 * time.Minute}
-	httpReq, err := http.NewRequest("GET", rawURL, nil)
+	setStage := func(bytes int64) {
+		dlMu.Lock()
+		if dlPW != nil {
+			dlPW.n = bytes
+		}
+		dlMu.Unlock()
+	}
+	part := dst + ".part"
+	deadline := time.Now().Add(updDlDeadline)
+	client := &http.Client{Timeout: 0} // 不设总超时：慢但在动就算活着，空转由看门狗管
+	for attempt := 1; attempt <= updDlMaxAttempts && time.Now().Before(deadline); attempt++ {
+		// 续传起点：.part 现有字节数
+		var off int64
+		if fi, err := os.Stat(part); err == nil {
+			off = fi.Size()
+			if off > updDlMaxSize {
+				os.Remove(part) // 脏数据，从头来
+				off = 0
+			}
+		}
+		setStage(off)
+		httpReq, err := http.NewRequest("GET", rawURL, nil)
+		if err != nil {
+			setFail("下载失败：" + err.Error())
+			return
+		}
+		if isAPI {
+			httpReq.Header.Set("Accept", "application/octet-stream") // API 资产端点：带此头返回二进制，否则 JSON
+		}
+		if off > 0 {
+			httpReq.Header.Set("Range", "bytes="+strconv.FormatInt(off, 10)+"-")
+		}
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			time.Sleep(3 * time.Second) // 网络抖动：稍候从 .part 继续
+			continue
+		}
+		// 416：.part 已到（或超过）文件总长——多半是上轮恰好下完但没来得及收尾
+		if resp.StatusCode == 416 {
+			resp.Body.Close()
+			if updFinishPart(part, dst, setFail) {
+				return
+			}
+			os.Remove(part) // 不是完整 fpk，重来
+			continue
+		}
+		if resp.StatusCode != 200 && resp.StatusCode != 206 {
+			resp.Body.Close()
+			setFail(fmt.Sprintf("下载失败（HTTP %d）", resp.StatusCode))
+			return
+		}
+		// 200 = 服务端忽略 Range 从头给 → 覆盖 .part 起点归零；206 = 续传被接受
+		base := off
+		if resp.StatusCode == 200 {
+			base = 0
+		}
+		var expect int64 = -1
+		if resp.ContentLength > 0 {
+			expect = base + resp.ContentLength
+		}
+		n, idle, cerr := updCopyWithWatch(resp.Body, part, base, setStage)
+		resp.Body.Close()
+		got := base + n
+		complete := cerr == nil && (got == expect || (expect < 0 && cerr == nil && !idle && n > 0))
+		if complete {
+			dlMu.Lock()
+			dlPath = dst
+			dlMu.Unlock()
+			updFinishPart(part, dst, setFail) // 校验+落正名（内部已置终态）
+			return
+		}
+		// 未完整：空转/中断——保留 .part 下一轮续传；短退避防打死服务器
+		backoff := time.Duration(attempt*3) * time.Second
+		if backoff > 15*time.Second {
+			backoff = 15 * time.Second
+		}
+		time.Sleep(backoff)
+	}
+	setFail("下载未完成：网络多次中断（已尝试续传 " + strconv.Itoa(updDlMaxAttempts) + " 轮），请检查 NAS 外网连通后重试（进度已保留，重试会接着下）")
+}
+
+// updCopyWithWatch 把响应体追加进 .part（base 起点前已存在）。
+// 返回 (本轮字节数, 是否空转终止, 错误)。空转 = idleWatch 内一个字节都没收到。
+func updCopyWithWatch(body io.Reader, part string, base int64, setStage func(int64)) (int64, bool, error) {
+	flags := os.O_CREATE | os.O_WRONLY
+	if base > 0 {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(part, flags, 0o644)
 	if err != nil {
-		setFail("下载失败：" + err.Error())
-		return
+		return 0, false, err
 	}
-	if isAPI {
-		httpReq.Header.Set("Accept", "application/octet-stream") // API 资产端点：带此头返回二进制，否则返回 JSON 元数据
+	defer f.Close()
+	var n int64
+	buf := make([]byte, 64<<10)
+	last := time.Now()
+	for {
+		nw, rerr := body.Read(buf)
+		if nw > 0 {
+			if _, werr := f.Write(buf[:nw]); werr != nil {
+				return n, false, werr
+			}
+			n += int64(nw)
+			last = time.Now()
+			setStage(base + n)
+			if base+n > updDlMaxSize {
+				return n, false, fmt.Errorf("超出大小上限")
+			}
+		}
+		if rerr == io.EOF {
+			return n, false, nil
+		}
+		if rerr != nil {
+			return n, false, rerr
+		}
+		if time.Since(last) > updDlIdleWatch {
+			return n, true, nil // 空转：主动断开，外层续传
+		}
 	}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		setFail("下载失败：" + err.Error())
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		setFail(fmt.Sprintf("下载失败（HTTP %d）", resp.StatusCode))
-		return
-	}
-	f, err := os.Create(dst)
-	if err != nil {
-		setFail("无法创建文件：" + err.Error())
-		return
-	}
-	n, cerr := io.Copy(io.MultiWriter(f, dlPW), io.LimitReader(resp.Body, 512<<20)) // 512MB 上限
-	f.Close()
-	dlMu.Lock()
-	dlPath = dst
-	dlMu.Unlock()
-	if cerr != nil || n < 1024 {
-		_ = os.Remove(dst)
-		setFail("下载不完整")
-		return
-	}
-	// 校验：fpk 是 zip 或 gzip 容器（fnpack 产物为 gzip）
-	if !isFpkFile(dst) {
-		_ = os.Remove(dst)
+}
+
+// updFinishPart 校验 .part 是有效 fpk 后落正名。返回 true 表示流程终结（成功或已报错）。
+func updFinishPart(part, dst string, setFail func(string)) bool {
+	if !isFpkFile(part) {
 		setFail("下载的文件不是有效的 fpk（非 zip/gzip 格式）")
-		return
+		os.Remove(part)
+		return true
+	}
+	if err := os.Rename(part, dst); err != nil {
+		// 目标可能已存在（上轮残留）：覆盖一次
+		os.Remove(dst)
+		if err2 := os.Rename(part, dst); err2 != nil {
+			setFail("保存文件失败：" + err2.Error())
+			return true
+		}
 	}
 	dlMu.Lock()
 	dlRun, dlDone, dlErr = false, true, ""
 	dlMu.Unlock()
+	return true
 }
 
 // isAllDigits 判断字符串是否全为数字（资产 ID 校验）。

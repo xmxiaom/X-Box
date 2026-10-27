@@ -52,7 +52,19 @@ func (s *Server) handleDlSearch(w http.ResponseWriter, r *http.Request) {
 	if len(items) > dlSearchLimits {
 		items = items[:dlSearchLimits]
 	}
-	ok(w, map[string]any{"items": items, "sources": stats})
+	resp := map[string]any{"items": items, "sources": stats, "q": q}
+	dlSearchLastSave("video", resp) // 留存最近一次搜索，重开应用可恢复
+	ok(w, resp)
+}
+
+// handleDlSearchLast GET /api/dl/search/last?kind=video|music
+// 返回最近一次搜索的完整响应（无缓存时 cache 为 null）
+func (s *Server) handleDlSearchLast(w http.ResponseWriter, r *http.Request) {
+	kind := r.URL.Query().Get("kind")
+	if kind != "music" {
+		kind = "video"
+	}
+	ok(w, map[string]any{"cache": dlSearchLastLoad(kind)})
 }
 
 // handleDlConfigGet GET /api/dl/config
@@ -421,14 +433,17 @@ func (s *Server) handleDlMusicSearch(w http.ResponseWriter, r *http.Request) {
 	}()
 	wg.Wait()
 	cfg := loadDlConfig()
-	ok(w, map[string]any{
+	resp := map[string]any{
 		"items": items,
 		"count": count,
 		"page":  page,
 		"dir":   dlMusMusicDir(cfg),
 		"kw":    kwItems,
 		"bt":    btItems,
-	})
+		"q":     q,
+	}
+	dlSearchLastSave("music", resp) // 留存最近一次搜索，重开应用可恢复
+	ok(w, resp)
 }
 
 // dlMusicBTSearch 音乐 BT 兜底搜索：TPB 音频区 + Nyaa 音频类目

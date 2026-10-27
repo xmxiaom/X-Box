@@ -46,6 +46,9 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 /* 含表格的列表页：纵向滚动交给 tblwrap，横向滚动条固定在列表区底部、始终可见（电脑端） */
 .sticky-list:has(> .tblwrap){overflow-y:hidden}
 .sticky-list:has(> .tblwrap) .tblwrap{height:100%;overflow-y:auto}
+/* 媒体页 vdl/mdl：面板自身是 flex 列（说明/搜索框/状态固定顶端），仅结果区滚动（v1.3.49） */
+#media-pane-vdl,#media-pane-mdl{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+#dlv-results,#dlm-results{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
 
 /* ===== 通用组件 ===== */
 .btn{border:none;border-radius:6px;padding:8px 16px;font-size:14px;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
@@ -568,8 +571,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="rows" id="sync-rows"></div>
       </div>
 
-      <!-- 媒体管理 -->
-      <div class="page" id="page-media">
+      <!-- 媒体管理（sticky-page：标题/子标签/搜索栏固定顶端，仅结果列表滚动 v1.3.49） -->
+      <div class="page sticky-page" id="page-media">
         <div class="page-head"><h2>媒体管理</h2><span class="sub" id="media-sub"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadMediaTasks()">刷新</button></div>
         <div class="media-tabs">
           <button class="mtab active" id="mtab-vdl" onclick="mediaSwitch('vdl')">⬇️ 视频下载</button>
@@ -579,7 +582,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         </div>
         <div id="media-pane-vdl" style="display:none"></div>
         <div id="media-pane-mdl" style="display:none"></div>
-        <div class="rows" id="media-rows" style="display:none"></div>
+        <div class="rows sticky-list" id="media-rows" style="display:none"></div>
       </div>
 
       <!-- DDNS -->
@@ -3279,6 +3282,7 @@ function dlVideoRender(){
   if(!dlVCfg) dlVideoLoadCfg(true);
   const kw = document.getElementById('dlv-kw');
   if(kw && !kw.value && dlVLastKw) kw.value = dlVLastKw;
+  dlVideoRestore(); // 恢复上次搜索结果（内存 → 服务端缓存）
 }
 
 let dlVLastKw = '';
@@ -3295,7 +3299,8 @@ async function dlVideoSearch(){
   try{
     const j = await api('/api/dl/search?q=' + encodeURIComponent(kw), {timeoutMs: 25000});
     if(seq !== dlVSearchSeq) return; // 已有更新的搜索，丢弃过期结果
-    dlVRender(j.items || [], j.sources || [], Date.now() - t0);
+    dlVLastResult = {kw: kw, items: j.items || [], sources: j.sources || [], ms: Date.now() - t0};
+    dlVRender(dlVLastResult.items, dlVLastResult.sources, dlVLastResult.ms);
   }catch(e){
     if(seq === dlVSearchSeq){
       document.getElementById('dlv-status').textContent = '';
@@ -3344,6 +3349,36 @@ function dlVRender(items, sources, ms){
 // 结果缓存：点下载时按引用取（避免把磁力塞进 onclick 撑爆 DOM）
 let dlVKeepList = [];
 function dlVKeep(it){ dlVKeepList.push(it); return dlVKeepList.length - 1; }
+
+// 最近一次搜索结果留存（v1.3.49）：切页/重开应用不丢，恢复展示免重搜
+let dlVLastResult = null;
+
+// dlVideoRestore 恢复上次搜索结果：内存里有就直接重渲染（切页回来），
+// 没有才问服务端要落盘缓存（重开应用）。用户点了新搜索则让位（seq 守卫）。
+function dlVideoRestore(){
+  if(dlVLastResult){
+    const kwEl = document.getElementById('dlv-kw');
+    if(kwEl && !kwEl.value && dlVLastResult.kw) kwEl.value = dlVLastResult.kw;
+    dlVRender(dlVLastResult.items, dlVLastResult.sources, dlVLastResult.ms);
+    const st = document.getElementById('dlv-status');
+    if(st && dlVLastResult.ms > 0) st.textContent = '上次搜索结果 · ' + st.textContent;
+    return;
+  }
+  const seq = dlVSearchSeq;
+  api('/api/dl/search/last?kind=video').then(j=>{
+    const c = j && j.cache;
+    if(!c || dlVLastResult || seq !== dlVSearchSeq) return; // 期间用户已搜过新的
+    const kwEl = document.getElementById('dlv-kw');
+    if(kwEl && !kwEl.value && c.q) kwEl.value = c.q;
+    const items = c.items || [];
+    dlVRender(items, c.sources || [], 0);
+    const st = document.getElementById('dlv-status');
+    if(st){
+      const at = c.at ? String(c.at).replace('T',' ').slice(0,16) : '';
+      st.textContent = '已恢复上次搜索结果' + (at ? '（' + at + '）' : '') + ' · 共 ' + items.length + ' 条';
+    }
+  }).catch(()=>{});
+}
 
 async function dlVideoSubmit(idx){
   const it = dlVKeepList[idx];
@@ -3625,6 +3660,8 @@ function dlConcurrencyPayload(pfx){
 
 /* ---------- 音乐下载：网易云搜索 + 免费曲直下 ---------- */
 let dlMTimer = null, dlMPage = 1, dlMLastQ = '';
+// 最近一次搜索结果留存（v1.3.49）：切页/重开应用不丢
+let dlMLastResult = null, dlMRestoreSeq = 0;
 
 function dlMusicRender(){
   const pane = document.getElementById('media-pane-mdl');
@@ -3640,6 +3677,28 @@ function dlMusicRender(){
     '<div id="dlm-results"></div>';
   const kw = document.getElementById('dlm-kw');
   if(kw && dlMLastQ) kw.value = dlMLastQ;
+  dlMusicRestore(); // 恢复上次搜索结果（内存 → 服务端缓存）
+}
+
+function dlMusicRestore(){
+  if(dlMLastResult){
+    dlMRenderResults(dlMLastResult.j);
+    return;
+  }
+  const seq = ++dlMRestoreSeq;
+  api('/api/dl/search/last?kind=music').then(j=>{
+    const c = j && j.cache;
+    if(!c || dlMLastResult || seq !== dlMRestoreSeq) return; // 期间用户已搜过新的
+    const kwEl = document.getElementById('dlm-kw');
+    if(kwEl && !kwEl.value && c.q) kwEl.value = c.q;
+    dlMLastQ = c.q || ''; dlMPage = c.page || 1;
+    dlMRenderResults(c);
+    const st = document.getElementById('dlm-status');
+    if(st){
+      const at = c.at ? String(c.at).replace('T',' ').slice(0,16) : '';
+      st.textContent = '已恢复上次搜索结果' + (at ? '（' + at + '）' : '') + ' · ' + st.textContent;
+    }
+  }).catch(()=>{});
 }
 
 async function dlMusicSearch(page){
@@ -3651,6 +3710,7 @@ async function dlMusicSearch(page){
   document.getElementById('dlm-go').disabled = true;
   try{
     const j = await api('/api/dlmusic/search?q=' + encodeURIComponent(kw) + '&page=' + dlMPage, {timeoutMs: 20000});
+    dlMLastResult = {q: kw, page: dlMPage, j: j}; // 留存本次结果（切页/重开可恢复）
     dlMRenderResults(j);
   }catch(e){
     document.getElementById('dlm-results').innerHTML = '<div class="empty">搜索失败：' + esc(e.message) + '</div>';

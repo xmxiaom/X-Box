@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.48"
+	version = "1.3.49"
 	// 面板监听策略：生产形态只监听 fnOS 统一网关 unix socket（XBOX_SOCKET），
 	// 登录态由网关注入；不监听任何 TCP 端口。仅 XBOX_DEV=1 时开 127.0.0.1 回环
 	// 端口供本地开发/自动化测试。请勿改为 ":8899" 通配绑定。
@@ -126,6 +126,7 @@ func main() {
 	mux.HandleFunc("GET /api/media/dirs", srv.handleMediaDirs)
 	// 视频下载：BT/磁力聚合搜索 + 内置 BT 引擎（v1.3.39 起不再外接下载器）
 	mux.HandleFunc("GET /api/dl/search", srv.handleDlSearch)
+	mux.HandleFunc("GET /api/dl/search/last", srv.handleDlSearchLast) // 搜索结果留存（v1.3.49）
 	mux.HandleFunc("GET /api/dl/config", srv.handleDlConfigGet)
 	mux.HandleFunc("POST /api/dl/config", srv.handleDlConfigSave)
 	mux.HandleFunc("POST /api/dl/start", srv.handleDlStart)

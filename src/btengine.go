@@ -39,7 +39,7 @@ import (
 const (
 	btMaxTasks       = 8               // 同时任务数上限（设置页可在 1-8 调）
 	btMetaTryTimeout = 3 * time.Minute // 元数据阶段总窗口（DHT 冷启动/冷门做种需要余地）
-	btMetaMaxPeers   = 24              // 元数据阶段并发拨号上限（先到先得；调大加速出种）
+	btMetaMaxPeers   = 64              // 元数据阶段并发拨号上限（先到先得；调大加速出种。v1.3.49 从 24 提高——48+ peer 的热门种 24 路不够吃，拨号失败快速回收后空槽闲置）
 	btMetaIPCap      = 3               // 同一 IP 最多尝试的端口数（防假 seeder 农场占满并发槽）
 	btMaxTrackers    = 20              // 合并磁力自带(含 udp://) + 公共 tracker 的上限
 	btMaxTorrentSz   = int64(4) << 30
@@ -214,6 +214,8 @@ type btTask struct {
 	speed int64
 
 	peersActive int
+	peersReady  int                 // 握手完成的可用连接数（展示用；peersActive 含拨号尝试，脉冲式涨跌会误导）
+	peerSeen    map[string]time.Time // 见过的候选地址 → 最近一次派工时间（持续补拨用，v1.3.49）
 	seenN       int                 // 已发现的候选 peer 数（fetching 态诊断展示）
 	inflight    map[string]time.Time // 最近连过的 peer（30s 内不重复拨）
 
@@ -635,22 +637,57 @@ func btRunOnce(t *btTask, trackers []string, ctx context.Context, genAtStart int
 			addr := a.String()
 			stall = 0
 			t.mu.Lock()
-			recent := false
-			if last, ok := t.inflight[addr]; ok && time.Since(last) < 30*time.Second {
-				recent = true
-			} else {
-				t.inflight[addr] = time.Now()
+			if t.peerSeen == nil {
+				t.peerSeen = map[string]time.Time{}
 			}
-			need := active < btTuneConns()
-			t.mu.Unlock()
-			if recent || !need {
+			t.peerSeen[addr] = time.Now() // 记入候选池（供持续补拨）
+			if last, ok := t.inflight[addr]; ok && time.Since(last) < 30*time.Second {
+				t.mu.Unlock()
+				continue // 30s 内拨过的地址不重拨
+			}
+			if need := active < btTuneConns(); !need {
+				// 并发已满：不标记 inflight——否则该地址被白跳过 30s，
+				// 空位释放后明明有候选却没人可拨（供给断档的帮凶）
+				t.mu.Unlock()
 				continue
 			}
+			t.inflight[addr] = time.Now()
+			t.mu.Unlock()
 			go runWorker(ctx, t, addr, &techMu, tech, full)
 		case <-time.After(4 * time.Second):
 			stall++
 			t.mu.Lock()
 			okTech := len(tech) == 0
+			// 持续补拨：候选池里 ≥45s 没派过工的地址重新投喂。此前供给完全依赖
+			// tracker 60s 突发 + 30s inflight 窗口，拨号失败后连接数塌到个位干等
+			// 下一轮突发——这就是连接数频繁大幅跳变（40→1）的根源。
+			if active := t.peersActive; active < btTuneConns() && t.testPeers == nil && len(t.peerSeen) > 0 {
+				now := time.Now()
+				refed := 0
+				for a2, last := range t.peerSeen {
+					if now.Sub(last) < 45*time.Second {
+						continue
+					}
+					t.peerSeen[a2] = now
+					if host, port, serr := net.SplitHostPort(a2); serr == nil {
+						if pn, perr := strconv.Atoi(port); perr == nil && pn > 0 {
+							feed(btPeerAddr{Host: host, Port: pn})
+							refed++
+						}
+					}
+					if refed >= 16 {
+						break
+					}
+				}
+				// 池子膨胀控制：只留最近的候选
+				if len(t.peerSeen) > 640 {
+					for a2, last := range t.peerSeen {
+						if now.Sub(last) > 15*time.Minute {
+							delete(t.peerSeen, a2)
+						}
+					}
+				}
+			}
 			t.mu.Unlock()
 			// 连接空转 20s：主动补拉一轮 peer（tracker 自身周期 60s，避免长时间零速空转）
 			if active == 0 && t.testPeers == nil && stall%5 == 0 && stall <= 25 {
@@ -1171,6 +1208,17 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 	if err := btWriteMsg(conn, 2, nil); err != nil { // interested
 		return
 	}
+	// 协议链路（握手→扩展握手→interested）全通才算「可用连接」：
+	// 此前展示的是含拨号尝试的 peersActive，tracker 每 60s 突发供给一轮
+	// 候选地址会先冲高再随失败塌落，前端表现为连接数频繁大幅跳变（40→1）。
+	t.mu.Lock()
+	t.peersReady++
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		t.peersReady--
+		t.mu.Unlock()
+	}()
 	var peerBF []bool
 	curPiece := -1
 	curBuf := []byte{}
@@ -1719,7 +1767,7 @@ func btViews() []DlTaskView {
 		if t.Status == "fetching" {
 			v.Peers = t.seenN // fetching 态展示「已发现的候选 peer 数」
 		} else {
-			v.Peers = t.peersActive
+			v.Peers = t.peersReady // 只数握手成功的真实连接（拨号尝试不算，否则随 tracker 突发供给脉冲式 40→1 跳变）
 		}
 		if t.meta != nil {
 			v.Total = t.meta.btTotalSize()
