@@ -966,6 +966,9 @@ function closeModal(){
   document.getElementById('modal-ok').onclick=null;
   const cancelBtn = document.getElementById('modal-cancel');
   if(cancelBtn) cancelBtn.style.display = '';
+  // 清掉按需插入的临时按钮（如移除任务时的「同时删除文件」），避免残留到下一个弹窗
+  const extra = document.getElementById('dl-rm-files');
+  if(extra) extra.remove();
 }
 function confirmDialog(title, bodyHTML, onOK, okText){
   document.getElementById('modal-title').textContent = title;
@@ -3345,9 +3348,10 @@ function dlVKeep(it){ dlVKeepList.push(it); return dlVKeepList.length - 1; }
 async function dlVideoSubmit(idx){
   const it = dlVKeepList[idx];
   if(!it) return;
-  toast('已加入下载列表');
   try{
-    await apiRetry('/api/dl/start', {method:'POST', body: JSON.stringify({magnet: it.magnet, title: it.title, kind: 'video'}), timeoutMs: 20000});
+    const j = await apiRetry('/api/dl/start', {method:'POST', body: JSON.stringify({magnet: it.magnet, title: it.title, kind: 'video'}), timeoutMs: 20000});
+    // 后端按 infohash 去重：命中已有任务时明确告知，不假装「已加入」
+    toast(j.msg || (j.dup ? '该资源已在下载列表中' : '已加入下载列表'), j.dup ? '' : 'ok');
     dlListRefresh();
   }catch(e){ toast(e.message,'err'); }
 }
@@ -3522,11 +3526,36 @@ async function dlTaskCancel(id){
   }catch(e){ toast(e.message,'err'); }
 }
 
+// dlTaskRemove 移除任务：先问是否同时删除已下载的文件（默认保留文件）
 async function dlTaskRemove(id){
-  try{
-    await apiRetry('/api/dl/remove?id=' + encodeURIComponent(id), {method:'POST'});
-    dlListRefresh();
-  }catch(e){ toast(e.message,'err'); }
+  const doRemove = async (delFiles) => {
+    try{
+      const j = await apiRetry('/api/dl/remove?id=' + encodeURIComponent(id) + (delFiles ? '&files=1' : ''), {method:'POST'});
+      const n = (j && j.files) || 0;
+      toast(delFiles ? ('已移除任务并删除 ' + n + ' 个文件') : '已移除任务（文件保留）', 'ok');
+      dlListRefresh();
+    }catch(e){ toast(e.message,'err'); }
+  };
+  const body =
+    '<div style="font-size:13px;line-height:1.8">' +
+      '仅从列表移除任务记录，还是同时删除已下载的文件？' +
+      '<div style="margin-top:10px;font-size:12.5px;color:var(--text3)">' +
+        '· <b>仅移除任务</b>：文件留在磁盘上，可继续用媒体库管理<br>' +
+        '· <b>同时删除文件</b>：一并删掉该任务已下载的内容，不可恢复' +
+      '</div>' +
+    '</div>';
+  confirmDialog('移除下载任务', body, ()=>{ doRemove(false); }, '仅移除任务');
+  // 在弹窗里追加一个「删除文件」按钮（confirmDialog 只有一个主按钮）
+  const foot = document.querySelector('#modal .foot');
+  if(foot && !document.getElementById('dl-rm-files')){
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn';
+    delBtn.id = 'dl-rm-files';
+    delBtn.style.cssText = 'background:var(--danger);color:#fff';
+    delBtn.textContent = '同时删除文件';
+    delBtn.onclick = () => { closeModal(); doRemove(true); };
+    foot.insertBefore(delBtn, foot.querySelector('#modal-ok'));
+  }
 }
 
 // ---------- 批量操作 ----------
@@ -3705,9 +3734,11 @@ async function dlMusicBT(idx){
 }
 
 async function dlMusicDL(s){
-  toast('已加入下载列表：' + s.name);
   try{
-    await apiRetry('/api/dlmusic/start', {method:'POST', body: JSON.stringify(s)});
+    const j = await apiRetry('/api/dlmusic/start', {method:'POST', body: JSON.stringify(s)});
+    // 后端按「来源+歌曲」去重：重复时明确告知，不重复下载
+    if(j.dup) toast(j.msg || ('「' + s.name + '」已在下载列表中'), '');
+    else toast(j.msg || ('已加入下载列表：' + s.name), 'ok');
     dlListRefresh();
   }catch(e){ toast(e.message,'err'); }
 }

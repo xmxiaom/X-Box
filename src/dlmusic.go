@@ -388,18 +388,55 @@ type dlMusReq struct {
 	Artist string    `json:"artist"`
 }
 
-// dlMusStart 创建下载任务
+// dlMusKey 任务去重键：同一来源的同一首歌只能有一个任务
+//   - kuwo    → rid（MUSIC_xxx）
+//   - netease → songID
+func dlMusKey(source string, songID int64, kw DlKwItem) string {
+	if source == "kuwo" {
+		if kw.Rid != "" {
+			return "kuwo:" + kw.Rid
+		}
+		return "kuwo:" + kw.Name + "/" + kw.Artist
+	}
+	if songID > 0 {
+		return "netease:" + strconv.FormatInt(songID, 10)
+	}
+	return "netease:" + kw.Name
+}
+
+// dlMusStart 创建下载任务（同一首歌已在列表则复用，不重复建任务/重复下载）
 func dlMusStart(cfg DlConfig, req dlMusReq) (*DlMusicTask, error) {
+	st, _, err := dlMusStartDedup(cfg, req)
+	return st, err
+}
+
+// dlMusStartDedup 创建任务并返回是否命中已有任务（dup=true 表示复用，未新建）
+func dlMusStartDedup(cfg DlConfig, req dlMusReq) (*DlMusicTask, bool, error) {
 	dlMusInit()
 	dir := dlMusMusicDir(cfg)
 	if dir == "" {
-		return nil, fmt.Errorf("尚未设置音乐下载目录")
+		return nil, false, fmt.Errorf("尚未设置音乐下载目录")
 	}
 	if _, safe := safeDownloadDir(dir); !safe {
-		return nil, fmt.Errorf("下载目录不可用：%s", dir)
+		return nil, false, fmt.Errorf("下载目录不可用：%s", dir)
 	}
+	// 去重：同来源同歌曲只要在列表里（含已完成）就复用，避免重复下载同一首
+	key := dlMusKey(req.Source, req.SongID, req.Kw)
+	dlMusStore.mu.Lock()
+	for _, ex := range dlMusStore.tasks {
+		if ex == nil || dlMusKey(ex.Source, ex.songID, ex.kwItem) != key {
+			continue
+		}
+		// error/cancel 允许重试（用户可能想重下一次），其余状态一律复用
+		if ex.Status != "error" && ex.Status != "cancel" {
+			dlMusStore.mu.Unlock()
+			return ex, true, nil
+		}
+	}
+	dlMusStore.mu.Unlock()
+
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("创建下载目录失败：%s", err.Error())
+		return nil, false, fmt.Errorf("创建下载目录失败：%s", err.Error())
 	}
 	id := fmt.Sprintf("m%d%d", time.Now().UnixNano(), req.SongID)
 	fname := dlMusFileClean(req.Artist+" - "+req.Name) + ".mp3"
@@ -420,7 +457,7 @@ func dlMusStart(cfg DlConfig, req dlMusReq) (*DlMusicTask, error) {
 	dlMusStore.tasks[id] = st
 	dlMusStore.mu.Unlock()
 	dlMusLaunch(st)
-	return st, nil
+	return st, false, nil
 }
 
 // dlMusLaunch 拉起一轮下载（占并发槽）；已在跑或已终态则忽略。

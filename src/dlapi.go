@@ -25,8 +25,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -221,16 +223,19 @@ func (s *Server) handleDlStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	t, err := dlStartBT(in.Magnet, dir, in.Title)
+	t, dup, err := dlStartBTDedup(in.Magnet, dir, in.Title)
 	if err != nil {
 		fail(w, 500, err.Error())
 		return
 	}
 	msg := "已加入下载列表"
-	if defMsg != "" {
+	if dup {
+		msg = "该资源已在下载列表中，无需重复添加"
+	}
+	if defMsg != "" && !dup {
 		msg += defMsg
 	}
-	ok(w, map[string]any{"taskId": t.ID, "msg": msg, "dir": dir})
+	ok(w, map[string]any{"taskId": t.ID, "msg": msg, "dir": dir, "dup": dup})
 }
 
 // handleDlTasks GET /api/dl/tasks —— 统一任务列表
@@ -246,19 +251,27 @@ func (s *Server) handleDlTasks(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"tasks": tasks, "running": running})
 }
 
-// handleDlRemove POST /api/dl/remove?id=
+// handleDlRemove POST /api/dl/remove?id=&files=0|1
+// files=1 时同时删除已下载的文件（默认 0：只移除任务记录，文件保留）
 func (s *Server) handleDlRemove(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
 		fail(w, 400, "缺少任务 id")
 		return
 	}
+	deleteFiles := r.URL.Query().Get("files") == "1"
+	var n int
+	var err error
 	if strings.HasPrefix(id, "bt") {
-		btRemove(id)
+		n, err = btRemoveWithFiles(id, deleteFiles)
 	} else {
-		dlMusRemove(id)
+		n, err = dlMusRemoveWithFiles(id, deleteFiles)
 	}
-	ok(w, nil)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	ok(w, map[string]any{"files": n})
 }
 
 // handleDlCancel POST /api/dl/cancel?id= —— 统一停止（BT / 音乐）
@@ -500,12 +513,16 @@ func (s *Server) handleDlMusicStart(w http.ResponseWriter, r *http.Request) {
 		req = dlMusReq{Source: "netease", SongID: in.ID, Name: in.Name, Artist: in.Artist}
 	}
 	cfg := loadDlConfig()
-	st, err := dlMusStart(cfg, req)
+	st, dup, err := dlMusStartDedup(cfg, req)
 	if err != nil {
 		fail(w, 500, err.Error())
 		return
 	}
-	ok(w, map[string]any{"task": st})
+	msg := "已加入下载列表"
+	if dup {
+		msg = "该歌曲已在下载列表中，无需重复添加"
+	}
+	ok(w, map[string]any{"task": st, "msg": msg, "dup": dup})
 }
 
 // handleDlMusicTasks GET /api/dlmusic/tasks（数据源同一视图，music 过滤）
@@ -537,16 +554,35 @@ func (s *Server) handleDlMusicCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 // dlMusRemove 移除音乐终态任务（与 DlTaskView 状态对齐）
-func dlMusRemove(id string) {
+// dlMusRemoveWithFiles 移除音乐任务，deleteFiles=true 时同时删除已下载的 mp3 与 .part。
+// 返回被删除的文件数量。
+func dlMusRemoveWithFiles(id string, deleteFiles bool) (int, error) {
 	dlMusInit()
 	dlMusStore.mu.Lock()
 	t, ok0 := dlMusStore.tasks[id]
-	dlMusStore.mu.Unlock()
-	if ok0 && t.Status != "running" && t.Status != "paused" {
-		dlMusStore.mu.Lock()
-		delete(dlMusStore.tasks, id)
+	if ok0 && (t.Status == "running" || t.Status == "paused") {
 		dlMusStore.mu.Unlock()
+		return 0, fmt.Errorf("任务仍在运行，请先停止")
 	}
+	var paths []string
+	if ok0 && deleteFiles && t.Path != "" {
+		paths = append(paths, t.Path, t.Path+".part")
+	}
+	if ok0 {
+		delete(dlMusStore.tasks, id)
+	}
+	dlMusStore.mu.Unlock()
+	n := 0
+	for _, p := range paths {
+		fi, err := os.Lstat(p)
+		if err != nil || fi.IsDir() || !fi.Mode().IsRegular() {
+			continue
+		}
+		if os.Remove(p) == nil {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // dlMusClearDone 清除音乐已完成任务

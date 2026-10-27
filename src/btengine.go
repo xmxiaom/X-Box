@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -256,27 +257,37 @@ func btCreate(magnet, dir, title string) (*btTask, error) {
 
 // btCreateEx 变体：testPeers 非 nil 时只直连这些地址（单测 fake seeder 用）
 func btCreateEx(magnet, dir, title string, testPeers []string) (*btTask, error) {
+	t, _, err := btCreateDedup(magnet, dir, title, testPeers)
+	return t, err
+}
+
+// btCreateDedup 入队并返回是否命中已有任务（dup=true 表示没有新建，直接复用了同种子的既有任务）。
+// 去重口径：同一 infohash 只要处于 pending/fetching/downloading/paused/done 任一种状态就复用，
+// 只有 error/stopped（明确失败或被停止）才允许重新创建 —— 否则会重复下载同一资源。
+func btCreateDedup(magnet, dir, title string, testPeers []string) (t *btTask, dup bool, err error) {
 	btInit()
 	btApplyTune(loadDlConfig()) // 设置页的并发/线程配置在每次入队时生效
 	hash, dn, trackers, err := btMagnet(magnet)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if _, safe := safeDownloadDir(dir); !safe {
-		return nil, fmt.Errorf("下载目录不可用：%s", dir)
+		return nil, false, fmt.Errorf("下载目录不可用：%s", dir)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("创建目录失败：%s", err.Error())
+		return nil, false, fmt.Errorf("创建目录失败：%s", err.Error())
 	}
-	// 同种子（同 infohash）已在队列：直接返回既有任务，不重复入队
+	// 同种子（同 infohash）已在队列：直接返回既有任务，不重复入队/重复下载
 	btStore.mu.Lock()
 	for _, ex := range btStore.tasks {
 		if ex.hash == hash {
+			ex.mu.Lock()
 			st := ex.Status
-			// 已进终态的旧任务允许重新创建（覆盖为新任务）
+			ex.mu.Unlock()
+			// 只有明确失败/被停止的旧任务才允许重建（用户可能想重试）
 			if st != "error" && st != "stopped" {
 				btStore.mu.Unlock()
-				return ex, nil
+				return ex, true, nil
 			}
 		}
 	}
@@ -287,8 +298,8 @@ func btCreateEx(magnet, dir, title string, testPeers []string) (*btTask, error) 
 	if title == "" {
 		title = hashHexShort(hash)
 	}
-	id := "bt" + btHashHex(hash)[:12] + strconv.FormatInt(time.Now().UnixNano()%1e6, 10)
-	t := &btTask{
+	id := btNewTaskID(hash)
+	t = &btTask{
 		ID: id, Title: title, Dir: dir, Status: "pending",
 		CreatedAt: time.Now(), inflight: map[string]time.Time{},
 		hash:      hash,
@@ -316,10 +327,19 @@ func btCreateEx(magnet, dir, title string, testPeers []string) (*btTask, error) 
 		defer btStore.lim.release()
 		runTask(t, trackers)
 	}()
-	return t, nil
+	return t, false, nil
 }
 
 func hashHexShort(h [20]byte) string { return btHashHex(h)[:8] }
+
+// btTaskIDSeq 任务 id 自增序号：UnixNano%1e6 在极短间隔内会撞号（同一微秒内多次提交），
+// 叠一个进程内自增序号保证唯一（同种子停止后重建也不会拿到旧 id）。
+var btTaskIDSeq uint64
+
+func btNewTaskID(hash [20]byte) string {
+	n := atomic.AddUint64(&btTaskIDSeq, 1)
+	return "bt" + btHashHex(hash)[:12] + strconv.FormatInt(time.Now().UnixNano()%1e6, 10) + "-" + strconv.FormatUint(n, 10)
+}
 
 // setLock 锁内置终态
 func (t *btTask) setLock(status, errMsg string) {
@@ -642,6 +662,24 @@ func btRunOnce(t *btTask, trackers []string, ctx context.Context, genAtStart int
 				return "error"
 			}
 		}
+	}
+	// 收尾前让 worker 收手：done 时 worker 常阻塞在 btReadMsg（最长 45s 静默超时），
+	// 期间一直持有文件句柄。先打 workCancel（worker 每轮循环都检查 ctx.Done）再等它们退出，
+	// 否则 btReleasePrep 关句柄后会与 worker 的写盘竞争（Windows 下文件删不掉）。
+	t.mu.Lock()
+	wc := t.workCancel
+	t.mu.Unlock()
+	if wc != nil {
+		wc() // 只取消本轮工作 ctx，不影响任务本身（t.cancel 才是应用级终止）
+	}
+	for i := 0; i < 60; i++ {
+		t.mu.Lock()
+		active := t.peersActive
+		t.mu.Unlock()
+		if active == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	t.setLock("done", "")
 	if n := dhtN(); n != nil {
@@ -1498,6 +1536,96 @@ func btRemove(id string) {
 	btStore.mu.Unlock()
 }
 
+// btTaskFiles 算出某任务落盘的文件绝对路径（删除已下载文件用）。
+// 只返回**该任务目录内**的产物：单文件=dir/name；多文件=dir/name/子路径。
+// 目录外的路径一律丢弃（防止历史脏数据把用户其它文件删掉）。
+func btTaskFiles(t *btTask) []string {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	meta := t.meta
+	dir := t.Dir
+	t.mu.Unlock()
+	if meta == nil || dir == "" {
+		return nil
+	}
+	dir = filepath.Clean(dir)
+	var out []string
+	safeJoin := func(rel string) string {
+		p := filepath.Clean(filepath.Join(dir, rel))
+		// 必须仍在任务目录内（防 ../ 逃逸）
+		if p != dir && !strings.HasPrefix(p, dir+string(os.PathSeparator)) {
+			return ""
+		}
+		return p
+	}
+	if len(meta.Files) == 0 {
+		if base := btCleanName(meta.Name); base != "" {
+			if p := safeJoin(base); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	sub := btCleanName(meta.Name)
+	for _, sf := range meta.Files {
+		rel := filepath.FromSlash(btCleanRel(sf.Path))
+		if p := safeJoin(filepath.Join(sub, rel)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// btRemoveWithFiles 移除任务，deleteFiles=true 时同时删除已下载的文件（及空目录）。
+// 返回被删除的文件数量。只删普通文件，绝不递归删非空目录。
+func btRemoveWithFiles(id string, deleteFiles bool) (removed int, err error) {
+	t := btFind(id)
+	if t == nil {
+		return 0, nil
+	}
+	t.mu.Lock()
+	st := t.Status
+	t.mu.Unlock()
+	// 运行中/暂停中必须先停止（避免边下边删）
+	if btActiveStatus(st) || st == "paused" {
+		return 0, fmt.Errorf("任务仍在运行，请先停止")
+	}
+	var files []string
+	if deleteFiles {
+		files = btTaskFiles(t)
+	}
+	btRemove(id)
+	if !deleteFiles {
+		return 0, nil
+	}
+	for _, p := range files {
+		fi, serr := os.Lstat(p)
+		if serr != nil {
+			continue // 不存在即跳过
+		}
+		if fi.IsDir() || !fi.Mode().IsRegular() {
+			continue // 只删普通文件
+		}
+		if rerr := os.Remove(p); rerr == nil {
+			removed++
+		}
+	}
+	// 顺带清理空目录（只删空目录，非空一律保留）
+	if len(files) > 0 {
+		t.mu.Lock()
+		dir := t.Dir
+		meta := t.meta
+		t.mu.Unlock()
+		if meta != nil && len(meta.Files) > 0 && dir != "" {
+			sub := filepath.Join(dir, btCleanName(meta.Name))
+			pruneEmptyDirs(sub)
+		}
+	}
+	return removed, nil
+}
+
 // btClearDone 清除已完成任务，返回清除数量
 func btClearDone() int {
 	btInit()
@@ -1657,8 +1785,14 @@ func dlUnifiedTasks() []DlTaskView {
 
 // 磁力提交（dlapi 调）
 func dlStartBT(magnet, dir, title string) (*btTask, error) {
+	t, _, err := dlStartBTDedup(magnet, dir, title)
+	return t, err
+}
+
+// dlStartBTDedup 提交磁力并告知是否命中已有任务（dup=true 表示没有新建，复用了既有任务）
+func dlStartBTDedup(magnet, dir, title string) (*btTask, bool, error) {
 	if strings.TrimSpace(dir) == "" {
 		dir = dlDefaultDir("video")
 	}
-	return btCreate(magnet, dir, title)
+	return btCreateDedup(magnet, dir, title, nil)
 }
