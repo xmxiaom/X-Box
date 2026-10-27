@@ -24,37 +24,65 @@ type AutostartItem struct {
 }
 
 // 自启扫描要遍历 systemd 单元、cron、init.d 等，单次约 1 秒以上（单元多的设备更久）。
-// 结果变化很慢，缓存 60 秒：切页立即出结果，避免每次进来都等一遍。
+// 三级加速保证「秒开」：
+//  1. 启动预热：应用起来就后台扫一遍（warmAutostart），用户点进来时缓存已就绪；
+//  2. 结果长期缓存（10 分钟 TTL），页内是只读列表，旧数据无一致性风险；
+//  3. 过期也立即返回旧数据 + 后台单飞刷新（stale-while-revalidate），任何时刻请求都不阻塞。
 var autoCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	data []AutostartItem
+	mu         sync.Mutex
+	at         time.Time
+	data       []AutostartItem
+	refreshing bool
 }
+
+const autoTTL = 10 * time.Minute
 
 func (s *Server) handleAutostart(w http.ResponseWriter, r *http.Request) {
 	autoCache.mu.Lock()
-	if autoCache.data != nil && time.Since(autoCache.at) < 60*time.Second {
+	if autoCache.data != nil && time.Since(autoCache.at) < autoTTL {
 		items := autoCache.data
 		autoCache.mu.Unlock()
 		ok(w, map[string]any{"items": items, "cached": true})
 		return
 	}
+	stale := autoCache.data
+	if stale != nil {
+		// 过期但有旧数据：立即返回旧数据，后台单飞刷新（防止请求风暴）
+		if !autoCache.refreshing {
+			autoCache.refreshing = true
+			go func() {
+				items := listAutostart()
+				autoCache.mu.Lock()
+				autoCache.at, autoCache.data, autoCache.refreshing = time.Now(), items, false
+				autoCache.mu.Unlock()
+			}()
+		}
+		autoCache.mu.Unlock()
+		ok(w, map[string]any{"items": stale, "cached": true})
+		return
+	}
 	autoCache.mu.Unlock()
 
-	items := listAutostart() // 锁外扫描，避免阻塞并发请求
+	items := listAutostart() // 首次且无预热数据：同步扫描（正常被启动预热兜住，走不到）
 	autoCache.mu.Lock()
 	autoCache.at, autoCache.data = time.Now(), items
 	autoCache.mu.Unlock()
 	ok(w, map[string]any{"items": items})
 }
 
+// warmAutostart 应用启动后后台预热一次，让首次点击也是秒开。
+func warmAutostart() {
+	items := listAutostart()
+	autoCache.mu.Lock()
+	autoCache.at, autoCache.data = time.Now(), items
+	autoCache.mu.Unlock()
+}
+
 func listAutostart() []AutostartItem {
 	var out []AutostartItem
 
-	// 1. systemd 启用的服务
-	out = append(out, systemdEnabled("service", "systemd-service")...)
-	// 2. systemd 启用的定时器
-	out = append(out, systemdEnabled("timer", "systemd-timer")...)
+	// 1+2. systemd 启用的服务与定时器（一次 list-unit-files 全拿，按后缀分拣——省一半扫描时间）
+	out = append(out, systemdEnabledAll()...)
 
 	// 3. rc.local
 	if fi, err := os.Stat("/etc/rc.local"); err == nil && !fi.IsDir() {
@@ -81,10 +109,11 @@ func listAutostart() []AutostartItem {
 	return out
 }
 
-func systemdEnabled(kind, t string) []AutostartItem {
+func systemdEnabledAll() []AutostartItem {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, "systemctl", "list-unit-files", "--type="+kind, "--state=enabled", "--no-pager", "--no-legend").Output()
+	// 一次列出全部 enabled 单元（不分 type），按后缀分拣出服务与定时器
+	b, err := exec.CommandContext(ctx, "systemctl", "list-unit-files", "--state=enabled", "--no-pager", "--no-legend").Output()
 	if err != nil {
 		return nil
 	}
@@ -94,10 +123,20 @@ func systemdEnabled(kind, t string) []AutostartItem {
 		if len(f) < 2 {
 			continue
 		}
+		name := f[0]
+		var t string
+		switch {
+		case strings.HasSuffix(name, ".service"):
+			t = "systemd-service"
+		case strings.HasSuffix(name, ".timer"):
+			t = "systemd-timer"
+		default:
+			continue // target/socket/mount 等不属于「开机自启」展示范围
+		}
 		out = append(out, AutostartItem{
-			Name: f[0], Type: t, State: "enabled",
-			Source: "/etc/systemd/system/" + f[0],
-			Desc:    kind + " 已启用开机自启（systemctl enable）",
+			Name: name, Type: t, State: "enabled",
+			Source: "/etc/systemd/system/" + name,
+			Desc:    "已启用开机自启（systemctl enable）",
 		})
 	}
 	return out

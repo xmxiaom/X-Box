@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.49"
+	version = "1.3.50"
 	// 面板监听策略：生产形态只监听 fnOS 统一网关 unix socket（XBOX_SOCKET），
 	// 登录态由网关注入；不监听任何 TCP 端口。仅 XBOX_DEV=1 时开 127.0.0.1 回环
 	// 端口供本地开发/自动化测试。请勿改为 ":8899" 通配绑定。
@@ -223,6 +223,7 @@ func main() {
 	} else {
 		log.Printf("X-Box v%s 启动，本地调试入口：%v", version, addrs)
 	}
+	go warmAutostart() // 后台预热开机自启扫描（1s+），用户点进该板块时缓存已就绪=秒开
 	select {} // 主协程驻留：服务在监听协程中运行
 }
 

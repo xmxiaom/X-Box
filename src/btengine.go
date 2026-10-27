@@ -653,7 +653,7 @@ func btRunOnce(t *btTask, trackers []string, ctx context.Context, genAtStart int
 			}
 			t.inflight[addr] = time.Now()
 			t.mu.Unlock()
-			go runWorker(ctx, t, addr, &techMu, tech, full)
+			go runWorker(ctx, t, addr, &techMu, tech, full, feed)
 		case <-time.After(4 * time.Second):
 			stall++
 			t.mu.Lock()
@@ -1176,7 +1176,7 @@ func (p *btPrepared) btCloseAllPrep() {
 // ---------- 下载 worker ----------
 
 // runWorker 单连接 worker：握手 → 扩展握手 → interested → 顺序抢片要块
-func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, tech map[int]bool, full *btPrepared) {
+func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, tech map[int]bool, full *btPrepared, feed func(btPeerAddr)) {
 	defer func() { recover() }()
 	t.mu.Lock()
 	meta := t.meta
@@ -1226,6 +1226,10 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 	sent := map[int]bool{}  // 该片已请求未回的块偏移
 	recv := map[int]bool{}  // 该片已收到的块偏移
 	holding := false
+	pexID := byte(0)       // 对端 ut_pex 消息 id（0=未知，收到其扩展握手后记下）
+	choked := true         // 协议规定连接初始为 choke 态，收到 unchoke 才能取数据
+	chokedAt := time.Time{}
+	lastProg := time.Now() // 最近一次该连接收到新字节的时间（零进展看门狗）
 	defer func() { // worker 退出释放挂起片
 		if holding && curPiece >= 0 {
 			techMu.Lock()
@@ -1248,13 +1252,38 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 		switch typ {
 		case 0xFF: // keep-alive
 			if holding && time.Since(pendAt) > btStalePiece {
-				techMu.Lock()
-				delete(tech, curPiece)
-				techMu.Unlock()
-				holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
+				if time.Since(lastProg) > 3*time.Minute {
+					// 重发多轮仍零进展：这条 peer 养不熟这片，释放让别的连接接手
+					techMu.Lock()
+					delete(tech, curPiece)
+					techMu.Unlock()
+					holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
+				} else {
+					// 只重发未回的块，已收的（recv/curBuf）全保留——此前整片丢弃重收，
+					// 40s 一轮、慢速 peer 永远凑不齐一个片（下载卡 0% 的根因）
+					sent = map[int]bool{}
+					pendAt = time.Now()
+				}
 			}
 			continue
-		case 20: // 扩展消息（下载态不消费）
+		case 0: // choke（记录状态后穿透到选片区；continue 会与「对端等 request」互等死锁）
+			choked, chokedAt = true, time.Now()
+		case 1: // unchoke（同上，穿透：收到 unchoke 后立即派发请求）
+			choked = false
+		case 20: // 扩展消息：记对端 ut_pex id + 消费 PEX 新 peer（下载态此前直接丢弃）
+			if len(pl) >= 1 {
+				if mid := pl[0]; mid == 0 {
+					if d, _, err := btSplitExt(pl); err == nil {
+						if m2, ok2 := d["m"].(map[string]any); ok2 {
+							if f, ok3 := m2["ut_pex"].(int64); ok3 && f > 0 && f < 255 {
+								pexID = byte(f)
+							}
+						}
+					}
+				} else if mid == pexID {
+					btConsumePEX(pl[1:], feed)
+				}
+			}
 			continue
 		case 4: // have
 			if len(pl) == 4 && peerBF != nil {
@@ -1296,6 +1325,7 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 			copy(curBuf[begin:], data)
 			got += len(data)
 			pendAt = time.Now()
+			lastProg = time.Now()
 			if got >= len(curBuf) { // 整片收齐 → SHA1 校验 → 落盘
 				sum := sha1.Sum(curBuf)
 				if sum == meta.btPieceSha1(idx) {
@@ -1318,6 +1348,9 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 		// 选片 / 派块（bitfield 到手才能干活）
 		if peerBF == nil {
 			continue
+		}
+		if choked && !chokedAt.IsZero() && time.Since(chokedAt) > 45*time.Second {
+			return // 等 unchoke 超时（对端乐观放行轮换一般 ~30s）：让出并发槽去拨别的 peer
 		}
 		if curPiece < 0 {
 			np, ok := btNextPiece(t, techMu, tech, meta, peerBF)
@@ -1350,11 +1383,18 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 		// 挂起块（管线尺寸内尽量填满）——已收（recv）与挂起（sent）都不再请求
 		pipe := btTunePipeline()
 		if len(sent) >= pipe {
-			if time.Since(pendAt) > btStalePiece { // 全挂起但长期无返回：重置该片
-				techMu.Lock()
-				delete(tech, curPiece)
-				techMu.Unlock()
-				holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
+			if time.Since(pendAt) > btStalePiece { // 全挂起但长期无返回
+				if time.Since(lastProg) > 3*time.Minute {
+					// 零进展看门狗：释放该片，别的连接接手
+					techMu.Lock()
+					delete(tech, curPiece)
+					techMu.Unlock()
+					holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
+				} else {
+					// 只重发未回的块、保留已收（与 keep-alive 分支同策略，防慢 peer 死循环）
+					sent = map[int]bool{}
+					pendAt = time.Now()
+				}
 			}
 		} else {
 			for off := 0; off < len(curBuf) && len(sent) < pipe; off = nextBlockOff(curBuf, off) {
@@ -1377,6 +1417,43 @@ func nextBlockOff(curBuf []byte, off int) int {
 		return len(curBuf) // 终止
 	}
 	return n
+}
+
+// btConsumePEX 解析 ut_pex 载荷（bencode dict，added 字段 = 6 字节紧凑条目×N），
+// 把新 peer 投喂进候选通道。已连接 peer 是公网种子的重要 peer 来源，
+// 此前下载态直接丢弃扩展消息，供给只剩 tracker/DHT。
+func btConsumePEX(payload []byte, feed func(btPeerAddr)) {
+	if len(payload) == 0 || len(payload) > 4096 {
+		return
+	}
+	v, _, err := btDec(payload)
+	if err != nil {
+		return
+	}
+	d, ok := v.(map[string]any)
+	if !ok {
+		return
+	}
+	added, ok := d["added"].(string)
+	if !ok || len(added) < 6 {
+		return
+	}
+	n := len(added) / 6
+	if n > 32 { // 单帧上限，防刷屏
+		n = 32
+	}
+	for i := 0; i < n; i++ {
+		b := added[i*6 : i*6+6]
+		port := int(b[4])<<8 | int(b[5])
+		if port <= 0 {
+			continue
+		}
+		ip := net.IPv4(b[0], b[1], b[2], b[3])
+		if ip.IsUnspecified() || ip.IsLoopback() {
+			continue
+		}
+		feed(btPeerAddr{Host: ip.String(), Port: port})
+	}
 }
 
 // btReqBlock 发送 request(index, offset, len)
