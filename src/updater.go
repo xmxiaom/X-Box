@@ -470,14 +470,80 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 // 此前是一次性 GET（10min 总超时、无续传），GitHub 大文件传输途中任何一次抖动
 // 都整单作废——这就是「更新下载不稳定」的根因。现在：网络中断自动从 .part 续传，
 // 30s 无进展判定空转主动重试，全部字节到齐才落正名。
+// v1.3.51 起加多源轮换：api.github.com 资产端点 302 后真实字节仍来自
+// objects.githubusercontent.com（国内大量不可达，「下载老是报错」的根子），
+// 候选链 = S3 签名直链 → 公共加速镜像 × N + github 直链 → 原始 URL 兜底，
+// 每轮换一个源；同一 Release 资产字节一致，断点续传跨源续接。
 var downloadInProgress int64 // atomic：后台下载 fpk 进行中（同步引擎让路）
 
 const (
-	updDlMaxAttempts = 12               // 单次任务最多尝试轮数（每轮失败都从 .part 续）
+	updDlMaxAttempts = 18               // 单次任务最多尝试轮数（每轮失败都从 .part 续；多源后轮数加多）
 	updDlDeadline    = 30 * time.Minute // 整体时限（防死循环占后台）
 	updDlIdleWatch   = 30 * time.Second // 读空转看门狗：30s 一个字节都没来就断开重试
 	updDlMaxSize     = 512 << 20        // fpk 大小上限
 )
+
+// updMirrors 公共 GitHub 加速镜像（仅代理 github.com 直链；个别失效会被源轮换自然跳过）。
+func updMirrors() []string {
+	return []string{"https://ghfast.top/", "https://gh-proxy.com/", "https://ghproxy.net/"}
+}
+
+// updCandidates 构建下载候选源（按优先级去重）。
+func updCandidates(rawURL string, isAPI bool) []string {
+	ghDirect := "" // github.com/.../releases/download/... 直链（镜像可代理的形态）
+	if isAPI {
+		// 资产元数据（默认 Accept 即 JSON）：拿 browser_download_url 推导直链
+		cli := &http.Client{Timeout: 15 * time.Second}
+		if resp, err := cli.Get(rawURL); err == nil {
+			var meta struct {
+				BrowserDownloadURL string `json:"browser_download_url"`
+			}
+			if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&meta) == nil {
+				if u := meta.BrowserDownloadURL; strings.HasPrefix(u, "https://github.com/"+ghRepo+"/releases/download/") {
+					ghDirect = u
+				}
+			}
+			resp.Body.Close()
+		}
+	} else {
+		ghDirect = rawURL
+	}
+	var out []string
+	// S3 签名直链：资产端点不跟随 302 拿 Location——绕开 api.github.com 每小时 60 次匿名限流，
+	// 且后续续传轮直接打 S3（Range 可用）
+	if isAPI {
+		cli := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
+		if req, err := http.NewRequest("GET", rawURL, nil); err == nil {
+			req.Header.Set("Accept", "application/octet-stream")
+			if resp, err := cli.Do(req); err == nil {
+				if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+					if loc := resp.Header.Get("Location"); loc != "" {
+						out = append(out, loc)
+					}
+				}
+				resp.Body.Close()
+			}
+		}
+	}
+	if ghDirect != "" {
+		for _, m := range updMirrors() {
+			out = append(out, m+ghDirect)
+		}
+		out = append(out, ghDirect)
+	}
+	out = append(out, rawURL)
+	seen := map[string]bool{}
+	uniq := out[:0]
+	for _, u := range out {
+		if u != "" && !seen[u] {
+			seen[u] = true
+			uniq = append(uniq, u)
+		}
+	}
+	return uniq
+}
 
 func runDownload(rawURL string, isAPI bool, dst string) {
 	atomic.StoreInt64(&downloadInProgress, 1)
@@ -497,8 +563,10 @@ func runDownload(rawURL string, isAPI bool, dst string) {
 	part := dst + ".part"
 	deadline := time.Now().Add(updDlDeadline)
 	client := &http.Client{Timeout: 0} // 不设总超时：慢但在动就算活着，空转由看门狗管
+	cands := updCandidates(rawURL, isAPI)
+	var whys []string // 各源失败原因聚合（写进最终错误，用户可自查）
 	for attempt := 1; attempt <= updDlMaxAttempts && time.Now().Before(deadline); attempt++ {
-		// 续传起点：.part 现有字节数
+		// 续传起点：.part 现有字节数（换源不断点：同一资产字节一致，Range 按字节偏移）
 		var off int64
 		if fi, err := os.Stat(part); err == nil {
 			off = fi.Size()
@@ -508,12 +576,13 @@ func runDownload(rawURL string, isAPI bool, dst string) {
 			}
 		}
 		setStage(off)
-		httpReq, err := http.NewRequest("GET", rawURL, nil)
+		src := cands[(attempt-1)%len(cands)] // 每轮换一个源：单个源抽风时其余源接着下
+		httpReq, err := http.NewRequest("GET", src, nil)
 		if err != nil {
 			setFail("下载失败：" + err.Error())
 			return
 		}
-		if isAPI {
+		if isAPI && src == rawURL {
 			httpReq.Header.Set("Accept", "application/octet-stream") // API 资产端点：带此头返回二进制，否则 JSON
 		}
 		if off > 0 {
@@ -521,7 +590,8 @@ func runDownload(rawURL string, isAPI bool, dst string) {
 		}
 		resp, err := client.Do(httpReq)
 		if err != nil {
-			time.Sleep(3 * time.Second) // 网络抖动：稍候从 .part 继续
+			whys = append(whys, src[:minI(60, len(src))]+"："+err.Error())
+			time.Sleep(3 * time.Second) // 网络抖动：稍候换源从 .part 继续
 			continue
 		}
 		// 416：.part 已到（或超过）文件总长——多半是上轮恰好下完但没来得及收尾
@@ -535,8 +605,9 @@ func runDownload(rawURL string, isAPI bool, dst string) {
 		}
 		if resp.StatusCode != 200 && resp.StatusCode != 206 {
 			resp.Body.Close()
-			setFail(fmt.Sprintf("下载失败（HTTP %d）", resp.StatusCode))
-			return
+			whys = append(whys, fmt.Sprintf("%s：HTTP %d", src[:minI(60, len(src))], resp.StatusCode))
+			time.Sleep(2 * time.Second)
+			continue // 该源不可用/限流：换下一源（不再整单立即失败）
 		}
 		// 200 = 服务端忽略 Range 从头给 → 覆盖 .part 起点归零；206 = 续传被接受
 		base := off
@@ -558,14 +629,34 @@ func runDownload(rawURL string, isAPI bool, dst string) {
 			updFinishPart(part, dst, setFail) // 校验+落正名（内部已置终态）
 			return
 		}
-		// 未完整：空转/中断——保留 .part 下一轮续传；短退避防打死服务器
-		backoff := time.Duration(attempt*3) * time.Second
-		if backoff > 15*time.Second {
-			backoff = 15 * time.Second
+		// 未完整：空转/中断——保留 .part 下一轮换源续传；短退避防打死服务器
+		if cerr != nil {
+			whys = append(whys, src[:minI(60, len(src))]+"："+cerr.Error())
+		} else if idle {
+			whys = append(whys, src[:minI(60, len(src))]+"：30s 无数据")
+		}
+		backoff := time.Duration(attempt*2) * time.Second
+		if backoff > 12*time.Second {
+			backoff = 12 * time.Second
 		}
 		time.Sleep(backoff)
 	}
-	setFail("下载未完成：网络多次中断（已尝试续传 " + strconv.Itoa(updDlMaxAttempts) + " 轮），请检查 NAS 外网连通后重试（进度已保留，重试会接着下）")
+	reason := ""
+	if len(whys) > 0 {
+		// 只保留最后 4 条，避免刷屏
+		if len(whys) > 4 {
+			whys = whys[len(whys)-4:]
+		}
+		reason = "近期失败原因：" + strings.Join(whys, "；")
+	}
+	setFail("下载未完成：网络多次中断（已轮换源重试 " + strconv.Itoa(updDlMaxAttempts) + " 轮）。" + reason + " 进度已保留，点「重试」会按原设置接着下。")
+}
+
+func minI(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // updCopyWithWatch 把响应体追加进 .part（base 起点前已存在）。

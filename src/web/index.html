@@ -2178,8 +2178,10 @@ async function downloadUpdate(url, name){
     await doDownloadUpdate(url, name, '');
   }, '开始下载');
 }
+var updLast = null; // 上次下载设置（url/name/dir/toPC）：失败重试直接沿用原设置续传，不再重选目录
 async function doDownloadUpdate(url, name, dir, toPC){
   toPC = !!toPC;
+  updLast = {url, name, dir: dir||'', toPC};
   const btn = document.getElementById('btn-upd-dl');
   if(btn){ btn.disabled = true; btn.innerHTML = '<span class="spin"></span> 开始下载…'; }
   // 清除上次的失败块
@@ -2283,9 +2285,15 @@ function cfgImportFile(input){
   rd.readAsText(f);
 }
 
+function retryDownloadUpdate(){
+  // 按失败前的设置直接重下（url/目录/到电脑 原样沿用；.part 进度在 NAS 上，
+  // 服务端会自动断点续传，不用从头也不重选目录）
+  if(!updLast){ toast('没有可重试的下载任务','err'); return; }
+  doDownloadUpdate(updLast.url, updLast.name, updLast.dir, updLast.toPC);
+}
 function showDownloadError(url, name, msg){
-  // 失败原因持久显示（不再只靠一闪而过的 toast），带重试按钮
-  document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" id="upd-err" style="margin-top:10px;background:var(--danger-light);border-color:#FDCDC5;color:#7A1F0A">❌ 下载失败：${esc(msg)}<br><span style="font-size:12px">常见原因：NAS 无法直达 github.com（检查 DNS/外网）、所选目录不存在或不可写、Release 资源尚未上传完成。可重试或改用「下载到电脑」（经 NAS 中转）。</span><br><button class="btn btn-outline btn-sm" style="margin-top:6px" onclick="downloadUpdate('${esc(url)}','${esc(name)}')">重试</button></div>`);
+  // 失败原因持久显示（不再只靠一闪而过的 toast），带重试按钮（沿用原设置直接续传）
+  document.getElementById('upd-body').insertAdjacentHTML('beforeend', `<div class="warn-box" id="upd-err" style="margin-top:10px;background:var(--danger-light);border-color:#FDCDC5;color:#7A1F0A">❌ 下载失败：${esc(msg)}<br><span style="font-size:12px">服务端已自动轮换多个源续传（GitHub 直链/S3/加速镜像）。点「重试」按原设置接着下（进度保留、无需重选目录）；也可改用「下载到电脑」（经 NAS 中转）。</span><br><button class="btn btn-outline btn-sm" style="margin-top:6px" onclick="retryDownloadUpdate()">重试（原设置续传）</button></div>`);
 }
 
 /* ---------- 进程服务（风格对齐飞牛资源监控） ---------- */
