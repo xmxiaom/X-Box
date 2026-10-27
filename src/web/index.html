@@ -171,6 +171,15 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .modal-mask{position:fixed;inset:0;background:rgba(29,33,41,.45);display:none;align-items:center;justify-content:center;z-index:100}
 .modal-mask.show{display:flex}
 .modal{background:var(--card);border-radius:12px;width:520px;max-width:92vw;padding:22px 24px;box-shadow:0 8px 40px rgba(0,0,0,.16);max-height:88vh;overflow-y:auto}
+/* 宽版弹窗（下载列表等表格型内容）：列放得开、无横向滚动，表格区自己滚 */
+.modal.modal-wide{width:980px;max-width:94vw;display:flex;flex-direction:column;max-height:88vh;overflow:hidden}
+.modal.modal-wide .body{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;margin-bottom:14px;line-height:1.5}
+.modal.modal-wide .dl-scroll{flex:1 1 auto;min-height:0;max-height:62vh;overflow:auto}
+/* 下载列表表格：表头随滚动吸顶，行高舒适，状态/操作列不换行 */
+.modal.modal-wide .dl-scroll .tbl th{position:sticky;top:0;z-index:1;padding:10px 14px;font-size:12.5px}
+.modal.modal-wide .dl-scroll .tbl td{padding:11px 14px;vertical-align:top;font-size:12.5px}
+.modal.modal-wide .dl-scroll .tbl td:nth-child(2){white-space:nowrap}
+.modal.modal-wide .dl-scroll .tbl td:nth-child(4){white-space:nowrap}
 .modal h3{font-size:16px;margin-bottom:12px}
 .modal .body{font-size:13.5px;color:var(--text2);line-height:1.7;margin-bottom:18px}
 .modal .foot{display:flex;justify-content:flex-end;gap:10px}
@@ -682,7 +691,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
     <h3 id="modal-title">确认</h3>
     <div class="body" id="modal-body"></div>
     <div class="foot">
-      <button class="btn btn-text" onclick="closeModal()">取消</button>
+      <button class="btn btn-text" id="modal-cancel" onclick="closeModal()">取消</button>
       <button class="btn btn-primary" id="modal-ok">确认</button>
     </div>
   </div>
@@ -896,18 +905,45 @@ function toast(msg, cls=''){
 
 /* ---------- 通用弹窗 ---------- */
 function closeModal(){
-  document.getElementById('modal').classList.remove('show');
+  const modal = document.getElementById('modal');
+  modal.classList.remove('show');
+  modal.classList.remove('modal-wide');
   document.getElementById('modal-ok').onclick=null;
+  // 恢复「取消」按钮显示（wideDialog 会隐藏它，下次普通弹窗要用）
+  const cancelBtn = document.getElementById('modal-cancel');
+  if(cancelBtn) cancelBtn.style.display = '';
   // 下载列表弹窗关闭 → 停掉它的 2s 轮询（否则后台一直空转）
   if(dlListKind !== null || dlListTimer || dlMTimer) dlListClose();
 }
 function confirmDialog(title, bodyHTML, onOK, okText){
+  resetModalFoot(); // 防止上一次 wideDialog 留下的宽版/隐藏取消按钮残留
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-body').innerHTML = bodyHTML;
   const okBtn = document.getElementById('modal-ok');
   okBtn.textContent = okText||'确认';
   okBtn.onclick = () => { closeModal(); onOK(); };
   document.getElementById('modal').classList.add('show');
+}
+// wideDialog 宽版弹窗：只有一个关闭按钮（表格型内容用，避免「取消/关闭」重复）
+function wideDialog(title, bodyHTML){
+  document.getElementById('modal-title').textContent = title;
+  document.getElementById('modal-body').innerHTML = bodyHTML;
+  const okBtn = document.getElementById('modal-ok');
+  okBtn.textContent = '关闭';
+  okBtn.onclick = () => closeModal();
+  const modal = document.getElementById('modal');
+  modal.classList.add('modal-wide');
+  modal.classList.add('show');
+  // 「取消」与「关闭」在纯展示型弹窗里是同一动作 → 直接隐藏取消，只留一个关闭入口
+  const cancelBtn = document.getElementById('modal-cancel');
+  if(cancelBtn) cancelBtn.style.display = 'none';
+}
+// 恢复通用弹窗的默认按钮布局（confirmDialog 前调用，防止被 wideDialog 改过）
+function resetModalFoot(){
+  const modal = document.getElementById('modal');
+  modal.classList.remove('modal-wide');
+  const cancelBtn = document.getElementById('modal-cancel');
+  if(cancelBtn) cancelBtn.style.display = '';
 }
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
 
@@ -3306,7 +3342,9 @@ function dlTaskStatusBadge(t){
     case 'downloading': case 'running': {
       const b = '<span class="badge badge-blue" style="font-size:10.5px"><span class="dot"></span>下载中' + (pct ? ' ' + pct + '%' : '') + '</span>';
       const meta = [];
-      if(t.speed > 0) meta.push('<span>' + fmtDlSpeed(t.speed) + '</span>');
+      // 速度始终占位显示（不做 speed>0 判断）：整片校验通过才写盘，
+      // 瞬时速度会周期性归零，若按 >0 才渲染，文字会「一会儿有一会儿没有」地闪。
+      meta.push('<span style="min-width:64px;display:inline-block">' + fmtDlSpeed(t.speed) + '</span>');
       if(t.peers > 0) meta.push('<span>' + t.peers + ' 个连接</span>');
       if(t.total > 0) meta.push('<span>' + (t.done / 1048576).toFixed(1) + 'MB</span>');
       return {badge: b, extra: '<div style="display:flex;gap:8px;font-size:10.5px;color:var(--text3);margin-top:2px">' + meta.join('') + '</div>' +
@@ -3336,28 +3374,35 @@ function dlTaskRow(t, showType){
   }
   const pct = t.progress != null ? Math.round(t.progress) : 0;
   const metaBits = [];
-  if(t.speed > 0) metaBits.push(fmtDlSpeed(t.speed));
+  // 下载中/运行中始终显示速度（含 0 B/s）：不做 >0 过滤，否则文字会闪
+  const running = t.status === 'downloading' || t.status === 'running';
+  if(running || t.speed > 0) metaBits.push('<span style="min-width:70px;display:inline-block">' + fmtDlSpeed(t.speed) + '</span>');
   if(t.peers > 0) metaBits.push(t.peers + ' 连接');
-  if(t.total > 0) metaBits.push((t.done/1048576).toFixed(1) + '/' + (t.total/1048576).toFixed(1) + ' MB');
+  if(t.total > 0) metaBits.push((t.done/1048576).toFixed(1) + ' / ' + (t.total/1048576).toFixed(1) + ' MB');
   const ops =
     (active ? '<button class="btn btn-text btn-sm" onclick="dlTaskPause(\'' + esc(t.id) + '\')">暂停</button>' : '') +
     (paused ? '<button class="btn btn-text btn-sm" style="color:var(--primary)" onclick="dlTaskResume(\'' + esc(t.id) + '\')">继续</button>' : '') +
     ((active || paused) ? '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="dlTaskCancel(\'' + esc(t.id) + '\')">停止</button>' : '') +
     (!active && !paused ? '<button class="btn btn-text btn-sm" style="color:var(--text3)" onclick="dlTaskRemove(\'' + esc(t.id) + '\')">移除</button>' : '');
+  // 进度列：百分比 + 进度条 + 速度/连接/大小
+  const pctTxt = (t.status === 'done') ? '100%' : (t.total > 0 ? pct + '%' : (t.status === 'fetching' ? '—' : ''));
   return '<tr>' +
-    '<td style="min-width:0">' +
-      '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
-        '<span style="word-break:break-all">' + esc(t.title || '') + '</span>' + typeTag +
+    '<td>' +
+      '<div style="display:flex;gap:6px;align-items:baseline">' +
+        '<span style="font-size:13px;color:var(--text1);word-break:break-all;line-height:1.5">' + esc(t.title || '') + '</span>' + typeTag +
       '</div>' +
-      (t.err ? '<div style="font-size:11px;color:var(--danger);margin-top:2px">' + esc(t.err) + '</div>' : '') +
-      (t.path && t.status === 'done' ? '<div class="mono" style="font-size:10.5px;color:var(--text3);margin-top:2px;word-break:break-all">' + esc(t.path) + '</div>' : '') +
+      (t.err ? '<div style="font-size:11.5px;color:var(--danger);margin-top:3px;line-height:1.5">' + esc(t.err) + '</div>' : '') +
+      (t.path && t.status === 'done' ? '<div class="mono" style="font-size:11px;color:var(--text3);margin-top:3px;word-break:break-all">' + esc(t.path) + '</div>' : '') +
     '</td>' +
-    '<td style="white-space:nowrap">' + sb.badge + '</td>' +
-    '<td style="min-width:120px">' +
-      '<div class="bar" style="margin-bottom:3px"><i style="width:' + pct + '%"></i></div>' +
-      '<div style="font-size:10.5px;color:var(--text3);display:flex;gap:8px;flex-wrap:wrap">' + metaBits.join(' ') + '</div>' +
+    '<td>' + sb.badge + '</td>' +
+    '<td>' +
+      '<div style="display:flex;align-items:center;gap:8px">' +
+        '<span style="font-size:11.5px;color:var(--text2);min-width:38px;text-align:right">' + pctTxt + '</span>' +
+        '<div class="bar" style="flex:1;margin:0"><i style="width:' + pct + '%"></i></div>' +
+      '</div>' +
+      (metaBits.length ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;display:flex;gap:10px;flex-wrap:wrap">' + metaBits.join('') + '</div>' : '') +
     '</td>' +
-    '<td style="white-space:nowrap;text-align:right">' + ops + '</td>' +
+    '<td style="text-align:right">' + ops + '</td>' +
   '</tr>';
 }
 
@@ -3369,13 +3414,13 @@ let dlListKind = null, dlListTimer = null;
 function dlTaskPanelHTML(kind){
   const id = kind === 'music' ? 'mdl' : 'vdl';
   const head = '<thead><tr>' +
-    '<th style="width:auto">任务</th>' +
-    '<th style="width:130px">状态</th>' +
-    '<th style="width:150px">进度</th>' +
-    '<th style="width:130px;text-align:right">操作</th>' +
+    '<th>任务</th>' +
+    '<th style="width:150px">状态</th>' +
+    '<th style="width:190px">进度</th>' +
+    '<th style="width:150px;text-align:right">操作</th>' +
   '</tr></thead>';
-  return '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px">' +
-      '<span id="dl-' + id + '-sum" style="font-size:11.5px;color:var(--text3)"></span>' +
+  return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;flex:0 0 auto">' +
+      '<span id="dl-' + id + '-sum" style="font-size:12.5px;color:var(--text3)"></span>' +
       '<span style="flex:1"></span>' +
       '<button class="btn btn-outline btn-sm" onclick="dlPauseAll()">全部暂停</button>' +
       '<button class="btn btn-outline btn-sm" onclick="dlResumeAll()">全部继续</button>' +
@@ -3383,18 +3428,18 @@ function dlTaskPanelHTML(kind){
       '<button class="btn btn-outline btn-sm" onclick="dlClearDone()">清除完成</button>' +
       '<button class="btn btn-outline btn-sm" style="color:var(--danger)" onclick="dlClearAll()">清空列表</button>' +
     '</div>' +
-    '<div style="max-height:55vh;overflow:auto;border:1px solid var(--border);border-radius:var(--radius)">' +
-      '<table class="tbl" style="border:0;border-radius:0">' + head +
+    '<div class="dl-scroll" style="border:1px solid var(--border);border-radius:var(--radius);overflow:auto">' +
+      '<table class="tbl" style="border:0;border-radius:0;table-layout:fixed;width:100%">' + head +
         '<tbody id="dl-' + id + '-rows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>' +
       '</table>' +
     '</div>';
 }
 
-// dlListModalOpen 打开下载列表弹窗（视频/音乐共用）
+// dlListModalOpen 打开下载列表弹窗（宽版；视频/音乐共用）
 function dlListModalOpen(kind){
   dlListKind = kind;
   const title = kind === 'music' ? '音乐下载列表' : '下载列表';
-  confirmDialog(title, dlTaskPanelHTML(kind), ()=>{}, '关闭');
+  wideDialog(title, dlTaskPanelHTML(kind));
   dlListRefresh();
 }
 

@@ -45,6 +45,7 @@ const (
 	btBlockLen       = 16 << 10 // 分块 16KB（协议标准值，不能改）
 	btStalePiece     = 40 * time.Second
 	btPeersChCap     = 256
+	btSpeedWin       = 10 // 速度滑动平均窗口（秒）：窗口越长越平滑，整片写盘的空档不会让速度掉到 0
 
 	// 并发默认值（设置页可调；见 dlDefMaxConns / dlDefPipeline）
 	btDefMaxConns = 16 // 单任务并发连接
@@ -443,9 +444,9 @@ func btRunOnce(t *btTask, trackers []string, ctx context.Context, genAtStart int
 		t.setLock("fetching", "")
 	}
 
-	// 速度打点：每秒采样 written 增量，显示值取最近 5 秒平均。
+	// 速度打点：每秒采样 written 增量，显示值取最近 10 秒平均。
 	// 整片校验通过才写盘 → 瞬时差会时不时为 0（大分片尤其明显），
-	// 直接显示瞬时值前端就会「速度一会有一会没有」，故做滑动平均。
+	// 窗口太短前端就会「速度一会有一会没有」，故拉长滑动窗口做平滑。
 	go func() {
 		defer func() { recover() }()
 		tk := time.NewTicker(1 * time.Second)
@@ -453,7 +454,7 @@ func btRunOnce(t *btTask, trackers []string, ctx context.Context, genAtStart int
 		t.mu.Lock()
 		prev := t.written
 		t.mu.Unlock()
-		samples := make([]int64, 0, 5)
+		samples := make([]int64, 0, btSpeedWin)
 		for {
 			select {
 			case <-ctx.Done():
@@ -471,7 +472,7 @@ func btRunOnce(t *btTask, trackers []string, ctx context.Context, genAtStart int
 					delta = 0
 				}
 				samples = append(samples, delta)
-				if len(samples) > 5 {
+				if len(samples) > btSpeedWin {
 					samples = samples[1:]
 				}
 				var sum int64
@@ -480,7 +481,14 @@ func btRunOnce(t *btTask, trackers []string, ctx context.Context, genAtStart int
 				}
 				avg := sum / int64(len(samples))
 				t.mu.Lock()
-				t.speed = avg
+				// 窗口内全为 0 但仍有活跃连接：说明只是「整片在攒、还没校验写盘」的空档，
+				// 不是真的停摆。此时保留上次非零值，避免速度数字掉成 0 又跳回去地闪。
+				if avg == 0 && t.peersActive > 0 && t.speed > 0 {
+					// 缓慢衰减（每轮 -12.5%），长时间无写盘仍会自然降到 0
+					t.speed = t.speed - t.speed/8
+				} else {
+					t.speed = avg
+				}
 				t.mu.Unlock()
 			}
 		}
