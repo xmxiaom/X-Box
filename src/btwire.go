@@ -20,6 +20,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -30,6 +33,7 @@ const (
 	btMetaPieceLen = 16 << 10                           // 元数据分片 16KB
 	btMaxMetaSize  = 16 << 20                           // 元数据上限 16MB
 	btIOTimeout    = 45 * time.Second
+	btMetaPeerCap  = 30 * time.Second // 单个 peer 抓元数据全程上限（拨+握+取）；压制坏 peer 占坑
 )
 
 // btSelfID 进程级 peer id（-XB 前缀 + 随机 16 字节）
@@ -42,7 +46,7 @@ var btSelfID = func() [20]byte {
 
 // btHandshake 出站握手 → 校验为 BT 协议后返回可用连接
 func btHandshake(conn net.Conn, ih [20]byte) (net.Conn, error) {
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(8 * time.Second))
 	hs := make([]byte, 0, 68)
 	hs = append(hs, 19)
 	hs = append(hs, btProtocol...)
@@ -67,7 +71,17 @@ func btHandshake(conn net.Conn, ih [20]byte) (net.Conn, error) {
 
 // btReadMsg 读一帧。keep-alive（长度 0）返回 typ=0xFF。
 func btReadMsg(conn net.Conn) (typ byte, payload []byte, err error) {
-	if err := conn.SetReadDeadline(time.Now().Add(btIOTimeout)); err != nil {
+	return btReadMsgUntil(conn, time.Time{})
+}
+
+// btReadMsgUntil 读一帧，帧内每次 IO 的 deadline = min(45s, until)。
+// until 为零表示不限（用默认 45s）。
+func btReadMsgUntil(conn net.Conn, until time.Time) (typ byte, payload []byte, err error) {
+	d := time.Now().Add(btIOTimeout)
+	if !until.IsZero() && until.Before(d) {
+		d = until
+	}
+	if err := conn.SetReadDeadline(d); err != nil {
 		return 0, nil, err
 	}
 	head := make([]byte, 4)
@@ -160,37 +174,85 @@ type btMetaState struct {
 }
 
 // btFetchMetaFromPeer 向一个 peer 抓元数据并校验（全自动：握手 → 扩展握手 →
-// 请求缺片 → 拼齐 → SHA1 比对 → 解析）
+// 请求缺片 → 拼齐 → SHA1 比对 → 解析）。单 peer 全程 ≤ btMetaPeerCap，
+// 失败原因分类计数由引擎聚合进任务错误消息。
 func btFetchMetaFromPeer(ctx context.Context, addr string, ih [20]byte) (*btMeta, error) {
+	cctx, cancel := context.WithTimeout(ctx, btMetaPeerCap)
+	defer cancel()
+	m, err := btFetchMetaFromPeerRaw(cctx, addr, ih)
+	if os.Getenv("XBOX_DEV") == "1" {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "[btmeta] FAIL", addr, err.Error())
+		} else if m != nil {
+			fmt.Fprintf(os.Stderr, "[btmeta] OK  %s size=%d files=%d\n", addr, m.Len, len(m.Files))
+		}
+	}
+	return m, err
+}
+
+func btFetchMetaFromPeerRaw(ctx context.Context, addr string, ih [20]byte) (*btMeta, error) {
+	mode := 0
+	if v, aerr := strconv.Atoi(os.Getenv("XBOX_META_DIAG_MODE")); aerr == nil {
+		mode = v
+	}
+	verbose := false
+	if vp := os.Getenv("XBOX_META_DIAG_VERBOSE"); vp != "" && os.Getenv("XBOX_DEV") == "1" {
+		verbose = regexp.MustCompile(vp).MatchString(addr)
+	}
 	dialer := &net.Dialer{Timeout: 6 * time.Second}
+	dialOK := time.Now()
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
+	if verbose {
+		fmt.Fprintf(os.Stderr, "[stage] %s dial %.1fs\n", addr, time.Since(dialOK).Seconds())
+	}
 	if _, err := btHandshake(conn, ih); err != nil {
 		return nil, err
 	}
+	if verbose {
+		fmt.Fprintf(os.Stderr, "[stage] %s handshake ok\n", addr)
+	}
 	// 我们声明支持 ut_metadata（对方未必用得上，但规范上先广播）
-	if err := btWriteMsg(conn, 20, btJoinExt(0, map[string]any{
-		"m":             map[string]any{"ut_metadata": 1},
-		"p":             dhtListenPort,
-		"v":             "X-Box " + version,
-		"metadata_size": 0,
-	}, nil)); err != nil {
-		return nil, err
+	switch {
+	case mode == 1: // 不发扩展握手，只读帧
+	case mode == 2: // 字面 bencode 扩展握手（与 diag2 完全一致）
+		if err := btWriteMsg(conn, 20, append([]byte{0},
+			[]byte("d1:md12:ut_metadatai1eee1:p68811:v6:diagt1e")...)); err != nil {
+			return nil, err
+		}
+	default: // 引擎标准路径
+		if err := btWriteMsg(conn, 20, btJoinExt(0, map[string]any{
+			"m":             map[string]any{"ut_metadata": 1},
+			"p":             dhtListenPort,
+			"v":             "X-Box " + version,
+			"metadata_size": 0,
+		}, nil)); err != nil {
+			return nil, err
+		}
+	}
+	if verbose && mode != 1 {
+		fmt.Fprintf(os.Stderr, "[stage] %s ext-hs sent\n", addr)
 	}
 	var ms btMetaState
-	deadline := time.Now().Add(60 * time.Second)
+	until, _ := ctx.Deadline() // 单 peer 上限（外层 WithTimeout 保证非零）
+	if until.IsZero() {
+		until = time.Now().Add(60 * time.Second)
+	}
 	// 逐帧循环直到拼齐或败
 	for {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(until) {
 			return nil, fmt.Errorf("元数据获取超时")
 		}
-		typ, pl, err := btReadMsg(conn)
+		typ, pl, err := btReadMsgUntil(conn, until)
+		if verbose {
+			fmt.Fprintf(os.Stderr, "[stage] %s frame typ=%d len=%d err=%v\n", addr, typ, len(pl), err)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -199,6 +261,13 @@ func btFetchMetaFromPeer(ctx context.Context, addr string, ih [20]byte) (*btMeta
 		}
 		switch typ {
 		case 20: // 扩展
+			if verbose {
+				hl := len(pl)
+				if hl > 120 {
+					hl = 120
+				}
+				fmt.Fprintf(os.Stderr, "[stage] %s extframe id=%d head=%q\n", addr, pl[0], string(pl[1:hl]))
+			}
 			if len(pl) == 0 {
 				continue
 			}
@@ -218,10 +287,17 @@ func btFetchMetaFromPeer(ctx context.Context, addr string, ih [20]byte) (*btMeta
 				if err := reqMissingMeta(conn, &ms); err != nil {
 					return nil, err
 				}
-			} else if ms.peerID > 0 && pl[0] == ms.peerID {
+			} else {
+				// 部分客户端（libtorrent 系）回数据帧标的是我方广告的扩展 id 而非
+				// 其自报 id，故按帧内容识别 ut_metadata（msg_type 1/2 + piece），
+				// 不做 pl[0]==ms.peerID 严格断定；其它扩展（如 ut_pex 无 msg_type）自然放过。
 				d, tail, err := btSplitExt(pl)
 				if err != nil {
 					return nil, err
+				}
+				if verbose {
+					fmt.Fprintf(os.Stderr, "[stage] %s meta-dict msg_type=%d piece=%d total_size=%d taillen=%d have=%v pend=%d\n",
+						addr, btInt(d, "msg_type"), btInt(d, "piece"), btInt(d, "total_size"), len(tail), ms.have, ms.pending)
 				}
 				if int(btInt(d, "msg_type")) == 2 {
 					return nil, fmt.Errorf("对方拒绝元数据请求")
@@ -269,7 +345,8 @@ func allHave(h []bool) bool {
 	return true
 }
 
-// reqMissingMeta 补发缺失片（一次最多 8 个挂起请求，防止窗口满）
+// reqMissingMeta 补发缺失片（一次填满 8 个挂起请求；v1.3.41 及之前每轮只发 1 个，
+// 管线深度 1，每个元数据片都要等一个 RTT，慢元数据容易撞 60s 窗口）
 func reqMissingMeta(conn net.Conn, ms *btMetaState) error {
 	flight := ms.pending
 	for i := 0; i < len(ms.have) && flight < 8; i++ {
@@ -282,8 +359,6 @@ func reqMissingMeta(conn net.Conn, ms *btMetaState) error {
 		}
 		flight++
 		ms.pending = flight
-		// 补挂起：只发一个刚缺的，剩余走下一轮（收到数据后再补）
-		break
 	}
 	return nil
 }

@@ -20,6 +20,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,12 +43,19 @@ type btPeerAddr struct {
 
 func (a btPeerAddr) String() string { return net.JoinHostPort(a.Host, strconv.Itoa(a.Port)) }
 
+// dhtEntry 节点池条目：地址 + KID（idOK=false 表示还没学到对方 id）
+type dhtEntry struct {
+	id   [20]byte
+	idOK bool
+	addr btPeerAddr
+}
+
 // dhtNode 全局 DHT 实例
 type dhtNode struct {
 	mu     sync.Mutex
 	conn   *net.UDPConn
 	own    [20]byte // 自造 KID
-	nodes  map[string]btPeerAddr
+	nodes  map[string]dhtEntry
 	order  []string
 	tokens map[string][]string // 节点 IP → 最近拿到的 announce token（最多 4 个）
 	waits  map[string]chan map[string]any
@@ -63,7 +71,7 @@ var dhtG struct {
 func dhtInit() *dhtNode {
 	dhtG.once.Do(func() {
 		n := &dhtNode{
-			nodes:  map[string]btPeerAddr{},
+			nodes:  map[string]dhtEntry{},
 			tokens: map[string][]string{},
 			waits:  map[string]chan map[string]any{},
 		}
@@ -181,14 +189,17 @@ func (n *dhtNode) handle(pkt []byte, raddr *net.UDPAddr) {
 	}
 }
 
-// onResp 响应：唤醒等待者 + 学节点 + 缓存 token
+// onResp 响应：唤醒等待者 + 学节点（带 KID）+ 缓存 token
 func (n *dhtNode) onResp(m map[string]any, raddr *net.UDPAddr) {
-	n.learnNode(raddr)
+	respID := ""
 	if r, ok := m["r"].(map[string]any); ok {
+		if s, isStr := r["id"].(string); isStr {
+			respID = s
+		}
 		if ns, ok := r["nodes"].(string); ok {
 			for i := 0; i+26 <= len(ns); i += 26 {
 				if p := decodeCompactNode(ns[i : i+26]); p != nil {
-					n.learnNode(p)
+					n.learnNodeE(p, []byte(ns[i:i+20])) // 前 20B 是节点 KID
 				}
 			}
 		}
@@ -202,6 +213,7 @@ func (n *dhtNode) onResp(m map[string]any, raddr *net.UDPAddr) {
 			n.mu.Unlock()
 		}
 	}
+	n.learnNodeE(raddr, []byte(respID))
 	if t := btStr(m, "t"); t != "" {
 		n.mu.Lock()
 		ch := n.waits[t]
@@ -217,7 +229,13 @@ func (n *dhtNode) onResp(m map[string]any, raddr *net.UDPAddr) {
 
 // onQuery 礼貌回复 ping / get_peers
 func (n *dhtNode) onQuery(m map[string]any, raddr *net.UDPAddr) {
-	n.learnNode(raddr)
+	qID := ""
+	if a, ok := m["a"].(map[string]any); ok {
+		if s, isStr := a["id"].(string); isStr {
+			qID = s
+		}
+	}
+	n.learnNodeE(raddr, []byte(qID))
 	var r map[string]any
 	switch btStr(m, "q") {
 	case "get_peers":
@@ -246,8 +264,8 @@ func (n *dhtNode) tokenFor(a *net.UDPAddr) string {
 	return fmt.Sprintf("x%d%x", seed, a.IP[len(a.IP)-1])[:10]
 }
 
-// learnNode 收编节点（LRU 上限）
-func (n *dhtNode) learnNode(a *net.UDPAddr) {
+// learnNodeE 收编节点并记录 KID（LRU 上限）；id 不足 20B 时仅学地址
+func (n *dhtNode) learnNodeE(a *net.UDPAddr, id []byte) {
 	if a == nil || a.Port <= 0 || a.Port > 65535 || a.IP == nil {
 		return
 	}
@@ -258,8 +276,13 @@ func (n *dhtNode) learnNode(a *net.UDPAddr) {
 	key := net.JoinHostPort(ip, strconv.Itoa(a.Port))
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if _, ok := n.nodes[key]; !ok {
-		n.nodes[key] = btPeerAddr{Host: ip, Port: a.Port}
+	if e, ok := n.nodes[key]; !ok {
+		e = dhtEntry{addr: btPeerAddr{Host: ip, Port: a.Port}}
+		if len(id) == 20 {
+			copy(e.id[:], id)
+			e.idOK = true
+		}
+		n.nodes[key] = e
 		n.order = append(n.order, key)
 		if size := len(n.order); size > dhtMaxNodes {
 			drop := n.order[0]
@@ -268,7 +291,13 @@ func (n *dhtNode) learnNode(a *net.UDPAddr) {
 		}
 		return
 	}
-	// 已存在 → 挪到队尾
+	// 已存在：补学 KID（先学到的节点后来才知道 id）→ 挪到队尾
+	e := n.nodes[key]
+	if !e.idOK && len(id) == 20 {
+		copy(e.id[:], id)
+		e.idOK = true
+		n.nodes[key] = e
+	}
 	for i, k := range n.order {
 		if k == key {
 			copy(n.order[i:], n.order[i+1:])
@@ -306,7 +335,10 @@ func (n *dhtNode) ping(a *net.UDPAddr) {
 	n.queryMsg(a, "ping", map[string]any{"id": n.own[:]})
 }
 
-// getPeers 单次查询，返回本包中的 peers（nodes 也退回给任务，下轮再测活）
+// getPeers 单次查询。注意：r["nodes"] 是 Kademlia 路由节点（不是该资源的 peer！），
+// 节点只进池子供后续逼近查询，绝不喂给任务当 peer——v1.3.41 的「已发现 peer 25 但
+// 全部抓取失败」根因就是把路由节点当 peer 拨号（它们大多 TCP 不开/不做种，注定失败），
+// 而真 peer 在 values 字段里。节点本身由 onResp 捎带学习。
 func (n *dhtNode) getPeers(a *net.UDPAddr, ih [20]byte) (peers []btPeerAddr, err error) {
 	v, err := n.queryMsg(a, "get_peers", map[string]any{"id": n.own[:], "info_hash": ih[:]})
 	if err != nil {
@@ -315,13 +347,6 @@ func (n *dhtNode) getPeers(a *net.UDPAddr, ih [20]byte) (peers []btPeerAddr, err
 	r, isMap := v["r"].(map[string]any)
 	if !isMap {
 		return nil, fmt.Errorf("响应缺 r")
-	}
-	if ns, ok := r["nodes"].(string); ok {
-		for i := 0; i+26 <= len(ns); i += 26 {
-			if p := decodeCompactNode(ns[i : i+26]); p != nil && p.Port > 0 {
-				peers = append(peers, btPeerAddr{Host: p.IP.String(), Port: p.Port})
-			}
-		}
 	}
 	if vs, ok := r["values"].([]any); ok {
 		for _, item := range vs {
@@ -340,6 +365,17 @@ func (n *dhtNode) getPeers(a *net.UDPAddr, ih [20]byte) (peers []btPeerAddr, err
 		}
 	}
 	return peers, nil
+}
+
+// dhtXorLess 两个已知 KID 的节点到 target 的 XOR 距离比较（更小=更近=优先查）
+func dhtXorLess(a, b dhtEntry, target [20]byte) bool {
+	for i := 0; i < 20; i++ {
+		xa, xb := a.id[i]^target[i], b.id[i]^target[i]
+		if xa != xb {
+			return xa < xb
+		}
+	}
+	return false
 }
 
 func decodeCompactPeer(s string) btPeerAddr {
@@ -403,24 +439,44 @@ func (n *dhtNode) queryMsg(a *net.UDPAddr, q string, args map[string]any) (map[s
 	return nil, fmt.Errorf("DHT 响应超时")
 }
 
-// findPeers 任务持续动态查询：一直找 peers 直到 ctx 结束；找到回调 out
+// findPeers 任务级 Kademlia 逼近查询：每轮从池子里挑「离目标 infohash 最近」的
+// 未试节点批量 get_peers；响应里学到的新节点（更靠近目标）下一轮自然优先。
+// 全池试完还没新节点就歇 3s 重置再扫（顺带探活）。直到 ctx 结束。
 func (n *dhtNode) findPeers(taskCtx context.Context, ih [20]byte, out func(btPeerAddr)) {
 	defer func() { recover() }()
+	tried := map[string]bool{}
+	const dhtWalkBatch = 16
 	for {
-		// 户外扩散：从池子捞 24 个节点逐个 get_peers
+		// 候选：池内全部可查节点，按 XOR 距离排序（无 KID 的排最后，稳定序）
 		n.mu.Lock()
-		hot := make([]btPeerAddr, 0, 24)
-		for i := len(n.order) - 1; i >= 0 && len(hot) < 24; i-- {
-			if p, ok := n.nodes[n.order[i]]; ok && p.Port > 0 {
-				hot = append(hot, p)
+		cand := make([]dhtEntry, 0, len(n.nodes))
+		for _, e := range n.nodes {
+			if e.addr.Port > 0 && !tried[e.addr.String()] {
+				cand = append(cand, e)
 			}
 		}
 		n.mu.Unlock()
-		for _, a := range hot {
+		sort.SliceStable(cand, func(i, j int) bool {
+			ci, cj := cand[i], cand[j]
+			switch {
+			case ci.idOK && cj.idOK:
+				return dhtXorLess(ci, cj, ih)
+			case ci.idOK:
+				return true
+			case cj.idOK:
+				return false
+			}
+			return false
+		})
+		if len(cand) > dhtWalkBatch {
+			cand = cand[:dhtWalkBatch]
+		}
+		for _, e := range cand {
 			if taskCtx.Err() != nil {
 				break
 			}
-			up, err := net.ResolveUDPAddr("udp", a.String())
+			tried[e.addr.String()] = true
+			up, err := net.ResolveUDPAddr("udp", e.addr.String())
 			if err != nil {
 				continue
 			}
@@ -434,12 +490,26 @@ func (n *dhtNode) findPeers(taskCtx context.Context, ih [20]byte, out func(btPee
 				}
 			}
 		}
-		select {
-		case <-taskCtx.Done():
+		if taskCtx.Err() != nil {
 			// 结束时做种回报（好公民）
 			go n.announceAll(ih)
 			return
-		case <-time.After(3 * time.Second):
+		}
+		if len(cand) == 0 {
+			select {
+			case <-taskCtx.Done():
+				go n.announceAll(ih)
+				return
+			case <-time.After(3 * time.Second):
+				tried = map[string]bool{} // 全试过：歇片刻重置再扫
+			}
+		} else {
+			select {
+			case <-taskCtx.Done():
+				go n.announceAll(ih)
+				return
+			case <-time.After(time.Second):
+			}
 		}
 	}
 }
@@ -450,8 +520,8 @@ func (n *dhtNode) announceAll(ih [20]byte) {
 	n.mu.Lock()
 	hot := make([]btPeerAddr, 0, 8)
 	for i := len(n.order) - 1; i >= 0 && len(hot) < 8; i-- {
-		if p, ok := n.nodes[n.order[i]]; ok && p.Port > 0 {
-			hot = append(hot, p)
+		if e, ok := n.nodes[n.order[i]]; ok && e.addr.Port > 0 {
+			hot = append(hot, e.addr)
 		}
 	}
 	n.mu.Unlock()

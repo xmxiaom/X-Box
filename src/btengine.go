@@ -36,11 +36,12 @@ import (
 )
 
 const (
-	btMaxTasks       = 8 // 引擎同时任务数
+	btMaxTasks       = 8  // 引擎同时任务数
 	btMaxConns       = 10 // 单种并发下载连接
-	btMetaTryTimeout = 3 * time.Minute    // 元数据阶段总窗口（DHT 冷启动/冷门做种需要余地）
-	btMetaMaxPeers   = 8                  // 元数据阶段并发拨号上限（先到先得）
-	btMaxTrackers    = 20                 // 合并磁力自带(含 udp://) + 公共 tracker 的上限
+	btMetaTryTimeout = 3 * time.Minute // 元数据阶段总窗口（DHT 冷启动/冷门做种需要余地）
+	btMetaMaxPeers   = 12              // 元数据阶段并发拨号上限（先到先得）
+	btMetaIPCap      = 3               // 同一 IP 最多尝试的端口数（防假 seeder 农场占满并发槽）
+	btMaxTrackers    = 20              // 合并磁力自带(含 udp://) + 公共 tracker 的上限
 	btMaxTorrentSz   = int64(4) << 30
 	btBlockLen       = 16 << 10 // 分块 16KB
 	btPipelineBlocks = 8        // 单连接挂起块数
@@ -287,9 +288,12 @@ func runTask(t *btTask, trackers []string) {
 	var meta *btMeta
 	deadline := time.Now().Add(btMetaTryTimeout)
 	tried := map[string]bool{}
+	ipTries := map[string]int{} // 同 IP 端口尝试计数（超过 btMetaIPCap 跳过，防假 seeder 农场刷屏）
+	whys := map[string]int{}    // 失败原因聚合（写进超时错误消息，用户可自查）
 	type btMetaTry struct {
-		ok bool
-		m  *btMeta
+		ok  bool
+		m   *btMeta
+		why string
 	}
 	resCh := make(chan btMetaTry, 16)
 	inflight := 0
@@ -302,13 +306,20 @@ func runTask(t *btTask, trackers []string) {
 			inflight--
 			if r.ok {
 				meta = r.m
+			} else {
+				whys[r.why]++
 			}
 		case a := <-peerCh:
 			addr := a.String()
-			if tried[addr] || inflight >= btMetaMaxPeers {
+			host, _, herr := net.SplitHostPort(addr)
+			if herr != nil {
+				host = addr
+			}
+			if tried[addr] || inflight >= btMetaMaxPeers || ipTries[host] >= btMetaIPCap {
 				continue
 			}
 			tried[addr] = true
+			ipTries[host]++
 			t.mu.Lock()
 			t.seenN = len(tried)
 			t.mu.Unlock()
@@ -316,7 +327,7 @@ func runTask(t *btTask, trackers []string) {
 			go func(addr string) {
 				defer func() { recover() }()
 				m, err := btFetchMetaFromPeer(ctx, addr, t.hash)
-				r := btMetaTry{ok: err == nil && m != nil, m: m}
+				r := btMetaTry{ok: err == nil && m != nil, m: m, why: btMetaWhy(err)}
 				select {
 				case resCh <- r:
 				case <-ctx.Done():
@@ -333,10 +344,23 @@ func runTask(t *btTask, trackers []string) {
 		if n := dhtN(); n != nil {
 			dmsg = fmt.Sprintf("，DHT 节点 %d", n.poolSize())
 		}
+		wmsg := ""
+		if len(whys) > 0 {
+			keys := make([]string, 0, len(whys))
+			for k := range whys {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%s %d", k, whys[k]))
+			}
+			wmsg = "（失败 " + strings.Join(parts, " / ") + "）"
+		}
 		if seenN == 0 {
 			t.setLock("error", fmt.Sprintf("获取种子信息超时：未发现任何 peer%s——该资源可能无做种在线；若 DHT 节点为 0 则是本机网络限制 UDP / tracker 访问", dmsg))
 		} else {
-			t.setLock("error", fmt.Sprintf("获取种子信息超时：已发现 peer %d%s 但全部抓取失败——网络受限或做种已离线", seenN, dmsg))
+			t.setLock("error", fmt.Sprintf("获取种子信息超时：已尝试 peer %d%s%s 但无一成功——资源可能冷门或网络受限", seenN, wmsg, dmsg))
 		}
 		return
 	}
@@ -593,6 +617,11 @@ func btTrackerAnnounce(tr string, ih [20]byte, out func(btPeerAddr)) {
 			out(decodeCompactPeer(p[i : i+6]))
 		}
 	}
+	if p6, ok := d["peers6"].(string); ok { // IPv6 compact peers（BEP7）
+		for i := 0; i+18 <= len(p6); i += 18 {
+			out(decodeCompactPeerV6(p6[i : i+18]))
+		}
+	}
 	if lst, ok := d["peers"].([]any); ok {
 		for _, e := range lst {
 			if pd, ok := e.(map[string]any); ok {
@@ -611,6 +640,35 @@ func maxI(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// btMetaWhy 元数据抓取失败原因归类（聚合后写进任务错误消息，帮助用户自查网络）
+func btMetaWhy(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "forcibly closed"):
+		return "对端重置"
+	case strings.Contains(s, "connection refused"):
+		return "拒连"
+	case strings.Contains(s, "EOF"):
+		return "断开"
+	case strings.Contains(s, "broken pipe"):
+		return "断开"
+	case strings.Contains(s, "timeout") || strings.Contains(s, "timeout"):
+		return "超时"
+	case strings.Contains(s, "不支持"):
+		return "不支持元数据"
+	case strings.Contains(s, "不匹配"):
+		return "异种"
+	case strings.Contains(s, "拒绝"):
+		return "拒回"
+	case strings.Contains(s, "异常"):
+		return "异常"
+	}
+	return "其他"
 }
 
 // ---------- 文件布局 ----------
