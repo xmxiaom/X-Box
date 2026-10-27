@@ -20,6 +20,11 @@ import (
 type DlConfig struct {
 	VideoDir string `json:"videoDir"` // 视频下载目录（磁力任务落盘根目录）
 	MusicDir string `json:"musicDir"` // 音乐下载目录（mp3 直下 / 磁力音频）
+
+	// 并发与线程（v1.3.43）：0 表示用引擎默认值
+	MaxTasks int `json:"maxTasks,omitempty"` // 同时下载的任务数（1-8，默认 3）
+	MaxConns int `json:"maxConns,omitempty"` // 单任务的并发连接数（4-40，默认 16）
+	Pipeline int `json:"pipeline,omitempty"` // 单连接的挂起块数（4-32，默认 16）
 }
 
 // dlConfigPath 配置文件路径
@@ -40,19 +45,46 @@ func loadDlConfig() DlConfig {
 	}
 	cfg.VideoDir = strings.TrimSpace(cfg.VideoDir)
 	cfg.MusicDir = strings.TrimSpace(cfg.MusicDir)
+	cfg.MaxTasks = dlClampInt(cfg.MaxTasks, 1, btMaxTasks, dlDefMaxTasks)
+	cfg.MaxConns = dlClampInt(cfg.MaxConns, 4, 40, dlDefMaxConns)
+	cfg.Pipeline = dlClampInt(cfg.Pipeline, 4, 32, dlDefPipeline)
 	return cfg
+}
+
+// dlClampInt 取值夹紧（0 或越界回落默认值）
+func dlClampInt(v, lo, hi, def int) int {
+	if v <= 0 {
+		return def
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // saveDlConfig 落盘（0600）
 func saveDlConfig(cfg DlConfig) error {
 	cfg.VideoDir = strings.TrimSpace(cfg.VideoDir)
 	cfg.MusicDir = strings.TrimSpace(cfg.MusicDir)
+	cfg.MaxTasks = dlClampInt(cfg.MaxTasks, 1, btMaxTasks, dlDefMaxTasks)
+	cfg.MaxConns = dlClampInt(cfg.MaxConns, 4, 40, dlDefMaxConns)
+	cfg.Pipeline = dlClampInt(cfg.Pipeline, 4, 32, dlDefPipeline)
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(dlConfigPath(), b, 0o600)
 }
+
+// 并发默认值（设置页可调；调小省带宽，调大提速）
+const (
+	dlDefMaxTasks = 3  // 同时下载任务数
+	dlDefMaxConns = 16 // 单任务并发连接
+	dlDefPipeline = 16 // 单连接挂起块数（16 块 = 256KB 管线）
+)
 
 // dlDefaultDir 缺省下载目录：首个媒体根（/vol1 等）下的 downloads 子目录。
 // 不主动创建（用户保存配置时才建），返回建议值。

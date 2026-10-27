@@ -36,6 +36,27 @@ type NetInfo struct {
 	DNS      []string   `json:"dns"`
 }
 
+// netCounter 网卡累计字节快照（仪表盘每秒轮询用）
+type netCounter struct {
+	RxBytes int64 `json:"rx"`
+	TxBytes int64 `json:"tx"`
+}
+
+// collectNetCounters 只读 /proc/net/dev 的累计字节数，不做差值计算。
+// 速率由前端按**真实请求间隔**换算（浏览器端最清楚两次请求实际隔了多久，
+// 且不会与 30s 的 overview 共用同一份采样状态互相干扰）。
+func collectNetCounters() map[string]netCounter {
+	dev, err := readProcNetDev()
+	if err != nil {
+		return map[string]netCounter{}
+	}
+	out := make(map[string]netCounter, len(dev))
+	for name, v := range dev {
+		out[name] = netCounter{RxBytes: v[0], TxBytes: v[1]}
+	}
+	return out
+}
+
 var netLastMu sync.Mutex
 var netLastStat map[string][2]int64 // name -> [rx,tx]
 var netLastAt time.Time

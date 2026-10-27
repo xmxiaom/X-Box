@@ -292,12 +292,19 @@ type DlMusicTask struct {
 	Artist string    `json:"artist"`
 	Source string    `json:"source,omitempty"` // netease / kuwo（空默认 netease）
 	Path   string    `json:"path,omitempty"`
-	Status string    `json:"status"` // running / ok / error / cancel
+	Status string    `json:"status"` // running / paused / ok / error / cancel
 	Bytes  int64     `json:"bytes"`
 	Totals int64     `json:"total"`
 	Err    string    `json:"err,omitempty"`
 	At     time.Time `json:"at"`
 	Dir    string    `json:"dir"`
+
+	// 暂停/续传（v1.3.43）：暂停保留 .part 与进度，继续时用 HTTP Range 断点续传
+	paused bool
+	// 续传上下文（仅内存，不出 JSON）
+	songID int64
+	kwItem DlKwItem
+	gen    int // 轮次代号：暂停/续传多次时丢弃过期轮次的收尾写入
 }
 
 var dlMusStore struct {
@@ -397,60 +404,84 @@ func dlMusStart(cfg DlConfig, req dlMusReq) (*DlMusicTask, error) {
 	id := fmt.Sprintf("m%d%d", time.Now().UnixNano(), req.SongID)
 	fname := dlMusFileClean(req.Artist+" - "+req.Name) + ".mp3"
 	path := dlMusUniquePath(dir, fname)
-	ctx, cancel := context.WithCancel(context.Background())
 	st := &DlMusicTask{
 		ID:     id,
 		Song:   req.Name,
 		Artist: req.Artist,
 		Source: req.Source,
 		Path:   path,
-		Status: "running",
+		Status: "pending", // 交给 dlMusLaunch 置 running（若直接置 running，launch 会误判「已在跑」而不启动）
 		Dir:    dir,
 		At:     time.Now(),
+		songID: req.SongID,
+		kwItem: req.Kw,
 	}
 	dlMusStore.mu.Lock()
 	dlMusStore.tasks[id] = st
-	dlMusStore.canc[id] = cancel
 	dlMusStore.mu.Unlock()
-	dl := func() {
-		switch req.Source {
-		case "kuwo":
-			dlMusDoDownloadKuwo(ctx, st, req.Kw)
-		default:
-			dlMusDoDownload(ctx, st, req.SongID)
-		}
-	}
-	select {
-	case dlMusStore.sem <- struct{}{}:
-		go func() {
-			defer func() { <-dlMusStore.sem }()
-			dl()
-		}()
-	default:
-		// 队列满：这个任务继续等信号量（不阻塞 API 响应）
-		go func() {
-			select {
-			case dlMusStore.sem <- struct{}{}:
-				defer func() { <-dlMusStore.sem }()
-				dl()
-			case <-ctx.Done():
-			}
-		}()
-	}
+	dlMusLaunch(st)
 	return st, nil
 }
 
-// dlMusDoDownload 执行下载：outer url → 302 跟踪（/404 即 VIP/无版权）→ 流式写文件
-func dlMusDoDownload(ctx context.Context, st *DlMusicTask, songID int64) {
-	defer dlMusRecoverPanic(st)
-	defer func() {
-		dlMusStore.mu.Lock()
-		if dlMusStore.canc != nil {
-			delete(dlMusStore.canc, st.ID)
-		}
-		dlMusStore.tasks[st.ID] = st
+// dlMusLaunch 拉起一轮下载（占并发槽）；已在跑或已终态则忽略。
+// 暂停后继续走同一入口 → 复用 .part 与已下载字节，实现断点续传。
+func dlMusLaunch(st *DlMusicTask) {
+	dlMusInit()
+	dlMusStore.mu.Lock()
+	if st.Status == "running" {
 		dlMusStore.mu.Unlock()
+		return
+	}
+	st.gen++
+	gen := st.gen
+	ctx, cancel := context.WithCancel(context.Background())
+	dlMusStore.canc[st.ID] = cancel
+	dlMusStore.tasks[st.ID] = st
+	dlMusStore.mu.Unlock()
+
+	st.paused = false
+	st.Status = "running"
+	st.Err = ""
+
+	go func() {
+		defer func() { recover() }()
+		select {
+		case dlMusStore.sem <- struct{}{}:
+			defer func() { <-dlMusStore.sem }()
+		case <-ctx.Done():
+			return
+		}
+		if st.Source == "kuwo" {
+			dlMusDoDownloadKuwo(ctx, st, st.kwItem, gen)
+		} else {
+			dlMusDoDownload(ctx, st, st.songID, gen)
+		}
 	}()
+}
+
+// dlMusPartOffset 已下载到 .part 的字节数（续传起点）
+func dlMusPartOffset(st *DlMusicTask) int64 {
+	fi, err := os.Stat(st.Path + ".part")
+	if err != nil || fi.Size() <= 0 {
+		return 0
+	}
+	return fi.Size()
+}
+
+// dlMusEndRound 轮次收尾：仅当代号匹配（未被新轮次顶替）时写回并清 cancel
+func dlMusEndRound(st *DlMusicTask, gen int) {
+	dlMusStore.mu.Lock()
+	if st.gen == gen {
+		delete(dlMusStore.canc, st.ID)
+		dlMusStore.tasks[st.ID] = st
+	}
+	dlMusStore.mu.Unlock()
+}
+
+// dlMusDoDownload 执行下载：outer url → 302 跟踪（/404 即 VIP/无版权）→ 流式写文件
+func dlMusDoDownload(ctx context.Context, st *DlMusicTask, songID int64, gen int) {
+	defer dlMusRecoverPanic(st)
+	defer dlMusEndRound(st, gen)
 	finalize := func(status, errMsg string) {
 		st.Status = status
 		st.Err = errMsg
@@ -464,6 +495,10 @@ func dlMusDoDownload(ctx context.Context, st *DlMusicTask, songID int64) {
 	}
 	req.Header.Set("User-Agent", dlDefaultUA)
 	req.Header.Set("Referer", "https://music.163.com/")
+	off := dlMusPartOffset(st)
+	if off > 0 {
+		req.Header.Set("Range", "bytes="+strconv.FormatInt(off, 10)+"-")
+	}
 	// 不自动跟随：识别 302→/404（VIP/无版权）的明确信号；Transport borrow 自
 	// dlHTTP（可注入打桩），重定向规则本任务自带
 	client := &http.Client{
@@ -483,12 +518,14 @@ func dlMusDoDownload(ctx context.Context, st *DlMusicTask, songID int64) {
 	if err != nil {
 		if strings.Contains(err.Error(), dlMusErrVIP404) {
 			finalize("error", "VIP/无版权曲目，客户端直连无法下载（会员需在官方客户端完成）")
+		} else if ctx.Err() != nil {
+			dlMusInterrupted(st, finalize)
 		} else {
 			finalize("error", "下载失败："+err.Error())
 		}
 		return
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		resp.Body.Close()
 		finalize("error", fmt.Sprintf("HTTP %d", resp.StatusCode))
 		return
@@ -498,20 +535,17 @@ func dlMusDoDownload(ctx context.Context, st *DlMusicTask, songID int64) {
 		finalize("error", "服务端返回 HTML（非音频），跳过")
 		return
 	}
-	dlMusStreamBody(ctx, st, resp, finalize)
+	// 206 说明续传被接受；200 说明服务端忽略 Range → 从头覆盖，起点归零
+	if resp.StatusCode == 200 && off > 0 {
+		off = 0
+	}
+	dlMusStreamBody(ctx, st, resp, finalize, off)
 }
 
-// dlMusDoDownloadKuwo 酷我下载：antiserver 解析直链 → 流式落盘
-func dlMusDoDownloadKuwo(ctx context.Context, st *DlMusicTask, it DlKwItem) {
+// dlMusDoDownloadKuwo 酷我下载：antiserver 解析直链 → 流式落盘（同样支持 Range 续传）
+func dlMusDoDownloadKuwo(ctx context.Context, st *DlMusicTask, it DlKwItem, gen int) {
 	defer dlMusRecoverPanic(st)
-	defer func() {
-		dlMusStore.mu.Lock()
-		if dlMusStore.canc != nil {
-			delete(dlMusStore.canc, st.ID)
-		}
-		dlMusStore.tasks[st.ID] = st
-		dlMusStore.mu.Unlock()
-	}()
+	defer dlMusEndRound(st, gen)
 	finalize := func(status, errMsg string) {
 		st.Status = status
 		st.Err = errMsg
@@ -519,6 +553,10 @@ func dlMusDoDownloadKuwo(ctx context.Context, st *DlMusicTask, it DlKwItem) {
 	}
 	link, err := dlKwResolveLink(ctx, it.Rid)
 	if err != nil {
+		if ctx.Err() != nil {
+			dlMusInterrupted(st, finalize)
+			return
+		}
 		finalize("error", "酷我直链解析失败："+err.Error())
 		return
 	}
@@ -529,17 +567,38 @@ func dlMusDoDownloadKuwo(ctx context.Context, st *DlMusicTask, it DlKwItem) {
 	}
 	req.Header.Set("User-Agent", dlDefaultUA)
 	req.Header.Set("Referer", "https://kuwo.cn/")
+	off := dlMusPartOffset(st)
+	if off > 0 {
+		req.Header.Set("Range", "bytes="+strconv.FormatInt(off, 10)+"-")
+	}
 	resp, err := dlHTTP.Do(req)
 	if err != nil {
-		finalize("error", "下载失败："+err.Error())
+		if ctx.Err() != nil {
+			dlMusInterrupted(st, finalize)
+		} else {
+			finalize("error", "下载失败："+err.Error())
+		}
 		return
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		resp.Body.Close()
 		finalize("error", fmt.Sprintf("HTTP %d", resp.StatusCode))
 		return
 	}
-	dlMusStreamBody(ctx, st, resp, finalize)
+	if resp.StatusCode == 200 && off > 0 {
+		off = 0
+	}
+	dlMusStreamBody(ctx, st, resp, finalize, off)
+}
+
+// dlMusInterrupted 中断归因：用户暂停（保留 .part 续传）还是取消（清理 .part）
+func dlMusInterrupted(st *DlMusicTask, finalize func(string, string)) {
+	if st.paused {
+		finalize("paused", "")
+		return
+	}
+	os.Remove(st.Path + ".part")
+	finalize("cancel", "已取消")
 }
 
 // dlMusFinalize 终态统一写回
@@ -570,31 +629,45 @@ func dlMusRecoverPanic(st *DlMusicTask) {
 	}
 }
 
-// dlMusStreamBody 音频体流式落盘（mp3 头校验 / 空体拦截 / 取消 / 中断处理）
-func dlMusStreamBody(ctx context.Context, st *DlMusicTask, resp *http.Response, finalize func(string, string)) {
+// dlMusStreamBody 音频体流式落盘（mp3 头校验 / 空体拦截 / 取消 / 暂停续传）
+// off>0 表示续传：.part 以追加模式打开，跳过 mp3 头校验（头部已校验过）。
+func dlMusStreamBody(ctx context.Context, st *DlMusicTask, resp *http.Response, finalize func(string, string), off int64) {
 	defer resp.Body.Close()
 	// 简单格式保险：Content-Length 立刻为 0 / 或内容不是 mp3 头，判定失真
-	if resp.ContentLength == 0 {
+	if resp.ContentLength == 0 && off == 0 {
 		finalize("error", "响应为空（可能 VIP/无版权，请换一首试试）")
 		return
 	}
-	st.Totals = resp.ContentLength
+	if off == 0 {
+		st.Totals = resp.ContentLength
+	}
+	st.Bytes = off
 	tmp := st.Path + ".part"
-	defer os.Remove(tmp)
-	f, err := os.Create(tmp)
+	flags := os.O_CREATE | os.O_WRONLY
+	if off > 0 {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(tmp, flags, 0o644)
 	if err != nil {
 		finalize("error", "创建文件失败："+err.Error())
 		return
 	}
 	head := make([]byte, 0, 16)
 	buf := make([]byte, 32<<10)
-	firstChunk := true
+	firstChunk := off == 0 // 续传时不再校验头
 	for {
 		select {
 		case <-ctx.Done():
 			f.Close()
-			os.Remove(tmp)
-			finalize("cancel", "已取消")
+			// 暂停保留 .part 供续传；取消才清理
+			if st.paused {
+				finalize("paused", "")
+			} else {
+				os.Remove(tmp)
+				finalize("cancel", "已取消")
+			}
 			return
 		default:
 		}
@@ -627,8 +700,12 @@ func dlMusStreamBody(ctx context.Context, st *DlMusicTask, resp *http.Response, 
 			// interrupted = ctx canceled 的包装
 			if ctx.Err() != nil {
 				f.Close()
-				os.Remove(tmp)
-				finalize("cancel", "已取消")
+				if st.paused {
+					finalize("paused", "")
+				} else {
+					os.Remove(tmp)
+					finalize("cancel", "已取消")
+				}
 				return
 			}
 			f.Close()
@@ -652,7 +729,7 @@ func dlMusStreamBody(ctx context.Context, st *DlMusicTask, resp *http.Response, 
 // dlMusErrVIP404 自定义错误串（网易云外链对 VIP 曲的 /404 重定向）
 const dlMusErrVIP404 = "__MSIC_VIP404__"
 
-// dlMusCancel 取消任务
+// dlMusCancel 取消任务（终态，清理 .part）
 func dlMusCancel(id string) {
 	dlMusInit()
 	dlMusStore.mu.Lock()
@@ -660,10 +737,61 @@ func dlMusCancel(id string) {
 	if ok {
 		delete(dlMusStore.canc, id)
 	}
+	if t := dlMusStore.tasks[id]; t != nil {
+		t.paused = false
+		if t.Status == "running" || t.Status == "paused" {
+			t.Status = "cancel"
+			t.Err = "已取消"
+			t.At = time.Now()
+		}
+	}
 	dlMusStore.mu.Unlock()
 	if ok {
 		c()
 	}
+}
+
+// dlMusPause 暂停音乐任务（保留 .part，可续传）。返回 false 表示不可暂停。
+func dlMusPause(id string) bool {
+	dlMusInit()
+	dlMusStore.mu.Lock()
+	t := dlMusStore.tasks[id]
+	if t == nil || t.Status != "running" {
+		dlMusStore.mu.Unlock()
+		return false
+	}
+	t.paused = true
+	t.Status = "paused"
+	t.Err = ""
+	c := dlMusStore.canc[id]
+	dlMusStore.mu.Unlock()
+	if c != nil {
+		c() // 打断本轮；.part 保留
+	}
+	return true
+}
+
+// dlMusResume 继续音乐任务：从 .part 续传（HTTP Range）
+func dlMusResume(id string) bool {
+	dlMusInit()
+	dlMusStore.mu.Lock()
+	t := dlMusStore.tasks[id]
+	if t == nil || t.Status != "paused" {
+		dlMusStore.mu.Unlock()
+		return false
+	}
+	dlMusStore.mu.Unlock()
+	dlMusLaunch(t)
+	return true
+}
+
+// dlMusIsRunning 单任务是否运行中（批量判定用）
+func dlMusIsRunning(id string) bool {
+	dlMusInit()
+	dlMusStore.mu.Lock()
+	defer dlMusStore.mu.Unlock()
+	t := dlMusStore.tasks[id]
+	return t != nil && t.Status == "running"
 }
 
 // dlMusTaskList 任务列表（按时间倒序，截掉 40 条以前）

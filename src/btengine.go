@@ -36,18 +36,127 @@ import (
 )
 
 const (
-	btMaxTasks       = 8  // 引擎同时任务数
-	btMaxConns       = 10 // 单种并发下载连接
+	btMaxTasks       = 8               // 同时任务数上限（设置页可在 1-8 调）
 	btMetaTryTimeout = 3 * time.Minute // 元数据阶段总窗口（DHT 冷启动/冷门做种需要余地）
-	btMetaMaxPeers   = 12              // 元数据阶段并发拨号上限（先到先得）
+	btMetaMaxPeers   = 24              // 元数据阶段并发拨号上限（先到先得；调大加速出种）
 	btMetaIPCap      = 3               // 同一 IP 最多尝试的端口数（防假 seeder 农场占满并发槽）
 	btMaxTrackers    = 20              // 合并磁力自带(含 udp://) + 公共 tracker 的上限
 	btMaxTorrentSz   = int64(4) << 30
-	btBlockLen       = 16 << 10 // 分块 16KB
-	btPipelineBlocks = 8        // 单连接挂起块数
+	btBlockLen       = 16 << 10 // 分块 16KB（协议标准值，不能改）
 	btStalePiece     = 40 * time.Second
 	btPeersChCap     = 256
+
+	// 并发默认值（设置页可调；见 dlDefMaxConns / dlDefPipeline）
+	btDefMaxConns = 16 // 单任务并发连接
+	btDefPipeline = 16 // 单连接挂起块数（16*16KB = 256KB 管线）
+	btMaxConnsCap = 40 // 单任务并发连接硬上限
+	btPipeCap     = 32 // 单连接挂起块数硬上限
 )
+
+// 运行时并发参数（由 dlConfig 注入；未设置时用默认值）
+var btTune struct {
+	mu       sync.RWMutex
+	maxConns int
+	pipeline int
+}
+
+func btTuneInit() {
+	btTune.mu.Lock()
+	if btTune.maxConns == 0 {
+		btTune.maxConns = btDefMaxConns
+	}
+	if btTune.pipeline == 0 {
+		btTune.pipeline = btDefPipeline
+	}
+	btTune.mu.Unlock()
+}
+
+// btApplyTune 应用配置（任务启动/设置变更时调用）
+func btApplyTune(cfg DlConfig) {
+	btTune.mu.Lock()
+	btTune.maxConns = dlClampInt(cfg.MaxConns, 4, btMaxConnsCap, btDefMaxConns)
+	btTune.pipeline = dlClampInt(cfg.Pipeline, 4, btPipeCap, btDefPipeline)
+	btTune.mu.Unlock()
+	btStore.lim.setLimit(dlClampInt(cfg.MaxTasks, 1, btMaxTasks, dlDefMaxTasks))
+}
+
+func btTuneConns() int {
+	btTuneInit()
+	btTune.mu.RLock()
+	defer btTune.mu.RUnlock()
+	return btTune.maxConns
+}
+
+func btTunePipeline() int {
+	btTuneInit()
+	btTune.mu.RLock()
+	defer btTune.mu.RUnlock()
+	return btTune.pipeline
+}
+
+// btLimiter 可调并发限流器（同时任务数可运行时调整）
+type btLimiter struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	limit   int
+	running int
+}
+
+func (l *btLimiter) init(limit int) {
+	l.mu.Lock()
+	if l.cond == nil {
+		l.cond = sync.NewCond(&l.mu)
+	}
+	if l.limit <= 0 {
+		l.limit = limit
+	}
+	l.mu.Unlock()
+}
+
+// setLimit 调整上限（调大立刻唤醒等待者）
+func (l *btLimiter) setLimit(n int) {
+	l.mu.Lock()
+	l.limit = n
+	l.mu.Unlock()
+	l.cond.Broadcast()
+}
+
+// acquire 占一个槽（阻塞直到有空位或 ctx 取消）。返回 false 表示 ctx 已取消。
+func (l *btLimiter) acquire(ctx context.Context) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for l.running >= l.limit {
+		if ctx.Err() != nil {
+			return false
+		}
+		// 用 goroutine 把 ctx 取消转成 Broadcast，避免 Cond 无法感知 ctx
+		stop := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				l.cond.Broadcast()
+			case <-stop:
+			}
+		}()
+		l.cond.Wait()
+		close(stop)
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	l.running++
+	return true
+}
+
+// release 释放槽
+func (l *btLimiter) release() {
+	l.mu.Lock()
+	if l.running > 0 {
+		l.running--
+	}
+	l.mu.Unlock()
+	l.cond.Broadcast()
+}
 
 // btDefaultTrackers 公共 tracker 兜底：磁力自带 tr 列表薄时保证 peer 发现半径。
 // 只用 http/https（btTrackerLoop 不实现 udp tracker）。
@@ -109,6 +218,17 @@ type btTask struct {
 	cancel context.CancelFunc
 	ctx    context.Context
 
+	// 暂停/续传（v1.3.43）：paused 期间保留 meta/have/prep（已落盘分片 + 文件句柄），
+	// 恢复时从断点继续，不重建文件、不重抓元数据。
+	// 暂停即退出工作轮次（释放并发槽，不占 btMaxTasks），resume 重新拉起；
+	// meta/have/prep 全保留 → 真断点续传（不重抓元数据、不重开文件、不重下已完成分片）。
+	paused     bool
+	pauseGen   int                // 暂停代次：每暂停一次 +1；轮次据此判定「被暂停打断」而非「停止」
+	active     bool               // 是否有工作轮次在跑（占着并发槽）；暂停后为 false
+	workCancel context.CancelFunc // 当前工作轮次取消（暂停/停止都打它）
+	prep       *btPrepared        // 文件布局（续传复用，避免 uniquePath 改名/截断）
+	trackers   []string           // 合并后的 tracker 列表（续传重新拉起时复用）
+
 	testPeers []string // 测试注入：只直连这些地址（跳过 tracker/DHT）
 }
 
@@ -116,14 +236,14 @@ var btStore struct {
 	mu    sync.Mutex
 	tasks map[string]*btTask
 	order []string
-	sema  chan struct{}
+	lim   btLimiter // 同时任务数（可运行时调整）
 	once  sync.Once
 }
 
 func btInit() {
 	btStore.once.Do(func() {
 		btStore.tasks = map[string]*btTask{}
-		btStore.sema = make(chan struct{}, btMaxTasks)
+		btStore.lim.init(dlDefMaxTasks)
 		dhtInit()
 	})
 }
@@ -136,6 +256,7 @@ func btCreate(magnet, dir, title string) (*btTask, error) {
 // btCreateEx 变体：testPeers 非 nil 时只直连这些地址（单测 fake seeder 用）
 func btCreateEx(magnet, dir, title string, testPeers []string) (*btTask, error) {
 	btInit()
+	btApplyTune(loadDlConfig()) // 设置页的并发/线程配置在每次入队时生效
 	hash, dn, trackers, err := btMagnet(magnet)
 	if err != nil {
 		return nil, err
@@ -178,23 +299,22 @@ func btCreateEx(magnet, dir, title string, testPeers []string) (*btTask, error) 
 	btStore.order = append(btStore.order, id)
 	btStore.mu.Unlock()
 
-	select {
-	case btStore.sema <- struct{}{}:
-		go func() {
-			defer func() { <-btStore.sema }()
-			runTask(t, trackers)
-		}()
-	default:
-		go func() {
-			select {
-			case btStore.sema <- struct{}{}:
-				runTask(t, trackers)
-			case <-t.ctx.Done():
-			case <-time.After(30 * time.Minute):
+	// 队列满时不阻塞 API：后台等槽位（30 分钟排队上限），拿到槽才开始跑
+	t.mu.Lock()
+	t.trackers = trackers
+	t.mu.Unlock()
+	go func() {
+		qctx, qcancel := context.WithTimeout(t.ctx, 30*time.Minute)
+		defer qcancel()
+		if !btStore.lim.acquire(qctx) {
+			if qctx.Err() != nil && t.ctx.Err() == nil {
 				t.setLock("error", "排队超时（同时任务过多）")
 			}
-		}()
-	}
+			return
+		}
+		defer btStore.lim.release()
+		runTask(t, trackers)
+	}()
 	return t, nil
 }
 
@@ -208,17 +328,124 @@ func (t *btTask) setLock(status, errMsg string) {
 	t.mu.Unlock()
 }
 
-// runTask 主流程
+// runTask 单轮任务执行（占一个并发槽）：抓元数据 → 下载。暂停/停止时返回，
+// 由调度层（btStartWork）决定是否在恢复后重新拉起新的一轮。
+// 退出时不释放 prep（暂停要续传），只有终态才在 btReleasePrep 里释放。
 func runTask(t *btTask, trackers []string) {
 	defer func() {
 		if r := recover(); r != nil {
 			t.setLock("error", "内部错误："+fmt.Sprint(r))
 		}
 	}()
-	ctx := t.ctx
-	t.setLock("fetching", "")
+	// 首轮把合并后的 tracker 存进任务，续传时直接用（不重复 merge）
+	t.mu.Lock()
+	if t.trackers == nil {
+		t.trackers = trackers
+	}
+	wctx, wcancel := context.WithCancel(t.ctx)
+	t.workCancel = wcancel
+	t.active = true
+	genAtStart := t.pauseGen // 记录本轮启动时的暂停代次（区分「暂停打断」与「停止」）
+	t.mu.Unlock()
 
-	// 速度打点：每秒计算 written 差值（字节/秒）
+	reason := btRunOnce(t, trackers, wctx, genAtStart)
+	wcancel()
+
+	t.mu.Lock()
+	t.workCancel = nil
+	t.active = false
+	t.mu.Unlock()
+
+	if reason == "paused" || reason == "stopped" {
+		// 暂停后又立刻点继续：resume 时本轮可能还没退干净（active 仍 true，
+		// btStartWork 被挡），在此接管重启，避免任务停在运行态却没人干活。
+		if reason == "paused" && !t.btIsPaused() {
+			btStartWork(t)
+		}
+		return
+	}
+	btReleasePrep(t) // done/error 才真正放掉文件句柄
+}
+
+// btReleasePrep 释放文件布局（终态收尾）
+func btReleasePrep(t *btTask) {
+	t.mu.Lock()
+	p := t.prep
+	t.prep = nil
+	t.mu.Unlock()
+	if p != nil {
+		p.btCloseAllPrep()
+	}
+}
+
+// btStartWork 拉起一轮工作（占并发槽）；已在跑或已终态则忽略。
+func btStartWork(t *btTask) {
+	btInit()
+	t.mu.Lock()
+	if t.active || t.ctx.Err() != nil {
+		t.mu.Unlock()
+		return
+	}
+	st := t.Status
+	if !btActiveStatus(st) && st != "paused" {
+		t.mu.Unlock()
+		return
+	}
+	trs := t.trackers
+	t.mu.Unlock()
+
+	go func() {
+		if !btStore.lim.acquire(t.ctx) {
+			return
+		}
+		defer btStore.lim.release()
+		runTask(t, trs)
+	}()
+}
+
+// btIsPaused 当前是否处于用户暂停态
+func (t *btTask) btIsPaused() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.paused
+}
+
+// btStopReason 工作轮次被 ctx 打断时的归因。
+// 关键：暂停后立刻点继续时 paused 已被清 false，若只看 paused 会把「暂停打断」
+// 误判成「停止」→ 任务直接进 stopped 终态。故用轮次启动时记录的暂停代次比对：
+// 代次变了说明本轮是被暂停打断的，应保持 paused 状态等下一轮。
+func (t *btTask) btStopReason(genAtStart int) string {
+	t.mu.Lock()
+	changed := t.pauseGen != genAtStart
+	paused := t.paused
+	t.mu.Unlock()
+	if changed || paused {
+		return "paused"
+	}
+	t.setLock("stopped", "")
+	return "stopped"
+}
+
+// btRunOnce 单轮工作：抓元数据（已有则跳过）→ 文件布局（已有则复用）→ worker 池。
+// 返回 "done" / "error" / "stopped" / "paused"。
+func btRunOnce(t *btTask, trackers []string, ctx context.Context, genAtStart int) string {
+	defer func() {
+		if r := recover(); r != nil {
+			t.setLock("error", "内部错误："+fmt.Sprint(r))
+		}
+	}()
+
+	// 首次进入才置 fetching；续传（meta 已在）直接回到下载态
+	t.mu.Lock()
+	hasMeta := t.meta != nil
+	t.mu.Unlock()
+	if !hasMeta {
+		t.setLock("fetching", "")
+	}
+
+	// 速度打点：每秒采样 written 增量，显示值取最近 5 秒平均。
+	// 整片校验通过才写盘 → 瞬时差会时不时为 0（大分片尤其明显），
+	// 直接显示瞬时值前端就会「速度一会有一会没有」，故做滑动平均。
 	go func() {
 		defer func() { recover() }()
 		tk := time.NewTicker(1 * time.Second)
@@ -226,14 +453,34 @@ func runTask(t *btTask, trackers []string) {
 		t.mu.Lock()
 		prev := t.written
 		t.mu.Unlock()
+		samples := make([]int64, 0, 5)
 		for {
 			select {
 			case <-ctx.Done():
+				t.mu.Lock()
+				t.speed = 0
+				t.mu.Unlock()
 				return
 			case <-tk.C:
 				t.mu.Lock()
-				t.speed = t.written - prev
-				prev = t.written
+				cur := t.written
+				delta := cur - prev
+				prev = cur
+				t.mu.Unlock()
+				if delta < 0 {
+					delta = 0
+				}
+				samples = append(samples, delta)
+				if len(samples) > 5 {
+					samples = samples[1:]
+				}
+				var sum int64
+				for _, s := range samples {
+					sum += s
+				}
+				avg := sum / int64(len(samples))
+				t.mu.Lock()
+				t.speed = avg
 				t.mu.Unlock()
 			}
 		}
@@ -284,102 +531,59 @@ func runTask(t *btTask, trackers []string) {
 		}
 	}
 
-	// ---- 阶段 1：元数据（每 peer 一路并发先到先得 + infohash 核对） ----
-	var meta *btMeta
-	deadline := time.Now().Add(btMetaTryTimeout)
-	tried := map[string]bool{}
-	ipTries := map[string]int{} // 同 IP 端口尝试计数（超过 btMetaIPCap 跳过，防假 seeder 农场刷屏）
-	whys := map[string]int{}    // 失败原因聚合（写进超时错误消息，用户可自查）
-	type btMetaTry struct {
-		ok  bool
-		m   *btMeta
-		why string
-	}
-	resCh := make(chan btMetaTry, 16)
-	inflight := 0
-	for meta == nil && time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			t.setLock("stopped", "")
-			return
-		case r := <-resCh:
-			inflight--
-			if r.ok {
-				meta = r.m
-			} else {
-				whys[r.why]++
-			}
-		case a := <-peerCh:
-			addr := a.String()
-			host, _, herr := net.SplitHostPort(addr)
-			if herr != nil {
-				host = addr
-			}
-			if tried[addr] || inflight >= btMetaMaxPeers || ipTries[host] >= btMetaIPCap {
-				continue
-			}
-			tried[addr] = true
-			ipTries[host]++
+	// ---- 阶段 1：元数据（续传时已在内存，直接跳过重新抓取） ----
+	t.mu.Lock()
+	meta := t.meta
+	t.mu.Unlock()
+	if meta == nil {
+		// 先查磁盘缓存：同一资源重试/重启后免抓取，秒进下载态
+		if m := btMetaCacheGet(t.hash); m != nil {
+			meta = m
 			t.mu.Lock()
-			t.seenN = len(tried)
+			t.meta = meta
 			t.mu.Unlock()
-			inflight++
-			go func(addr string) {
-				defer func() { recover() }()
-				m, err := btFetchMetaFromPeer(ctx, addr, t.hash)
-				r := btMetaTry{ok: err == nil && m != nil, m: m, why: btMetaWhy(err)}
-				select {
-				case resCh <- r:
-				case <-ctx.Done():
-				}
-			}(addr)
-		case <-time.After(2 * time.Second):
 		}
 	}
 	if meta == nil {
+		var errMsg string
+		meta, errMsg = btFetchMetaPhase(ctx, t, peerCh)
+		if meta == nil {
+			if errMsg != "" {
+				t.setLock("error", errMsg)
+				return "error"
+			}
+			return t.btStopReason(genAtStart) // ctx 被打断：暂停或停止
+		}
 		t.mu.Lock()
-		seenN := t.seenN
+		t.meta = meta
 		t.mu.Unlock()
-		dmsg := ""
-		if n := dhtN(); n != nil {
-			dmsg = fmt.Sprintf("，DHT 节点 %d", n.poolSize())
-		}
-		wmsg := ""
-		if len(whys) > 0 {
-			keys := make([]string, 0, len(whys))
-			for k := range whys {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			parts := make([]string, 0, len(keys))
-			for _, k := range keys {
-				parts = append(parts, fmt.Sprintf("%s %d", k, whys[k]))
-			}
-			wmsg = "（失败 " + strings.Join(parts, " / ") + "）"
-		}
-		if seenN == 0 {
-			t.setLock("error", fmt.Sprintf("获取种子信息超时：未发现任何 peer%s——该资源可能无做种在线；若 DHT 节点为 0 则是本机网络限制 UDP / tracker 访问", dmsg))
-		} else {
-			t.setLock("error", fmt.Sprintf("获取种子信息超时：已尝试 peer %d%s%s 但无一成功——资源可能冷门或网络受限", seenN, wmsg, dmsg))
-		}
-		return
 	}
 
-	// ---- 文件布局进下载态 ----
-	full, ferr := btPrepareFiles(t, meta)
-	if ferr != nil {
-		t.setLock("error", ferr.Error())
-		return
-	}
-	defer full.btCloseAllPrep()
+	// ---- 文件布局进下载态（续传复用已打开布局，不重建文件） ----
 	t.mu.Lock()
-	t.meta = meta
-	t.have = make([]bool, meta.btNumPieces())
-	t.doneN = 0
-	t.written = 0
-	t.Status = "downloading"
-	t.Err = ""
+	full := t.prep
 	t.mu.Unlock()
+	if full == nil {
+		var ferr error
+		full, ferr = btPrepareFiles(t, meta)
+		if ferr != nil {
+			t.setLock("error", ferr.Error())
+			return "error"
+		}
+		t.mu.Lock()
+		t.prep = full
+		t.have = make([]bool, meta.btNumPieces())
+		t.doneN = 0
+		t.written = 0
+		t.Status = "downloading"
+		t.Err = ""
+		t.mu.Unlock()
+	} else {
+		t.mu.Lock()
+		t.Status = "downloading"
+		t.Err = ""
+		t.mu.Unlock()
+	}
 
 	// ---- 阶段 2：worker 池 ----
 	tech := map[int]bool{} // 已分配未完成片（跨 worker）
@@ -388,8 +592,7 @@ func runTask(t *btTask, trackers []string) {
 	total := meta.btNumPieces()
 	for {
 		if ctx.Err() != nil {
-			t.setLock("stopped", "")
-			return
+			return t.btStopReason(genAtStart)
 		}
 		t.mu.Lock()
 		alldone := t.doneN >= total
@@ -410,7 +613,7 @@ func runTask(t *btTask, trackers []string) {
 			} else {
 				t.inflight[addr] = time.Now()
 			}
-			need := active < btMaxConns
+			need := active < btTuneConns()
 			t.mu.Unlock()
 			if recent || !need {
 				continue
@@ -421,16 +624,134 @@ func runTask(t *btTask, trackers []string) {
 			t.mu.Lock()
 			okTech := len(tech) == 0
 			t.mu.Unlock()
+			// 连接空转 20s：主动补拉一轮 peer（tracker 自身周期 60s，避免长时间零速空转）
+			if active == 0 && t.testPeers == nil && stall%5 == 0 && stall <= 25 {
+				btReannounce(trackers, t.hash, feed)
+			}
 			// 3 分钟无速度、无连接、无挂起片 → 停滞收场
 			if stall > 45 && noSpeed && active == 0 && okTech {
 				t.setLock("error", "长时间无可用 peer，下载停滞（资源冷门或网络受限）")
-				return
+				return "error"
 			}
 		}
 	}
 	t.setLock("done", "")
 	if n := dhtN(); n != nil {
 		go n.announceAll(t.hash)
+	}
+	return "done"
+}
+
+// btFetchMetaPhase 阶段1：每 peer 一路并发先到先得 + infohash 核对。
+// 返回 (nil,"") 表示被 ctx 打断（暂停/停止，归因交给调用方）；(nil,errMsg) 表示超时失败。
+func btFetchMetaPhase(ctx context.Context, t *btTask, peerCh chan btPeerAddr) (*btMeta, string) {
+	deadline := time.Now().Add(btMetaTryTimeout)
+	tried := map[string]bool{}
+	ipTries := map[string]int{} // 同 IP 端口尝试计数（超过 btMetaIPCap 跳过，防假 seeder 农场刷屏）
+	whys := map[string]int{}    // 失败原因聚合（写进超时错误消息，用户可自查）
+	type btMetaTry struct {
+		ok  bool
+		m   *btMeta
+		why string
+	}
+	resCh := make(chan btMetaTry, 64)
+	inflight := 0
+	var meta *btMeta
+	for meta == nil && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return nil, ""
+		case r := <-resCh:
+			inflight--
+			if r.ok {
+				meta = r.m
+			} else {
+				whys[r.why]++
+			}
+		case a := <-peerCh:
+			addr := a.String()
+			host, _, herr := net.SplitHostPort(addr)
+			if herr != nil {
+				host = addr
+			}
+			// 快速失败归因（对端重置/拒连）不该继续占并发槽，故上限只限制在拨号数
+			if tried[addr] || inflight >= btMetaMaxPeers || ipTries[host] >= btMetaIPCap {
+				continue
+			}
+			tried[addr] = true
+			ipTries[host]++
+			t.mu.Lock()
+			t.seenN = len(tried)
+			t.mu.Unlock()
+			inflight++
+			go func(addr string) {
+				defer func() { recover() }()
+				m, err := btFetchMetaFromPeer(ctx, addr, t.hash)
+				r := btMetaTry{ok: err == nil && m != nil, m: m, why: btMetaWhy(err)}
+				select {
+				case resCh <- r:
+				case <-ctx.Done():
+				}
+			}(addr)
+		case <-time.After(500 * time.Millisecond):
+			// 更快轮转：peerCh 空时不再干等 2s，让 resCh 结果尽早回到主循环
+		}
+	}
+	if meta != nil {
+		btMetaCachePut(t.hash, meta)
+		// 阶段1 已握手的 peer 直接回喂给阶段2：否则要等 tracker 下一轮 60s 才有 peer，
+		// 白白空转（这是「元数据到手后进度迟迟不动」的常见原因）。
+		for a := range tried {
+			if host, port, err := net.SplitHostPort(a); err == nil {
+				if pn, perr := strconv.Atoi(port); perr == nil && pn > 0 {
+					select {
+					case peerCh <- btPeerAddr{Host: host, Port: pn}:
+					default:
+					}
+				}
+			}
+		}
+		return meta, ""
+	}
+	t.mu.Lock()
+	seenN := t.seenN
+	t.mu.Unlock()
+	dmsg := ""
+	if n := dhtN(); n != nil {
+		dmsg = fmt.Sprintf("，DHT 节点 %d", n.poolSize())
+	}
+	wmsg := ""
+	if len(whys) > 0 {
+		keys := make([]string, 0, len(whys))
+		for k := range whys {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s %d", k, whys[k]))
+		}
+		wmsg = "（失败 " + strings.Join(parts, " / ") + "）"
+	}
+	if seenN == 0 {
+		return nil, fmt.Sprintf("获取种子信息超时：未发现任何 peer%s——该资源可能无做种在线；若 DHT 节点为 0 则是本机网络限制 UDP / tracker 访问", dmsg)
+	}
+	return nil, fmt.Sprintf("获取种子信息超时：已尝试 peer %d%s%s 但无一成功——资源可能冷门或网络受限", seenN, wmsg, dmsg)
+}
+
+// btReannounce 补拉一轮 peer（下载期连接空转时调用，绕过 tracker 60s 周期）
+func btReannounce(trackers []string, ih [20]byte, out func(btPeerAddr)) {
+	defer func() { recover() }()
+	for _, tr := range trackers {
+		tr := tr
+		go func() {
+			defer func() { recover() }()
+			if strings.HasPrefix(tr, "udp:") {
+				btUDPTrackerAnnounce(tr, ih, out, false)
+			} else if strings.HasPrefix(tr, "http") {
+				btTrackerAnnounce(tr, ih, out)
+			}
+		}()
 	}
 }
 
@@ -933,7 +1254,8 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 			pendAt = time.Now()
 		}
 		// 挂起块（管线尺寸内尽量填满）——已收（recv）与挂起（sent）都不再请求
-		if len(sent) >= btPipelineBlocks {
+		pipe := btTunePipeline()
+		if len(sent) >= pipe {
 			if time.Since(pendAt) > btStalePiece { // 全挂起但长期无返回：重置该片
 				techMu.Lock()
 				delete(tech, curPiece)
@@ -941,7 +1263,7 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 				holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
 			}
 		} else {
-			for off := 0; off < len(curBuf) && len(sent) < btPipelineBlocks; off = nextBlockOff(curBuf, off) {
+			for off := 0; off < len(curBuf) && len(sent) < pipe; off = nextBlockOff(curBuf, off) {
 				if sent[off] || recv[off] {
 					continue
 				}
@@ -1002,24 +1324,161 @@ func btNextPiece(t *btTask, techMu *sync.Mutex, tech map[int]bool, meta *btMeta,
 
 // ---------- 对外（dlapi 调） ----------
 
-// btCancel 取消/停止任务
+// btFind 按 id 找任务
+func btFind(id string) *btTask {
+	btInit()
+	btStore.mu.Lock()
+	defer btStore.mu.Unlock()
+	return btStore.tasks[id]
+}
+
+// btPause 暂停任务：打断本轮工作并让出并发槽，保留 meta/have/prep（已落盘分片 +
+// 文件句柄），恢复时从断点续传。返回 false 表示当前状态不可暂停（终态）。
+func btPause(id string) bool {
+	t := btFind(id)
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	st := t.Status
+	if !btActiveStatus(st) {
+		t.mu.Unlock()
+		return st == "paused"
+	}
+	t.paused = true
+	t.pauseGen++ // 标记本轮被暂停打断（即使随后立刻 resume，也不会误判为 stopped）
+	t.Status = "paused"
+	t.Err = ""
+	t.speed = 0
+	wc := t.workCancel
+	t.mu.Unlock()
+	if wc != nil {
+		wc() // 打断本轮（worker/tracker/DHT 都挂在轮次 ctx 上），runTask 退出并释放槽位
+	}
+	return true
+}
+
+// btResume 继续任务：重新拉起一轮工作，沿用已有 meta/have/prep → 断点续传
+func btResume(id string) bool {
+	t := btFind(id)
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	if t.Status != "paused" {
+		t.mu.Unlock()
+		return false
+	}
+	t.paused = false
+	t.Err = ""
+	t.speed = 0
+	// 立刻回到运行态（不必等槽位），列表即时反馈
+	if t.meta != nil {
+		t.Status = "downloading"
+	} else {
+		t.Status = "fetching"
+	}
+	t.mu.Unlock()
+	btStartWork(t)
+	return true
+}
+
+// btCancel 取消/停止任务（终态 stopped，释放文件句柄，不保留续传能力）
 func btCancel(id string) {
 	btInit()
 	btStore.mu.Lock()
 	t := btStore.tasks[id]
 	btStore.mu.Unlock()
-	if t != nil && t.cancel != nil {
-		t.setLock("stopped", "")
+	if t == nil {
+		return
+	}
+	t.setLock("stopped", "")
+	t.mu.Lock()
+	t.paused = false
+	wc := t.workCancel
+	t.mu.Unlock()
+	if wc != nil {
+		wc()
+	}
+	if t.cancel != nil {
 		t.cancel()
 	}
+	btReleasePrep(t)
 }
 
-// btRemove 移除终态任务
+// btActiveStatus 运行态判定（可暂停/可停止）
+func btActiveStatus(st string) bool {
+	return st == "pending" || st == "fetching" || st == "downloading"
+}
+
+// btPauseAll 全部暂停（只作用于运行中任务），返回受影响数量
+func btPauseAll() int {
+	btInit()
+	ids := btAllIDs()
+	n := 0
+	for _, id := range ids {
+		if btPause(id) {
+			n++
+		}
+	}
+	return n
+}
+
+// btResumeAll 全部继续，返回受影响数量
+func btResumeAll() int {
+	btInit()
+	ids := btAllIDs()
+	n := 0
+	for _, id := range ids {
+		if btResume(id) {
+			n++
+		}
+	}
+	return n
+}
+
+// btCancelAllTasks 全部停止（运行中 + 暂停中的都停），返回受影响数量
+func btCancelAllTasks() int {
+	btInit()
+	ids := btAllIDs()
+	n := 0
+	for _, id := range ids {
+		if t := btFind(id); t != nil {
+			t.mu.Lock()
+			st := t.Status
+			t.mu.Unlock()
+			if btActiveStatus(st) || st == "paused" {
+				btCancel(id)
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// btAllIDs 任务 id 快照
+func btAllIDs() []string {
+	btStore.mu.Lock()
+	defer btStore.mu.Unlock()
+	out := make([]string, 0, len(btStore.order))
+	out = append(out, btStore.order...)
+	return out
+}
+
+// btRemove 移除终态任务（运行中/暂停中不可移除：先停止）
 func btRemove(id string) {
 	btInit()
 	btStore.mu.Lock()
 	t, ok := btStore.tasks[id]
-	if ok && t.Status != "pending" && t.Status != "fetching" && t.Status != "downloading" {
+	if ok {
+		t.mu.Lock()
+		st := t.Status
+		t.mu.Unlock()
+		if btActiveStatus(st) || st == "paused" {
+			ok = false
+		}
+	}
+	if ok {
 		delete(btStore.tasks, id)
 		for i, x := range btStore.order {
 			if x == id {
@@ -1029,6 +1488,44 @@ func btRemove(id string) {
 		}
 	}
 	btStore.mu.Unlock()
+}
+
+// btClearDone 清除已完成任务，返回清除数量
+func btClearDone() int {
+	btInit()
+	btStore.mu.Lock()
+	defer btStore.mu.Unlock()
+	n := 0
+	keep := btStore.order[:0]
+	for _, id := range btStore.order {
+		t := btStore.tasks[id]
+		st := ""
+		if t != nil {
+			t.mu.Lock()
+			st = t.Status
+			t.mu.Unlock()
+		}
+		if st == "done" {
+			delete(btStore.tasks, id)
+			n++
+			continue
+		}
+		keep = append(keep, id)
+	}
+	btStore.order = keep
+	return n
+}
+
+// btClearAll 清空任务列表（运行中先停止），返回清除数量
+func btClearAll() int {
+	btInit()
+	btCancelAllTasks()
+	btStore.mu.Lock()
+	n := len(btStore.tasks)
+	btStore.tasks = map[string]*btTask{}
+	btStore.order = nil
+	btStore.mu.Unlock()
+	return n
 }
 
 // btCancelAll 关停全部（测试用）

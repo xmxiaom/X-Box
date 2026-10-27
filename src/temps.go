@@ -356,3 +356,9 @@ func handleTemps(w http.ResponseWriter, r *http.Request) {
 	t := collectTempsCached()
 	ok(w, map[string]any{"cpu": t.CPU, "cpuMax": t.CPUMax, "disks": t.Disks})
 }
+
+// handleNetRates 轻量网络计数接口（前端每秒轮询，自己按真实间隔算速率）。
+// 只回累计字节数（不做差值），网卡/IP/网关等低频信息仍走 30s 的 overview。
+func handleNetRates(w http.ResponseWriter, r *http.Request) {
+	ok(w, map[string]any{"ifaces": collectNetCounters()})
+}

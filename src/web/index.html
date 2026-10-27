@@ -1103,8 +1103,9 @@ async function loadMediaTasks(){
 }
 
 function renderMediaPage(){
-  if(mediaTab === 'vdl'){ dlVideoRender(); return; }
-  if(mediaTab === 'mdl'){ dlMusicRender(); return; }
+  if(mediaTab === 'vdl'){ dlListKind = 'video'; dlVideoRender(); dlVideoLoadList(); return; }
+  if(mediaTab === 'mdl'){ dlListKind = 'music'; dlMusicRender(); dlMusicLoadTasks(); return; }
+  dlListKind = null;
   const isV = mediaTab === 'video';
   const list = mediaCache.filter(t => t.kind === mediaTab);
   document.getElementById('media-sub').textContent = '共 ' + list.length + ' 个' + (isV ? '视频' : '音频') + '任务';
@@ -1612,9 +1613,63 @@ async function loadOverview(){
       ['X-Box 版本', 'v'+j.version],
     ].map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v" style="max-width:60%;text-align:right;word-break:break-all">${esc(v||'—')}</span></div>`).join('');
     document.getElementById('ov-net').innerHTML = renderNet(j.net);
+    netPrev = null; // 网络块刚重建，速率基线重置（下一轮重新取基线）
     if(!natLoaded) runNAT(false); // 首次进入仪表盘自动探测 NAT，之后沿用结果不重复探测
     startTempLoop(); // 温度 5s 动态刷新（幂等）
+    startNetRateLoop(); // 网络上下行速率 1s 刷新（幂等）
   }catch(e){ toast(e.message,'err'); }
+}
+
+/* ---------- 网络上下行速度每秒刷新（只改速率文字，不重建页面） ---------- */
+// 整页 overview 30s 一次（网卡/IP/网关/磁盘都不需要高频），速率单独高频轮询，
+// 否则速度数字严重滞后、看下载有没有在跑完全没有参考价值。
+// 速率按**真实采样间隔**换算：后端只回累计字节数，前端用 performance.now()
+// 记录上一轮时间戳，实际隔了多久就除以多久（定时器漂移/请求耗时/页面挂起都不失真）。
+let netRateTimer = null, netRateBusy = false;
+let netPrev = null; // {at: ms, ifaces: {name: [rx, tx]}}
+
+async function netRateTick(){
+  if(netRateBusy) return;
+  // 只有仪表盘可见时才轮询（切到别的页面不发请求）
+  const page = document.getElementById('page-overview');
+  if(!page || !page.classList.contains('active')) { netPrev = null; return; }
+  netRateBusy = true;
+  const t0 = performance.now();
+  try{
+    const j = await api('/api/netrates', {timeoutMs: 4000});
+    const t1 = performance.now();
+    const cur = j.ifaces || {};
+    const m = {};
+    if(netPrev && (t1 - netPrev.at) > 0){
+      const dt = (t1 - netPrev.at) / 1000; // 真实间隔（秒）
+      Object.keys(cur).forEach(name => {
+        const p = netPrev.ifaces[name];
+        if(!p) return;
+        const drx = cur[name].rx - p[0];
+        const dtx = cur[name].tx - p[1];
+        // 计数器回绕/网卡重置时差值为负 → 记 0，不显示负数
+        m[name] = [drx >= 0 ? Math.round(drx / dt) : 0, dtx >= 0 ? Math.round(dtx / dt) : 0];
+      });
+    }
+    netPrev = {at: t1, ifaces: Object.keys(cur).reduce((o, k) => (o[k] = [cur[k].rx, cur[k].tx], o), {})};
+    if(!m || !Object.keys(m).length) return; // 首轮只记基线，不显示（避免 0 B/s 误导）
+    document.querySelectorAll('#ov-net .net-rate').forEach(el => {
+      const name = el.getAttribute('data-if');
+      const v = m[name];
+      if(!v) return;
+      el.innerHTML = '↓' + fmtRate(v[0]) + ' ↑' + fmtRate(v[1]);
+    });
+  }catch(e){
+    netPrev = null; // 断一次就重新取基线，避免用陈旧时间戳算出离谱速率
+  }finally{
+    netRateBusy = false;
+  }
+}
+
+function startNetRateLoop(){
+  if(netRateTimer) return; // 幂等
+  netRateTick();
+  netRateTimer = setInterval(netRateTick, 1000);
 }
 
 /* ---------- 温度动态刷新（/api/temps 5s 轮询，仅局部更新温度节点，不重建整页） ---------- */
@@ -1682,7 +1737,7 @@ function renderNet(net){
     return `<div class="net-block">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <span style="font-weight:600" class="mono">${esc(f.name)}${tag}</span>
-        <span style="font-size:12px;color:var(--text2);white-space:nowrap">↓${fmtRate(f.rxRate)} ↑${fmtRate(f.txRate)}</span>
+        <span class="net-rate" data-if="${esc(f.name)}" style="font-size:12px;color:var(--text2);white-space:nowrap">↓${fmtRate(f.rxRate)} ↑${fmtRate(f.txRate)}</span>
       </div>
       <div class="net-detail">
         <div><span>IPv4</span>${ip4}</div>
@@ -3140,11 +3195,11 @@ function dlVideoRender(){
     '<div style="display:flex;gap:8px;margin-bottom:12px">' +
       '<input type="text" id="dlv-kw" placeholder="搜索电影 / 剧集 / 动漫资源名（支持中英文）" style="flex:1" onkeydown="if(event.key===\'Enter\')dlVideoSearch()">' +
       '<button class="btn btn-primary" id="dlv-go" onclick="dlVideoSearch()">搜索</button>' +
-      '<button class="btn btn-outline" onclick="dlListModalOpen(\'video\')">下载列表</button>' +
       '<button class="btn btn-outline" onclick="dlVideoOpenSettings()">设置</button>' +
     '</div>' +
     '<div id="dlv-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>' +
-    '<div id="dlv-results"></div>';
+    '<div id="dlv-results"></div>' +
+    dlTaskPanelHTML('video');
   if(!dlVCfg) dlVideoLoadCfg(true);
   const kw = document.getElementById('dlv-kw');
   if(kw && !kw.value && dlVLastKw) kw.value = dlVLastKw;
@@ -3254,43 +3309,83 @@ function dlTaskStatusBadge(t){
     }
     case 'done':
       return {badge: '<span class="badge badge-green" style="font-size:10.5px"><span class="dot"></span>完成</span>', extra: ''};
+    case 'paused':
+      return {badge: '<span class="badge badge-gray" style="font-size:10.5px"><span class="dot"></span>已暂停</span>', extra: ''};
     case 'stopped': case 'cancel':
-      return {badge: '<span class="badge badge-gray" style="font-size:10.5px"><span class="dot"></span>已取消</span>', extra: ''};
+      return {badge: '<span class="badge badge-gray" style="font-size:10.5px"><span class="dot"></span>已停止</span>', extra: ''};
     default:
       return {badge: '<span class="badge" style="background:var(--danger-light);color:var(--danger)"><span class="dot"></span>失败</span>', extra: ''};
   }
 }
 
-// dlTaskRow 统一任务行（卡内单行）
+// dlTaskRow 统一任务行（表格行：名称 / 状态 / 进度 / 操作）
 function dlTaskRow(t, showType){
   const sb = dlTaskStatusBadge(t);
   const active = t.status === 'downloading' || t.status === 'running' || t.status === 'fetching' || t.status === 'pending';
+  const paused = t.status === 'paused';
   let typeTag = '';
   if(showType){
     typeTag = t.type === 'music'
       ? (t.sub === 'kuwo' ? '<span class="badge badge-blue" style="font-size:10px">酷我</span>' : '<span class="badge badge-blue" style="font-size:10px">音乐</span>')
       : (t.sub === 'bt' ? '<span class="badge badge-blue" style="font-size:10px">视频</span>' : '');
   }
-  return '<div style="font-size:12px;padding:7px 0;border-bottom:1px solid var(--border)">' +
-    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-      '<span style="flex:1 1 160px;min-width:0;word-break:break-all">' + esc(t.title || '') + '</span>' + typeTag + sb.badge +
-      (active ? '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="dlTaskCancel(\'' + esc(t.id) + '\')">取消</button>' : '') +
-      (!active ? '<button class="btn btn-text btn-sm" style="color:var(--text3)" onclick="dlTaskRemove(\'' + esc(t.id) + '\')">移除</button>' : '') +
-    '</div>' + sb.extra +
-    (t.err ? '<div style="font-size:11px;color:var(--danger);margin-top:2px">' + esc(t.err) + '</div>' : '') +
-    (t.path && t.status === 'done' ? '<div class="mono" style="font-size:10.5px;color:var(--text3);margin-top:2px;word-break:break-all">' + esc(t.path) + '</div>' : '') +
-  '</div>';
+  const pct = t.progress != null ? Math.round(t.progress) : 0;
+  const metaBits = [];
+  if(t.speed > 0) metaBits.push(fmtDlSpeed(t.speed));
+  if(t.peers > 0) metaBits.push(t.peers + ' 连接');
+  if(t.total > 0) metaBits.push((t.done/1048576).toFixed(1) + '/' + (t.total/1048576).toFixed(1) + ' MB');
+  const ops =
+    (active ? '<button class="btn btn-text btn-sm" onclick="dlTaskPause(\'' + esc(t.id) + '\')">暂停</button>' : '') +
+    (paused ? '<button class="btn btn-text btn-sm" style="color:var(--primary)" onclick="dlTaskResume(\'' + esc(t.id) + '\')">继续</button>' : '') +
+    ((active || paused) ? '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="dlTaskCancel(\'' + esc(t.id) + '\')">停止</button>' : '') +
+    (!active && !paused ? '<button class="btn btn-text btn-sm" style="color:var(--text3)" onclick="dlTaskRemove(\'' + esc(t.id) + '\')">移除</button>' : '');
+  return '<tr>' +
+    '<td style="min-width:0">' +
+      '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+        '<span style="word-break:break-all">' + esc(t.title || '') + '</span>' + typeTag +
+      '</div>' +
+      (t.err ? '<div style="font-size:11px;color:var(--danger);margin-top:2px">' + esc(t.err) + '</div>' : '') +
+      (t.path && t.status === 'done' ? '<div class="mono" style="font-size:10.5px;color:var(--text3);margin-top:2px;word-break:break-all">' + esc(t.path) + '</div>' : '') +
+    '</td>' +
+    '<td style="white-space:nowrap">' + sb.badge + '</td>' +
+    '<td style="min-width:120px">' +
+      '<div class="bar" style="margin-bottom:3px"><i style="width:' + pct + '%"></i></div>' +
+      '<div style="font-size:10.5px;color:var(--text3);display:flex;gap:8px;flex-wrap:wrap">' + metaBits.join(' ') + '</div>' +
+    '</td>' +
+    '<td style="white-space:nowrap;text-align:right">' + ops + '</td>' +
+  '</tr>';
 }
 
-// ---------- 统一「下载列表」弹窗（视频下载 / 音乐下载 两个 tab 共用） ----------
-// dlListKind = 当前打开的列表类型（'video' | 'music'）；null = 未打开
+// ---------- 下载任务面板（内嵌在视频/音乐下载主页面，表头固定 + 列表滚动） ----------
+// dlListKind = 当前所在页面类型（'video' | 'music'）
 let dlListKind = null, dlListTimer = null;
 
-function dlListModalOpen(kind){
-  dlListKind = kind;
-  const title = kind === 'music' ? '音乐下载列表' : '下载列表';
-  confirmDialog(title, '<div class="empty">加载中…</div>', ()=>{}, '关闭');
-  dlListRefresh();
+// dlTaskPanelHTML 任务面板骨架：固定表头 + 可滚动任务区 + 批量操作栏
+function dlTaskPanelHTML(kind){
+  const id = kind === 'music' ? 'mdl' : 'vdl';
+  const head = '<thead><tr>' +
+    '<th style="width:auto">任务</th>' +
+    '<th style="width:130px">状态</th>' +
+    '<th style="width:150px">进度</th>' +
+    '<th style="width:130px;text-align:right">操作</th>' +
+  '</tr></thead>';
+  return '<div class="card" style="margin-top:16px;padding:0">' +
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:12px 14px;border-bottom:1px solid var(--border)">' +
+      '<span style="font-size:13px;font-weight:600">下载列表</span>' +
+      '<span id="dl-' + id + '-sum" style="font-size:11.5px;color:var(--text3)"></span>' +
+      '<span style="flex:1"></span>' +
+      '<button class="btn btn-outline btn-sm" onclick="dlPauseAll()">全部暂停</button>' +
+      '<button class="btn btn-outline btn-sm" onclick="dlResumeAll()">全部继续</button>' +
+      '<button class="btn btn-outline btn-sm" onclick="dlCancelAll()">全部停止</button>' +
+      '<button class="btn btn-outline btn-sm" onclick="dlClearDone()">清除完成</button>' +
+      '<button class="btn btn-outline btn-sm" style="color:var(--danger)" onclick="dlClearAll()">清空列表</button>' +
+    '</div>' +
+    '<div style="max-height:52vh;overflow:auto">' +
+      '<table class="tbl" style="border:0;border-radius:0">' + head +
+        '<tbody id="dl-' + id + '-rows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>' +
+      '</table>' +
+    '</div>' +
+  '</div>';
 }
 
 function dlListRefresh(){
@@ -3298,33 +3393,58 @@ function dlListRefresh(){
   else if(dlListKind === 'music') dlMusicLoadTasks();
 }
 
-// dlListModalRefresh 把任务视图写进弹窗；弹窗已关或类型不符时静默丢弃
-function dlListModalRefresh(kind, j, showType){
-  const modal = document.getElementById('modal');
-  if(dlListKind !== kind || !modal.classList.contains('show')) return;
+// dlListPanelRefresh 把任务视图写进内嵌面板（页面已切走时静默丢弃）
+function dlListPanelRefresh(kind, j, showType){
+  if(dlListKind !== kind) return;
+  const id = kind === 'music' ? 'mdl' : 'vdl';
+  const tbody = document.getElementById('dl-' + id + '-rows');
+  if(!tbody) return;
   const list = j.tasks || [];
-  document.getElementById('modal-body').innerHTML = list.length
-    ? '<div style="max-height:55vh;overflow:auto">' + list.map(t => dlTaskRow(t, showType)).join('') + '</div>'
-    : '<div class="empty">暂无任务（点搜索结果里的「下载」加入后在此查看进度）</div>';
+  tbody.innerHTML = list.length
+    ? list.map(t => dlTaskRow(t, showType)).join('')
+    : '<tr><td colspan="4" class="empty" style="padding:32px 0">暂无任务（点搜索结果里的「下载」加入后在此查看进度）</td></tr>';
+  const sum = document.getElementById('dl-' + id + '-sum');
+  if(sum){
+    const run = list.filter(t => t.status==='downloading'||t.status==='running'||t.status==='fetching'||t.status==='pending').length;
+    const ps = list.filter(t => t.status==='paused').length;
+    const done = list.filter(t => t.status==='done').length;
+    sum.textContent = '共 ' + list.length + ' 个 · 运行 ' + run + ' · 暂停 ' + ps + ' · 完成 ' + done;
+  }
 }
 
-// dlVideoLoadList 拉统一任务列表并渲染进弹窗（运行中 2s 轮询）
+// dlVideoLoadList 拉统一任务列表渲染进面板（有运行中任务时 2s 轮询）
 async function dlVideoLoadList(){
   try{
     const j = await apiRetry('/api/dl/tasks');
-    dlListModalRefresh('video', j, true);
-    const modal = document.getElementById('modal');
+    dlListPanelRefresh('video', j, true);
     if(dlListTimer) clearTimeout(dlListTimer);
-    if(j.running && dlListKind === 'video' && modal.classList.contains('show')){
+    if(j.running && dlListKind === 'video'){
       dlListTimer = setTimeout(dlVideoLoadList, 2000);
     }
   }catch(e){}
 }
 
+// ---------- 单个任务操作 ----------
+async function dlTaskPause(id){
+  try{
+    await apiRetry('/api/dl/pause?id=' + encodeURIComponent(id), {method:'POST'});
+    toast('已暂停（可继续，断点续传）','ok');
+    dlListRefresh();
+  }catch(e){ toast(e.message,'err'); }
+}
+
+async function dlTaskResume(id){
+  try{
+    await apiRetry('/api/dl/resume?id=' + encodeURIComponent(id), {method:'POST'});
+    toast('已继续','ok');
+    dlListRefresh();
+  }catch(e){ toast(e.message,'err'); }
+}
+
 async function dlTaskCancel(id){
   try{
     await apiRetry('/api/dl/cancel?id=' + encodeURIComponent(id), {method:'POST'});
-    toast('已请求取消','ok');
+    toast('已停止','ok');
     dlListRefresh();
   }catch(e){ toast(e.message,'err'); }
 }
@@ -3336,19 +3456,37 @@ async function dlTaskRemove(id){
   }catch(e){ toast(e.message,'err'); }
 }
 
+// ---------- 批量操作 ----------
+async function dlBatch(path, okMsg){
+  try{
+    const j = await apiRetry(path, {method:'POST'});
+    const n = (j && j.count != null) ? j.count : 0;
+    toast(okMsg + (n ? '（' + n + ' 个）' : ''),'ok');
+    dlListRefresh();
+  }catch(e){ toast(e.message,'err'); }
+}
+function dlPauseAll(){ dlBatch('/api/dl/pauseall', '已全部暂停'); }
+function dlResumeAll(){ dlBatch('/api/dl/resumeall', '已全部继续'); }
+function dlCancelAll(){ dlBatch('/api/dl/cancelall', '已全部停止'); }
+function dlClearDone(){ dlBatch('/api/dl/cleardone', '已清除完成任务'); }
+function dlClearAll(){
+  confirmDialog('清空下载列表', '<div style="font-size:13px;line-height:1.7">将停止并移除全部任务（已下载的文件不会被删除）。<br>确定清空？</div>', ()=>{ dlBatch('/api/dl/clearall', '已清空列表'); }, '清空');
+}
+
 /* 视频下载设置弹窗 */
 async function dlVideoOpenSettings(){
   try{
     const j = await apiRetry('/api/dl/config');
     dlVCfg = j;
-    const body =
+    const body = dlConcurrencyFieldsHTML('dlv') +
       '<div class="form-row"><label>视频下载目录<span style="color:var(--muted);font-weight:normal">（下载列表任务的保存目录）</span></label>' +
         '<div style="display:flex;gap:8px"><input type="text" id="dlv-dir" value="' + esc(dlVCfg.videoDir || '') + '" placeholder="' + esc((dlVCfg.suggest || {}).video || '/vol1/1000/downloads') + '" style="flex:1;min-width:0">' +
         '<button class="btn btn-outline btn-sm" style="flex:0 0 auto" onclick="openDirPicker(function(p){document.getElementById(\'dlv-dir\').value=p})">选择</button></div></div>' +
-      '<div style="font-size:12px;color:var(--text3);line-height:1.6">下载由本应用的内置 BT 引擎完成（无需安装任何外置下载器）。做种数多的热门资源速度快；冷门资源依赖做种在线情况。</div>';
+      '<div style="font-size:12px;color:var(--text3);line-height:1.6">下载由本应用的内置 BT 引擎完成（无需安装任何外置下载器）。做种数多的热门资源速度快；冷门资源依赖做种在线情况。并发连接与挂起块数越大，单任务越能吃满带宽（同时占用更多连接）。</div>';
     confirmDialog('视频下载设置', body, async ()=>{
       const gv = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
       const payload = {videoDir: gv('dlv-dir')};
+      Object.assign(payload, dlConcurrencyPayload('dlv'));
       try{
         const j = await apiRetry('/api/dl/config', {method:'POST', body: JSON.stringify(payload)});
         dlVCfg = j;
@@ -3356,6 +3494,31 @@ async function dlVideoOpenSettings(){
       }catch(e){ toast(e.message,'err'); }
     }, '保存');
   }catch(e){ toast(e.message,'err'); }
+}
+
+// dlConcurrencyFieldsHTML 并发/线程设置项（视频与音乐设置弹窗共用）
+function dlConcurrencyFieldsHTML(pfx){
+  const c = dlVCfg || {};
+  const lim = c.limits || {};
+  const num = (id, label, hint, val, lo, hi, def) =>
+    '<div class="form-row"><label>' + label + '<span style="color:var(--muted);font-weight:normal">（' + hint + '）</span></label>' +
+      '<input type="number" id="' + pfx + '-' + id + '" value="' + (val || def) + '" min="' + lo + '" max="' + hi + '" step="1" style="width:120px"></div>';
+  return num('maxtasks', '同时下载任务数', '1-' + (lim.maxTasksHi || 8) + '，默认 3',
+      c.maxTasks, 1, lim.maxTasksHi || 8, 3) +
+    num('maxconns', '单任务并发连接数', '4-' + (lim.maxConnsHi || 40) + '，默认 16；越大越快但占连接更多',
+      c.maxConns, 4, lim.maxConnsHi || 40, 16) +
+    num('pipeline', '单连接挂起块数', '4-' + (lim.pipelineHi || 32) + '，默认 16；每块 16KB，越大越吃满高延迟链路',
+      c.pipeline, 4, lim.pipelineHi || 32, 16);
+}
+
+// dlConcurrencyPayload 收集并发设置
+function dlConcurrencyPayload(pfx){
+  const g = id => {
+    const el = document.getElementById(pfx + '-' + id);
+    const n = el ? parseInt(el.value, 10) : 0;
+    return isNaN(n) ? 0 : n;
+  };
+  return {maxTasks: g('maxtasks'), maxConns: g('maxconns'), pipeline: g('pipeline')};
 }
 
 /* ---------- 音乐下载：网易云搜索 + 免费曲直下 ---------- */
@@ -3368,11 +3531,11 @@ function dlMusicRender(){
     '<div style="display:flex;gap:8px;margin-bottom:12px">' +
       '<input type="text" id="dlm-kw" placeholder="搜索歌名 / 歌手" style="flex:1" onkeydown="if(event.key===\'Enter\')dlMusicSearch()">' +
       '<button class="btn btn-primary" id="dlm-go" onclick="dlMusicSearch()">搜索</button>' +
-      '<button class="btn btn-outline" onclick="dlListModalOpen(\'music\')">下载列表</button>' +
       '<button class="btn btn-outline" onclick="dlMusicOpenSettings()">设置</button>' +
     '</div>' +
     '<div id="dlm-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>' +
-    '<div id="dlm-results"></div>';
+    '<div id="dlm-results"></div>' +
+    dlTaskPanelHTML('music');
   const kw = document.getElementById('dlm-kw');
   if(kw && dlMLastQ) kw.value = dlMLastQ;
 }
@@ -3476,14 +3639,13 @@ async function dlMusicDL(s){
   }catch(e){ toast(e.message,'err'); }
 }
 
-// dlMusicLoadTasks 拉音乐任务并渲染进弹窗（运行中 2s 轮询）
+// dlMusicLoadTasks 拉音乐任务并渲染进内嵌面板（有运行中任务时 2s 轮询）
 async function dlMusicLoadTasks(silent){
   try{
     const j = await apiRetry('/api/dlmusic/tasks');
-    dlListModalRefresh('music', j, false);
-    const modal = document.getElementById('modal');
+    dlListPanelRefresh('music', j, false);
     if(dlMTimer) clearTimeout(dlMTimer);
-    if(j.running && dlListKind === 'music' && modal.classList.contains('show')){
+    if(j.running && dlListKind === 'music'){
       dlMTimer = setTimeout(dlMusicLoadTasks, 2000);
     }
   }catch(e){ if(!silent && !/HTTP (0|5\d\d)/.test(String(e.message))) toast(e.message,'err'); }
@@ -3494,15 +3656,17 @@ async function dlMusicOpenSettings(){
   try{
     const j = await apiRetry('/api/dl/config');
     dlVCfg = j;
-    const body =
+    const body = dlConcurrencyFieldsHTML('dlm') +
       '<div class="form-row"><label>音乐下载目录<span style="color:var(--muted);font-weight:normal">（mp3 保存位置）</span></label>' +
         '<div style="display:flex;gap:8px"><input type="text" id="dlm-dir" value="' + esc(dlVCfg.musicDir || '') + '" placeholder="' + esc((dlVCfg.suggest || {}).music || '/vol1/1000/downloads/music') + '" style="flex:1;min-width:0">' +
         '<button class="btn btn-outline btn-sm" style="flex:0 0 auto" onclick="openDirPicker(function(p){document.getElementById(\'dlm-dir\').value=p})">选择</button></div></div>' +
-      '<div style="font-size:12px;color:var(--text3);line-height:1.6">建议放到媒体库目录下的独立子目录（如 /vol1/1000/music/inbox），下完可交给「音乐管理」统一规范命名。</div>';
+      '<div style="font-size:12px;color:var(--text3);line-height:1.6">建议放到媒体库目录下的独立子目录（如 /vol1/1000/music/inbox），下完可交给「音乐管理」统一规范命名。并发设置与「视频下载设置」共用同一份配置。</div>';
     confirmDialog('音乐下载设置', body, async ()=>{
       const dir = document.getElementById('dlm-dir').value.trim();
+      const payload = {musicDir: dir};
+      Object.assign(payload, dlConcurrencyPayload('dlm'));
       try{
-        const j2 = await apiRetry('/api/dl/config', {method:'POST', body: JSON.stringify({musicDir: dir})});
+        const j2 = await apiRetry('/api/dl/config', {method:'POST', body: JSON.stringify(payload)});
         dlVCfg = j2;
         toast('已保存','ok');
         dlMusicRender();

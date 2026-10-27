@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.42"
+	version = "1.3.43"
 	// 面板监听策略：生产形态只监听 fnOS 统一网关 unix socket（XBOX_SOCKET），
 	// 登录态由网关注入；不监听任何 TCP 端口。仅 XBOX_DEV=1 时开 127.0.0.1 回环
 	// 端口供本地开发/自动化测试。请勿改为 ":8899" 通配绑定。
@@ -76,6 +76,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/overview", srv.handleOverview)
 	mux.HandleFunc("GET /api/temps", handleTemps)
+	mux.HandleFunc("GET /api/netrates", handleNetRates)
 	mux.HandleFunc("GET /api/scan", srv.handleScan)
 	mux.HandleFunc("POST /api/clean", srv.handleClean)
 	mux.HandleFunc("GET /api/ports", srv.handlePorts)
@@ -131,6 +132,14 @@ func main() {
 	mux.HandleFunc("GET /api/dl/tasks", srv.handleDlTasks)
 	mux.HandleFunc("POST /api/dl/remove", srv.handleDlRemove)
 	mux.HandleFunc("POST /api/dl/cancel", srv.handleDlCancel)
+	// 下载任务批量控制（v1.3.43）：暂停/继续/全部停止/清除
+	mux.HandleFunc("POST /api/dl/pause", srv.handleDlPause)
+	mux.HandleFunc("POST /api/dl/resume", srv.handleDlResume)
+	mux.HandleFunc("POST /api/dl/pauseall", srv.handleDlPauseAll)
+	mux.HandleFunc("POST /api/dl/resumeall", srv.handleDlResumeAll)
+	mux.HandleFunc("POST /api/dl/cancelall", srv.handleDlCancelAll)
+	mux.HandleFunc("POST /api/dl/cleardone", srv.handleDlClearDone)
+	mux.HandleFunc("POST /api/dl/clearall", srv.handleDlClearAll)
 	// 音乐下载：网易云搜索 + 免费曲直下
 	mux.HandleFunc("GET /api/dlmusic/search", srv.handleDlMusicSearch)
 	mux.HandleFunc("POST /api/dlmusic/start", srv.handleDlMusicStart)

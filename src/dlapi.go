@@ -9,7 +9,14 @@ package main
 //   POST /api/dl/start            提交磁力到内置 BT 引擎（kind=video/music）
 //   GET  /api/dl/tasks            统一任务列表（BT 视频/音乐 + 直链音乐）
 //   POST /api/dl/remove?id=       移除一个终态任务
-//   POST /api/dl/cancel?id=       取消任务（BT/音乐通用）
+//   POST /api/dl/cancel?id=       停止任务（BT/音乐通用，终态）
+//   POST /api/dl/pause?id=        暂停一个任务（保留断点，可续传）
+//   POST /api/dl/resume?id=       继续一个暂停任务（断点续传）
+//   POST /api/dl/pauseall         全部暂停
+//   POST /api/dl/resumeall        全部继续
+//   POST /api/dl/cancelall        全部停止
+//   POST /api/dl/cleardone        清除已完成任务
+//   POST /api/dl/clearall         清空全部任务（运行中先停止）
 //   GET  /api/dlmusic/search      网易云+酷我+BT 并行搜索
 //   POST /api/dlmusic/start       音乐直链下载入队
 //   GET  /api/dlmusic/tasks       音乐任务列表（分页兼容旧前端）
@@ -52,6 +59,14 @@ func (s *Server) handleDlConfigGet(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{
 		"videoDir": cfg.VideoDir,
 		"musicDir": cfg.MusicDir,
+		"maxTasks": cfg.MaxTasks,
+		"maxConns": cfg.MaxConns,
+		"pipeline": cfg.Pipeline,
+		"limits": map[string]int{
+			"maxTasksHi": btMaxTasks,
+			"maxConnsHi": btMaxConnsCap,
+			"pipelineHi": btPipeCap,
+		},
 		"suggest": map[string]string{
 			"video": dlDefaultDir("video"),
 			"music": dlDefaultDir("music"),
@@ -98,18 +113,53 @@ func (s *Server) handleDlConfigSave(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.MusicDir = ms
 	}
+	// 并发/线程（0 或越界回落默认；缺省字段不动原值）
+	if v, has := in["maxTasks"]; has {
+		cfg.MaxTasks = toInt(v)
+	}
+	if v, has := in["maxConns"]; has {
+		cfg.MaxConns = toInt(v)
+	}
+	if v, has := in["pipeline"]; has {
+		cfg.Pipeline = toInt(v)
+	}
 	if err := saveDlConfig(cfg); err != nil {
 		fail(w, 500, "配置写入失败："+err.Error())
 		return
 	}
+	cfg = loadDlConfig()
+	btApplyTune(cfg) // 立即生效（下一次入队也读同一份）
 	ok(w, map[string]any{
 		"videoDir": cfg.VideoDir,
 		"musicDir": cfg.MusicDir,
+		"maxTasks": cfg.MaxTasks,
+		"maxConns": cfg.MaxConns,
+		"pipeline": cfg.Pipeline,
+		"limits": map[string]int{
+			"maxTasksHi": btMaxTasks,
+			"maxConnsHi": btMaxConnsCap,
+			"pipelineHi": btPipeCap,
+		},
 		"suggest": map[string]string{
 			"video": dlDefaultDir("video"),
 			"music": dlDefaultDir("music"),
 		},
 	})
+}
+
+// toInt json any → int（数字/字符串都认，非法返回 0）
+func toInt(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(x)); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // toStr json any → 字符串
@@ -211,7 +261,7 @@ func (s *Server) handleDlRemove(w http.ResponseWriter, r *http.Request) {
 	ok(w, nil)
 }
 
-// handleDlCancel POST /api/dl/cancel?id= —— 统一取消（BT / 音乐）
+// handleDlCancel POST /api/dl/cancel?id= —— 统一停止（BT / 音乐）
 func (s *Server) handleDlCancel(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
@@ -224,6 +274,96 @@ func (s *Server) handleDlCancel(w http.ResponseWriter, r *http.Request) {
 		dlMusCancel(id)
 	}
 	ok(w, nil)
+}
+
+// handleDlPause POST /api/dl/pause?id= —— 暂停（保留断点）
+func (s *Server) handleDlPause(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		fail(w, 400, "缺少任务 id")
+		return
+	}
+	if strings.HasPrefix(id, "bt") {
+		if !btPause(id) {
+			fail(w, 400, "该任务当前不可暂停")
+			return
+		}
+	} else if !dlMusPause(id) {
+		fail(w, 400, "该任务当前不可暂停")
+		return
+	}
+	ok(w, nil)
+}
+
+// handleDlResume POST /api/dl/resume?id= —— 继续（断点续传）
+func (s *Server) handleDlResume(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		fail(w, 400, "缺少任务 id")
+		return
+	}
+	if strings.HasPrefix(id, "bt") {
+		if !btResume(id) {
+			fail(w, 400, "该任务当前不可继续")
+			return
+		}
+	} else if !dlMusResume(id) {
+		fail(w, 400, "该任务当前不可继续")
+		return
+	}
+	ok(w, nil)
+}
+
+// handleDlPauseAll POST /api/dl/pauseall
+func (s *Server) handleDlPauseAll(w http.ResponseWriter, r *http.Request) {
+	n := btPauseAll()
+	for _, t := range dlUnifiedTasks() {
+		if t.Type == "music" && t.Status == "running" {
+			if dlMusPause(t.ID) {
+				n++
+			}
+		}
+	}
+	ok(w, map[string]any{"count": n})
+}
+
+// handleDlResumeAll POST /api/dl/resumeall
+func (s *Server) handleDlResumeAll(w http.ResponseWriter, r *http.Request) {
+	n := btResumeAll()
+	for _, t := range dlUnifiedTasks() {
+		if t.Type == "music" && t.Status == "paused" {
+			if dlMusResume(t.ID) {
+				n++
+			}
+		}
+	}
+	ok(w, map[string]any{"count": n})
+}
+
+// handleDlCancelAll POST /api/dl/cancelall —— 全部停止
+func (s *Server) handleDlCancelAll(w http.ResponseWriter, r *http.Request) {
+	n := btCancelAllTasks()
+	for _, t := range dlUnifiedTasks() {
+		if t.Type == "music" && (t.Status == "running" || t.Status == "paused") {
+			dlMusCancel(t.ID)
+			n++
+		}
+	}
+	ok(w, map[string]any{"count": n})
+}
+
+// handleDlClearDone POST /api/dl/cleardone —— 清除已完成
+func (s *Server) handleDlClearDone(w http.ResponseWriter, r *http.Request) {
+	n := btClearDone()
+	n += dlMusClearDone()
+	ok(w, map[string]any{"count": n})
+}
+
+// handleDlClearAll POST /api/dl/clearall —— 清空全部（运行中先停）
+func (s *Server) handleDlClearAll(w http.ResponseWriter, r *http.Request) {
+	n := btClearAll()
+	n += dlMusClearAll()
+	ok(w, map[string]any{"count": n})
 }
 
 // ---------- 音乐 ----------
@@ -402,9 +542,42 @@ func dlMusRemove(id string) {
 	dlMusStore.mu.Lock()
 	t, ok0 := dlMusStore.tasks[id]
 	dlMusStore.mu.Unlock()
-	if ok0 && t.Status != "running" {
+	if ok0 && t.Status != "running" && t.Status != "paused" {
 		dlMusStore.mu.Lock()
 		delete(dlMusStore.tasks, id)
 		dlMusStore.mu.Unlock()
 	}
+}
+
+// dlMusClearDone 清除音乐已完成任务
+func dlMusClearDone() int {
+	dlMusInit()
+	dlMusStore.mu.Lock()
+	defer dlMusStore.mu.Unlock()
+	n := 0
+	for id, t := range dlMusStore.tasks {
+		if t.Status == "ok" {
+			delete(dlMusStore.tasks, id)
+			delete(dlMusStore.canc, id)
+			n++
+		}
+	}
+	return n
+}
+
+// dlMusClearAll 清空音乐任务（运行中/暂停中先取消）
+func dlMusClearAll() int {
+	dlMusInit()
+	for _, t := range dlMusTaskList() {
+		if t.Status == "running" || t.Status == "paused" {
+			dlMusCancel(t.ID)
+		}
+	}
+	dlMusStore.mu.Lock()
+	defer dlMusStore.mu.Unlock()
+	n := len(dlMusStore.tasks)
+	dlMusStore.tasks = map[string]*DlMusicTask{}
+	dlMusStore.canc = map[string]context.CancelFunc{}
+	dlMusStore.order = nil
+	return n
 }

@@ -17,6 +17,14 @@ dump_tmp.js
 # 运行时配置（含真实 DDNS 凭据/域名/账户，禁止提交）
 data/
 
+# 运行时状态 / 缓存（dev 冒烟与真实运行都会生成，绝不入库）
+ddns.json
+download.json
+speedtest_remote.json
+torrent-meta/
+src/torrent-meta/
+*.exe
+
 # 临时提交说明文件
 _msg.txt
 _*.py

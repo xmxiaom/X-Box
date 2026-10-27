@@ -256,6 +256,7 @@ type btMeta struct {
 	Pieces   []byte   `json:"-"` // 每片 20 字节 SHA1，拼在一起
 	Len      int64    `json:"len"` // 单文件种子总长（多文件为 0）
 	Files    []btFile `json:"files,omitempty"`
+	raw      []byte   `json:"-"` // info dict 的 bencode 原文（元数据缓存落盘用，SHA1==infohash）
 }
 
 // btParseInfo 解析 info dict；返回元信息与原始编码字节（供重算校验 infohash）
@@ -311,6 +312,7 @@ func btParseInfo(info any) (*btMeta, []byte, error) {
 			return nil, nil, fmt.Errorf("length 异常")
 		}
 	}
+	m.raw = raw // 供元数据缓存落盘（SHA1(raw)==infohash，已由调用方核对）
 	return m, raw, nil
 }
 
