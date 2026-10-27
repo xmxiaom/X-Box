@@ -171,15 +171,45 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .modal-mask{position:fixed;inset:0;background:rgba(29,33,41,.45);display:none;align-items:center;justify-content:center;z-index:100}
 .modal-mask.show{display:flex}
 .modal{background:var(--card);border-radius:12px;width:520px;max-width:92vw;padding:22px 24px;box-shadow:0 8px 40px rgba(0,0,0,.16);max-height:88vh;overflow-y:auto}
-/* 宽版弹窗（下载列表等表格型内容）：列放得开、无横向滚动，表格区自己滚 */
+/* 宽版弹窗（表格型内容用） */
 .modal.modal-wide{width:980px;max-width:94vw;display:flex;flex-direction:column;max-height:88vh;overflow:hidden}
 .modal.modal-wide .body{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;margin-bottom:14px;line-height:1.5}
-.modal.modal-wide .dl-scroll{flex:1 1 auto;min-height:0;max-height:62vh;overflow:auto}
+
+/* ===== 下载列表专用弹窗（独立于 .modal，尺寸内联，卡片式布局） ===== */
+.dlm-mask{position:fixed;inset:0;background:rgba(29,33,41,.45);display:none;align-items:center;justify-content:center;z-index:120;padding:16px;box-sizing:border-box}
+.dlm-mask.show{display:flex}
+.dlm-box{background:var(--card);border-radius:14px;box-shadow:0 12px 48px rgba(0,0,0,.2);
+  width:min(1100px,96vw);height:min(78vh,760px);min-height:340px;
+  display:flex;flex-direction:column;overflow:hidden;padding:0}
+.dlm-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:16px 20px;border-bottom:1px solid var(--border);flex:0 0 auto}
+.dlm-head h3{font-size:16px;margin:0;font-weight:600}
+.dlm-sum{font-size:12.5px;color:var(--text3)}
+.dlm-spacer{flex:1}
+.dlm-list{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:10px 14px;background:var(--bg)}
+.dlm-foot{display:flex;justify-content:flex-end;padding:12px 20px;border-top:1px solid var(--border);flex:0 0 auto}
+/* 任务卡片：一行主信息 + 进度条 + 元信息，宽度充分利用 */
+.dlm-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:8px}
+.dlm-card:last-child{margin-bottom:0}
+.dlm-row1{display:flex;gap:10px;align-items:flex-start}
+.dlm-name{flex:1 1 auto;min-width:0;font-size:13.5px;color:var(--text1);line-height:1.5;word-break:break-all}
+.dlm-tags{flex:0 0 auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.dlm-ops{flex:0 0 auto;display:flex;gap:2px;align-items:center}
+.dlm-bar{height:7px;border-radius:4px;background:var(--border);overflow:hidden;margin:9px 0 6px}
+.dlm-bar i{display:block;height:100%;background:var(--primary);border-radius:4px;transition:width .3s}
+.dlm-meta{display:flex;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--text3);line-height:1.6;align-items:center}
+.dlm-meta span+span::before{content:'·';margin-right:8px;color:var(--border);font-weight:700}
+.dlm-meta b{color:var(--text2);font-weight:600}
+.dlm-err{font-size:11.5px;color:var(--danger);margin-top:5px;line-height:1.5;word-break:break-all}
+.dlm-path{font-size:11px;color:var(--text3);margin-top:5px;line-height:1.5;word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace}
+.dlm-empty{padding:60px 20px;text-align:center;color:var(--text3);font-size:13px;line-height:1.8}
+@media(max-width:760px){
+  .dlm-box{width:96vw;height:82vh}
+  .dlm-head{padding:12px 14px}
+  .dlm-list{padding:8px}
+  .dlm-card{padding:10px 11px}
+  .dlm-name{font-size:13px}
+}
 /* 下载列表表格：表头随滚动吸顶，行高舒适，状态/操作列不换行 */
-.modal.modal-wide .dl-scroll .tbl th{position:sticky;top:0;z-index:1;padding:10px 14px;font-size:12.5px}
-.modal.modal-wide .dl-scroll .tbl td{padding:11px 14px;vertical-align:top;font-size:12.5px}
-.modal.modal-wide .dl-scroll .tbl td:nth-child(2){white-space:nowrap}
-.modal.modal-wide .dl-scroll .tbl td:nth-child(4){white-space:nowrap}
 .modal h3{font-size:16px;margin-bottom:12px}
 .modal .body{font-size:13.5px;color:var(--text2);line-height:1.7;margin-bottom:18px}
 .modal .foot{display:flex;justify-content:flex-end;gap:10px}
@@ -696,6 +726,25 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
     </div>
   </div>
 </div>
+<!-- 下载列表专用弹窗：独立于通用弹窗，尺寸/布局全部内联，不受既有 .modal 规则影响 -->
+<div class="dlm-mask" id="dl-modal">
+  <div class="dlm-box">
+    <div class="dlm-head">
+      <h3 id="dl-modal-title">下载列表</h3>
+      <span id="dl-modal-sum" class="dlm-sum"></span>
+      <span class="dlm-spacer"></span>
+      <button class="btn btn-outline btn-sm" onclick="dlPauseAll()">全部暂停</button>
+      <button class="btn btn-outline btn-sm" onclick="dlResumeAll()">全部继续</button>
+      <button class="btn btn-outline btn-sm" onclick="dlCancelAll()">全部停止</button>
+      <button class="btn btn-outline btn-sm" onclick="dlClearDone()">清除完成</button>
+      <button class="btn btn-outline btn-sm" style="color:var(--danger)" onclick="dlClearAll()">清空列表</button>
+    </div>
+    <div class="dlm-list" id="dl-modal-list"></div>
+    <div class="dlm-foot">
+      <button class="btn btn-primary" onclick="dlListClose()">关闭</button>
+    </div>
+  </div>
+</div>
 <div class="dp-mask" id="dirpicker">
   <div class="dp-box">
     <h3>选择目录</h3>
@@ -909,14 +958,10 @@ function closeModal(){
   modal.classList.remove('show');
   modal.classList.remove('modal-wide');
   document.getElementById('modal-ok').onclick=null;
-  // 恢复「取消」按钮显示（wideDialog 会隐藏它，下次普通弹窗要用）
   const cancelBtn = document.getElementById('modal-cancel');
   if(cancelBtn) cancelBtn.style.display = '';
-  // 下载列表弹窗关闭 → 停掉它的 2s 轮询（否则后台一直空转）
-  if(dlListKind !== null || dlListTimer || dlMTimer) dlListClose();
 }
 function confirmDialog(title, bodyHTML, onOK, okText){
-  resetModalFoot(); // 防止上一次 wideDialog 留下的宽版/隐藏取消按钮残留
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-body').innerHTML = bodyHTML;
   const okBtn = document.getElementById('modal-ok');
@@ -924,28 +969,9 @@ function confirmDialog(title, bodyHTML, onOK, okText){
   okBtn.onclick = () => { closeModal(); onOK(); };
   document.getElementById('modal').classList.add('show');
 }
-// wideDialog 宽版弹窗：只有一个关闭按钮（表格型内容用，避免「取消/关闭」重复）
-function wideDialog(title, bodyHTML){
-  document.getElementById('modal-title').textContent = title;
-  document.getElementById('modal-body').innerHTML = bodyHTML;
-  const okBtn = document.getElementById('modal-ok');
-  okBtn.textContent = '关闭';
-  okBtn.onclick = () => closeModal();
-  const modal = document.getElementById('modal');
-  modal.classList.add('modal-wide');
-  modal.classList.add('show');
-  // 「取消」与「关闭」在纯展示型弹窗里是同一动作 → 直接隐藏取消，只留一个关闭入口
-  const cancelBtn = document.getElementById('modal-cancel');
-  if(cancelBtn) cancelBtn.style.display = 'none';
-}
-// 恢复通用弹窗的默认按钮布局（confirmDialog 前调用，防止被 wideDialog 改过）
-function resetModalFoot(){
-  const modal = document.getElementById('modal');
-  modal.classList.remove('modal-wide');
-  const cancelBtn = document.getElementById('modal-cancel');
-  if(cancelBtn) cancelBtn.style.display = '';
-}
 document.getElementById('modal').addEventListener('click', e => { if(e.target.id==='modal') closeModal(); });
+// 下载列表专用弹窗：点遮罩空白处关闭
+document.getElementById('dl-modal').addEventListener('click', e => { if(e.target.id==='dl-modal') dlListClose(); });
 
 /* ---------- 导航 ---------- */
 const loaders = {overview:loadOverview, clean:()=>{}, ports:loadPorts, procs:loadProcs, autostart:loadAutostart, ddns:loadDDNS, sync:loadSyncTasks, media:()=>{ mediaSwitch(mediaTab); loadMediaTasks(); }, speedtest:stInit, browser:browserInit, terminal:()=>{ termSetConn(false); }, diskfix:loadDiskFix, settings:checkUpdate}; // 垃圾清理不自动扫描，用户点「开始扫描」才扫；终端需手动连接；媒体页经 mediaSwitch 应用当前 tab（vdl 面板初始 display:none，必须走一次 switch 才可见）再拉列表
@@ -3361,11 +3387,12 @@ function dlTaskStatusBadge(t){
   }
 }
 
-// dlTaskRow 统一任务行（表格行：名称 / 状态 / 进度 / 操作）
+// dlTaskRow 任务卡片（专用下载列表弹窗用；卡片式比表格直观，宽度充分利用）
 function dlTaskRow(t, showType){
   const sb = dlTaskStatusBadge(t);
   const active = t.status === 'downloading' || t.status === 'running' || t.status === 'fetching' || t.status === 'pending';
   const paused = t.status === 'paused';
+  const running = t.status === 'downloading' || t.status === 'running';
   let typeTag = '';
   if(showType){
     typeTag = t.type === 'music'
@@ -3373,78 +3400,54 @@ function dlTaskRow(t, showType){
       : (t.sub === 'bt' ? '<span class="badge badge-blue" style="font-size:10px">视频</span>' : '');
   }
   const pct = t.progress != null ? Math.round(t.progress) : 0;
-  const metaBits = [];
-  // 下载中/运行中始终显示速度（含 0 B/s）：不做 >0 过滤，否则文字会闪
-  const running = t.status === 'downloading' || t.status === 'running';
-  if(running || t.speed > 0) metaBits.push('<span style="min-width:70px;display:inline-block">' + fmtDlSpeed(t.speed) + '</span>');
-  if(t.peers > 0) metaBits.push(t.peers + ' 连接');
-  if(t.total > 0) metaBits.push((t.done/1048576).toFixed(1) + ' / ' + (t.total/1048576).toFixed(1) + ' MB');
   const ops =
     (active ? '<button class="btn btn-text btn-sm" onclick="dlTaskPause(\'' + esc(t.id) + '\')">暂停</button>' : '') +
     (paused ? '<button class="btn btn-text btn-sm" style="color:var(--primary)" onclick="dlTaskResume(\'' + esc(t.id) + '\')">继续</button>' : '') +
     ((active || paused) ? '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="dlTaskCancel(\'' + esc(t.id) + '\')">停止</button>' : '') +
     (!active && !paused ? '<button class="btn btn-text btn-sm" style="color:var(--text3)" onclick="dlTaskRemove(\'' + esc(t.id) + '\')">移除</button>' : '');
-  // 进度列：百分比 + 进度条 + 速度/连接/大小
-  const pctTxt = (t.status === 'done') ? '100%' : (t.total > 0 ? pct + '%' : (t.status === 'fetching' ? '—' : ''));
-  return '<tr>' +
-    '<td>' +
-      '<div style="display:flex;gap:6px;align-items:baseline">' +
-        '<span style="font-size:13px;color:var(--text1);word-break:break-all;line-height:1.5">' + esc(t.title || '') + '</span>' + typeTag +
-      '</div>' +
-      (t.err ? '<div style="font-size:11.5px;color:var(--danger);margin-top:3px;line-height:1.5">' + esc(t.err) + '</div>' : '') +
-      (t.path && t.status === 'done' ? '<div class="mono" style="font-size:11px;color:var(--text3);margin-top:3px;word-break:break-all">' + esc(t.path) + '</div>' : '') +
-    '</td>' +
-    '<td>' + sb.badge + '</td>' +
-    '<td>' +
-      '<div style="display:flex;align-items:center;gap:8px">' +
-        '<span style="font-size:11.5px;color:var(--text2);min-width:38px;text-align:right">' + pctTxt + '</span>' +
-        '<div class="bar" style="flex:1;margin:0"><i style="width:' + pct + '%"></i></div>' +
-      '</div>' +
-      (metaBits.length ? '<div style="font-size:11px;color:var(--text3);margin-top:4px;display:flex;gap:10px;flex-wrap:wrap">' + metaBits.join('') + '</div>' : '') +
-    '</td>' +
-    '<td style="text-align:right">' + ops + '</td>' +
-  '</tr>';
+  // 进度条：只在有总量时显示；fetching 阶段用不确定态占位
+  const showBar = t.total > 0 || t.status === 'done';
+  const pctTxt = (t.status === 'done') ? '100%' : (t.total > 0 ? pct + '%' : '');
+  const bar = showBar
+    ? '<div class="dlm-bar"><i style="width:' + (t.status === 'done' ? 100 : pct) + '%"></i></div>'
+    : '<div class="dlm-bar"><i style="width:100%;opacity:.28"></i></div>';
+  // 元信息：速度（恒显示）· 连接 · 已下/总量 · 进度百分比
+  const meta = [];
+  if(running || t.speed > 0) meta.push('速度 <b>' + fmtDlSpeed(t.speed) + '</b>');
+  if(t.peers > 0) meta.push((t.status === 'fetching' ? '已发现 ' : '') + '<b>' + t.peers + '</b> 个连接');
+  if(t.total > 0) meta.push('<b>' + (t.done/1048576).toFixed(1) + '</b> / ' + (t.total/1048576).toFixed(1) + ' MB');
+  if(pctTxt) meta.push('<b>' + pctTxt + '</b>');
+  return '<div class="dlm-card">' +
+    '<div class="dlm-row1">' +
+      '<div class="dlm-name">' + esc(t.title || '') + '</div>' +
+      '<div class="dlm-tags">' + typeTag + sb.badge + '</div>' +
+      '<div class="dlm-ops">' + ops + '</div>' +
+    '</div>' +
+    bar +
+    (meta.length ? '<div class="dlm-meta">' + meta.map(m => '<span>' + m + '</span>').join('') + '</div>' : '') +
+    (t.err ? '<div class="dlm-err">' + esc(t.err) + '</div>' : '') +
+    (t.path && t.status === 'done' ? '<div class="dlm-path">' + esc(t.path) + '</div>' : '') +
+  '</div>';
 }
 
-// ---------- 下载列表弹窗（按键弹出；表头固定 + 列表滚动） ----------
+// ---------- 下载列表专用弹窗（按键弹出；独立于通用 #modal，尺寸内联不受既有规则影响） ----------
 // dlListKind = 当前弹窗类型（'video' | 'music'）；null = 未打开
 let dlListKind = null, dlListTimer = null;
 
-// dlTaskPanelHTML 弹窗内容骨架：批量操作栏 + 固定表头 + 可滚动任务区
-function dlTaskPanelHTML(kind){
-  const id = kind === 'music' ? 'mdl' : 'vdl';
-  const head = '<thead><tr>' +
-    '<th>任务</th>' +
-    '<th style="width:150px">状态</th>' +
-    '<th style="width:190px">进度</th>' +
-    '<th style="width:150px;text-align:right">操作</th>' +
-  '</tr></thead>';
-  return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;flex:0 0 auto">' +
-      '<span id="dl-' + id + '-sum" style="font-size:12.5px;color:var(--text3)"></span>' +
-      '<span style="flex:1"></span>' +
-      '<button class="btn btn-outline btn-sm" onclick="dlPauseAll()">全部暂停</button>' +
-      '<button class="btn btn-outline btn-sm" onclick="dlResumeAll()">全部继续</button>' +
-      '<button class="btn btn-outline btn-sm" onclick="dlCancelAll()">全部停止</button>' +
-      '<button class="btn btn-outline btn-sm" onclick="dlClearDone()">清除完成</button>' +
-      '<button class="btn btn-outline btn-sm" style="color:var(--danger)" onclick="dlClearAll()">清空列表</button>' +
-    '</div>' +
-    '<div class="dl-scroll" style="border:1px solid var(--border);border-radius:var(--radius);overflow:auto">' +
-      '<table class="tbl" style="border:0;border-radius:0;table-layout:fixed;width:100%">' + head +
-        '<tbody id="dl-' + id + '-rows"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody>' +
-      '</table>' +
-    '</div>';
-}
-
-// dlListModalOpen 打开下载列表弹窗（宽版；视频/音乐共用）
+// dlListModalOpen 打开下载列表弹窗（视频/音乐共用同一专用弹窗）
 function dlListModalOpen(kind){
   dlListKind = kind;
-  const title = kind === 'music' ? '音乐下载列表' : '下载列表';
-  wideDialog(title, dlTaskPanelHTML(kind));
+  document.getElementById('dl-modal-title').textContent = kind === 'music' ? '音乐下载列表' : '下载列表';
+  document.getElementById('dl-modal-sum').textContent = '';
+  document.getElementById('dl-modal-list').innerHTML = '<div class="dlm-empty">加载中…</div>';
+  document.getElementById('dl-modal').classList.add('show');
   dlListRefresh();
 }
 
-// dlListClose 弹窗关闭时停轮询（弹窗外点关闭/关闭按钮都走 closeModal）
+// dlListClose 关闭弹窗并停轮询
 function dlListClose(){
+  const m = document.getElementById('dl-modal');
+  if(m) m.classList.remove('show');
   dlListKind = null;
   if(dlListTimer){ clearTimeout(dlListTimer); dlListTimer = null; }
   if(dlMTimer){ clearTimeout(dlMTimer); dlMTimer = null; }
@@ -3455,19 +3458,18 @@ function dlListRefresh(){
   else if(dlListKind === 'music') dlMusicLoadTasks();
 }
 
-// dlListPanelRefresh 把任务视图写进弹窗（弹窗已关或类型不符时静默丢弃）
+// dlListPanelRefresh 把任务视图写进专用弹窗（弹窗已关或类型不符时静默丢弃）
 function dlListPanelRefresh(kind, j, showType){
   if(dlListKind !== kind) return;
-  const modal = document.getElementById('modal');
-  if(!modal.classList.contains('show')) return;
-  const id = kind === 'music' ? 'mdl' : 'vdl';
-  const tbody = document.getElementById('dl-' + id + '-rows');
-  if(!tbody) return;
+  const mask = document.getElementById('dl-modal');
+  if(!mask || !mask.classList.contains('show')) return;
+  const box = document.getElementById('dl-modal-list');
+  if(!box) return;
   const list = j.tasks || [];
-  tbody.innerHTML = list.length
+  box.innerHTML = list.length
     ? list.map(t => dlTaskRow(t, showType)).join('')
-    : '<tr><td colspan="4" class="empty" style="padding:32px 0">暂无任务（点搜索结果里的「下载」加入后在此查看进度）</td></tr>';
-  const sum = document.getElementById('dl-' + id + '-sum');
+    : '<div class="dlm-empty">暂无任务<br><span style="font-size:12px">点搜索结果里的「下载」加入后，在这里查看进度</span></div>';
+  const sum = document.getElementById('dl-modal-sum');
   if(sum){
     const run = list.filter(t => t.status==='downloading'||t.status==='running'||t.status==='fetching'||t.status==='pending').length;
     const ps = list.filter(t => t.status==='paused').length;
@@ -3481,9 +3483,9 @@ async function dlVideoLoadList(){
   try{
     const j = await apiRetry('/api/dl/tasks');
     dlListPanelRefresh('video', j, true);
-    const modal = document.getElementById('modal');
+    const mask = document.getElementById('dl-modal');
     if(dlListTimer) clearTimeout(dlListTimer);
-    if(j.running && dlListKind === 'video' && modal.classList.contains('show')){
+    if(j.running && dlListKind === 'video' && mask && mask.classList.contains('show')){
       dlListTimer = setTimeout(dlVideoLoadList, 2000);
     }
   }catch(e){}
@@ -3709,9 +3711,9 @@ async function dlMusicLoadTasks(silent){
   try{
     const j = await apiRetry('/api/dlmusic/tasks');
     dlListPanelRefresh('music', j, false);
-    const modal = document.getElementById('modal');
+    const mask = document.getElementById('dl-modal');
     if(dlMTimer) clearTimeout(dlMTimer);
-    if(j.running && dlListKind === 'music' && modal.classList.contains('show')){
+    if(j.running && dlListKind === 'music' && mask && mask.classList.contains('show')){
       dlMTimer = setTimeout(dlMusicLoadTasks, 2000);
     }
   }catch(e){ if(!silent && !/HTTP (0|5\d\d)/.test(String(e.message))) toast(e.message,'err'); }
