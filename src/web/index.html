@@ -3239,8 +3239,10 @@ function dlTaskStatusBadge(t){
   switch(t.status){
     case 'pending':
       return {badge: '<span class="badge badge-gray" style="font-size:10.5px"><span class="dot"></span>排队中</span>', extra: ''};
-    case 'fetching':
-      return {badge: '<span class="badge badge-blue" style="font-size:10.5px"><span class="dot"></span>获取种子信息…</span>', extra: ''};
+    case 'fetching': {
+      const seen = t.peers > 0 ? '（已发现 ' + t.peers + ' 个 peer）' : '';
+      return {badge: '<span class="badge badge-blue" style="font-size:10.5px"><span class="dot"></span>获取种子信息…' + seen + '</span>', extra: ''};
+    }
     case 'downloading': case 'running': {
       const b = '<span class="badge badge-blue" style="font-size:10.5px"><span class="dot"></span>下载中' + (pct ? ' ' + pct + '%' : '') + '</span>';
       const meta = [];

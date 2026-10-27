@@ -92,7 +92,19 @@ func dhtCloseForTest() {
 	dhtG.once = sync.Once{}
 }
 
-// bootstrap 首次扩散
+// dhtBootHosts 公共引导节点（多备几个：国内到 bittorrent.com 系 UDP 常丢包，单点全哑就废了）
+var dhtBootHosts = []string{
+	"router.bittorrent.com:6881",
+	"router.utorrent.com:6881",
+	"dht.transmissionbt.com:6881",
+	"router.bitcomet.com:6881",
+	"dht.libtorrent.org:25401",
+	"dht.aelitis.com:6881",
+}
+
+// bootstrap 持续保活：每 60s 向全部 bootstrap 节点 ping 一轮（响应会 learnNode 入池）。
+// 不做一次性 booted 置位——首启时若全部 ping 不通（或 DNS 抖动），一次性方案会让
+// 节点池永远为空、findPeers 空转。每分钟 6 个 UDP 包的保活开销可忽略。
 func (n *dhtNode) bootstrap() {
 	n.mu.Lock()
 	if n.booted {
@@ -102,18 +114,31 @@ func (n *dhtNode) bootstrap() {
 	n.booted = true
 	n.mu.Unlock()
 	go func() {
-		for _, host := range []string{
-			"router.bittorrent.com:6881",
-			"router.utorrent.com:6881",
-			"dht.transmissionbt.com:6881",
-		} {
-			addr, err := net.ResolveUDPAddr("udp", host)
-			if err != nil {
-				continue
+		defer func() { recover() }()
+		for {
+			alive := n.poolSize()
+			// 首启/池子小（<32）时每 30s 冲一轮；起来后退化为每 60s 保活
+			interval := 60 * time.Second
+			if alive < 32 {
+				interval = 30 * time.Second
 			}
-			n.ping(addr)
+			for _, host := range dhtBootHosts {
+				if addr, err := net.ResolveUDPAddr("udp", host); err == nil {
+					n.ping(addr)
+				}
+			}
+			select {
+			case <-time.After(interval):
+			}
 		}
 	}()
+}
+
+// poolSize 当前节点池大小（诊断用）
+func (n *dhtNode) poolSize() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.nodes)
 }
 
 func (n *dhtNode) readLoop() {

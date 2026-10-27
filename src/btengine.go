@@ -18,7 +18,9 @@ package main
 
 import (
 	"context"
+	crand "crypto/rand"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -38,7 +40,7 @@ const (
 	btMaxConns       = 10 // 单种并发下载连接
 	btMetaTryTimeout = 3 * time.Minute    // 元数据阶段总窗口（DHT 冷启动/冷门做种需要余地）
 	btMetaMaxPeers   = 8                  // 元数据阶段并发拨号上限（先到先得）
-	btMaxTrackers    = 10                 // 合并磁力自带 + 公共 tracker 的上限
+	btMaxTrackers    = 20                 // 合并磁力自带(含 udp://) + 公共 tracker 的上限
 	btMaxTorrentSz   = int64(4) << 30
 	btBlockLen       = 16 << 10 // 分块 16KB
 	btPipelineBlocks = 8        // 单连接挂起块数
@@ -58,13 +60,19 @@ var btDefaultTrackers = []string{
 }
 
 // btMergeTrackers 磁力自带 tr 优先，公共 tracker 兜底，去重截断。
+// udp:// 全部接纳（BEP15 已实现）；不带端口的 udp:// host 补 ：80。
 func btMergeTrackers(tr []string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, s := range append(append([]string{}, tr...), btDefaultTrackers...) {
 		s = strings.TrimSpace(s)
-		if s == "" || seen[s] || strings.HasPrefix(s, "udp:") {
+		if s == "" || seen[s] {
 			continue
+		}
+		if strings.HasPrefix(s, "udp://") {
+			if u, err := url.Parse(s); err == nil && u.Port() == "" && u.Hostname() != "" {
+				s = "udp://" + u.Hostname() + ":80" + u.Path
+			}
 		}
 		seen[s] = true
 		out = append(out, s)
@@ -94,6 +102,7 @@ type btTask struct {
 	speed int64
 
 	peersActive int
+	seenN       int                 // 已发现的候选 peer 数（fetching 态诊断展示）
 	inflight    map[string]time.Time // 最近连过的 peer（30s 内不重复拨）
 
 	cancel context.CancelFunc
@@ -263,7 +272,11 @@ func runTask(t *btTask, trackers []string) {
 	} else {
 		trackers = btMergeTrackers(trackers)
 		for _, tr := range trackers {
-			go btTrackerLoop(ctx, tr, t.hash, feed)
+			if strings.HasPrefix(tr, "udp:") {
+				go btUDPTrackerLoop(ctx, tr, t.hash, feed)
+			} else if strings.HasPrefix(tr, "http") {
+				go btTrackerLoop(ctx, tr, t.hash, feed)
+			}
 		}
 		if n := dhtN(); n != nil {
 			go n.findPeers(ctx, t.hash, feed)
@@ -296,6 +309,9 @@ func runTask(t *btTask, trackers []string) {
 				continue
 			}
 			tried[addr] = true
+			t.mu.Lock()
+			t.seenN = len(tried)
+			t.mu.Unlock()
 			inflight++
 			go func(addr string) {
 				defer func() { recover() }()
@@ -310,7 +326,18 @@ func runTask(t *btTask, trackers []string) {
 		}
 	}
 	if meta == nil {
-		t.setLock("error", "未能获取种子元数据（做种不在线或网络受限）")
+		t.mu.Lock()
+		seenN := t.seenN
+		t.mu.Unlock()
+		dmsg := ""
+		if n := dhtN(); n != nil {
+			dmsg = fmt.Sprintf("，DHT 节点 %d", n.poolSize())
+		}
+		if seenN == 0 {
+			t.setLock("error", fmt.Sprintf("获取种子信息超时：未发现任何 peer%s——该资源可能无做种在线；若 DHT 节点为 0 则是本机网络限制 UDP / tracker 访问", dmsg))
+		} else {
+			t.setLock("error", fmt.Sprintf("获取种子信息超时：已发现 peer %d%s 但全部抓取失败——网络受限或做种已离线", seenN, dmsg))
+		}
 		return
 	}
 
@@ -385,7 +412,7 @@ func runTask(t *btTask, trackers []string) {
 
 // ---------- tracker ----------
 
-// btTrackerLoop 中心 tracker 周期 announce（http/https；udp tracker 不实现）
+// btTrackerLoop 中心 tracker 周期 announce（http/https）
 func btTrackerLoop(ctx context.Context, tr string, ih [20]byte, out func(btPeerAddr)) {
 	defer func() { recover() }()
 	if !strings.HasPrefix(tr, "http") {
@@ -402,6 +429,126 @@ func btTrackerLoop(ctx context.Context, tr string, ih [20]byte, out func(btPeerA
 		case <-time.After(60 * time.Second):
 		}
 	}
+}
+
+// btUDPTrackerLoop udp://tracker 周期 announce（BEP15；搜索源返回的 tracker 大多
+// 是 udp://，之前全部丢弃导致真机上只靠 http tracker 单腿发现 peer）
+func btUDPTrackerLoop(ctx context.Context, tr string, ih [20]byte, out func(btPeerAddr)) {
+	defer func() { recover() }()
+	first := true
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		interval := btUDPTrackerAnnounce(tr, ih, out, first)
+		first = false
+		if interval < 30 {
+			interval = 60
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(interval) * time.Second):
+		}
+	}
+}
+
+const btUdpMagic = uint64(0x41727101980) // BEP15 connect 协议魔数
+
+// btUDPTrackerAnnounce 单次 BEP15 announce（connect 握手 + announce + compact peers）。
+// 返回 tracker 建议的 re-announce 间隔（秒）。
+func btUDPTrackerAnnounce(tr string, ih [20]byte, out func(btPeerAddr), eventStarted bool) int {
+	defer func() { recover() }()
+	u, err := url.Parse(strings.TrimSpace(tr))
+	if err != nil || u.Scheme != "udp" || u.Host == "" {
+		return 0
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "80"
+	}
+	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, port))
+	if err != nil {
+		return 0
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		return 0
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+	var tx [4]byte
+	crand.Read(tx[:])
+
+	// connect: 魔数(8) + action=0(4) + txid(4)
+	req := make([]byte, 16)
+	binary.BigEndian.PutUint64(req[0:8], btUdpMagic)
+	binary.BigEndian.PutUint32(req[8:12], 0)
+	copy(req[12:16], tx[:])
+	if _, err := conn.Write(req); err != nil {
+		return 0
+	}
+	resp := make([]byte, 512)
+	nr, err := conn.Read(resp)
+	if err != nil || nr < 16 {
+		return 0
+	}
+	if action := binary.BigEndian.Uint32(resp[0:4]); action != 0 {
+		return 0
+	}
+	if binary.BigEndian.Uint32(resp[4:8]) != binary.BigEndian.Uint32(tx[:]) {
+		return 0
+	}
+	connID := resp[8:16]
+
+	crand.Read(tx[:])
+	// announce: connection_id(8) + action=1(4) + txid(4) + info_hash(20) + peer_id(20)
+	// + downloaded(8) + left(8) + uploaded(8) + event(4) + ip(4) + key(4) + num_want(4) + port(2)
+	req = make([]byte, 98)
+	copy(req[0:8], connID)
+	binary.BigEndian.PutUint32(req[8:12], 1)
+	copy(req[12:16], tx[:])
+	copy(req[16:36], ih[:])
+	copy(req[36:56], btSelfID[:])
+	binary.BigEndian.PutUint64(req[56:64], 0)   // downloaded
+	binary.BigEndian.PutUint64(req[64:72], 1)   // left
+	binary.BigEndian.PutUint64(req[72:80], 0)   // uploaded
+	event := uint32(0)
+	if eventStarted {
+		event = 2 // started
+	}
+	binary.BigEndian.PutUint32(req[80:84], event)
+	binary.BigEndian.PutUint32(req[84:88], 0) // ip=0（tracker 自动判）
+	var key [4]byte
+	crand.Read(key[:])
+	copy(req[88:92], key[:])
+	binary.BigEndian.PutUint32(req[92:96], 200) // num_want
+	binary.BigEndian.PutUint16(req[96:98], uint16(maxI(6881, dhtListenPort)))
+	if _, err := conn.Write(req); err != nil {
+		return 0
+	}
+	nr, err = conn.Read(resp)
+	if err != nil || nr < 20 {
+		return 0
+	}
+	action := binary.BigEndian.Uint32(resp[0:4])
+	if binary.BigEndian.Uint32(resp[4:8]) != binary.BigEndian.Uint32(tx[:]) {
+		return 0
+	}
+	if action == 3 { // tracker 报错（截断 infohash 等），静默跳过
+		return 0
+	}
+	if action != 1 {
+		return 0
+	}
+	interval := int(binary.BigEndian.Uint32(resp[8:12]))
+	// resp[12:16] leechers, resp[16:20] seeders（未用）
+	for i := 20; i+6 <= nr; i += 6 {
+		out(decodeCompactPeer(string(resp[i : i+6])))
+	}
+	return interval
 }
 
 // btTrackerAnnounce 单次 compact announce
@@ -875,8 +1022,13 @@ func btViews() []DlTaskView {
 		v := DlTaskView{
 			ID: t.ID, Type: "video", Sub: "bt",
 			Title: t.Title, Status: t.Status, Err: t.Err,
-			CreatedAt: t.CreatedAt, Dir: t.Dir, Peers: t.peersActive,
+			CreatedAt: t.CreatedAt, Dir: t.Dir,
 			Speed: t.speed, Done: t.written,
+		}
+		if t.Status == "fetching" {
+			v.Peers = t.seenN // fetching 态展示「已发现的候选 peer 数」
+		} else {
+			v.Peers = t.peersActive
 		}
 		if t.meta != nil {
 			v.Total = t.meta.btTotalSize()
