@@ -141,6 +141,13 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .kv .v{font-weight:500}
 .vdisk{display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:1px 8px;white-space:nowrap}
 .vdisk .vdisk-name{color:var(--text2)}
+/* 存储空间每卷卡片式区块：标题行(挂载点+用量)/进度条/元信息(通电+fsType+温度chip) */
+.dvol{display:flex;flex-direction:column;gap:6px;padding-bottom:14px;border-bottom:1px dashed var(--border)}
+.dvol:last-child{padding-bottom:0;border-bottom:none}
+.dvol-h{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px}
+.dvol-mount{color:var(--text2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dvol-use{color:var(--text1);font-weight:500;white-space:nowrap;flex-shrink:0}
+.dvol-meta{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:12px;color:var(--text3)}
 /* 网络信息：网卡纵向列表（替代横滑表格），排列在网关信息之上 */
 .net-list{margin-bottom:10px}
 .net-block{padding:9px 0;border-bottom:1px solid #F7F8FA}
@@ -1715,8 +1722,8 @@ async function loadOverview(){
         const ttxt = tc!=null ? tc.toFixed(0)+'°C' : '—';
         return `<span class="vdisk"><span class="vdisk-name">${esc(pdv)}</span> <span id="disk-temp-${esc(pdv)}" style="color:${tcolor}">${ttxt}</span></span>`;
       }).join('');
-      // 存储空间内联温度：每块底层盘一个 chip，内联在文件系统类型之后
-      return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;gap:8px;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ⏱ ${ph} · ${esc(d.fsType)} ${tempSpans}</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
+      // 存储空间卡片式区块：标题行(挂载点+用量) / 进度条 / 元信息(通电+fsType+温度chip)
+      return `<div class="dvol"><div class="dvol-h"><span class="dvol-mount mono">${esc(d.mount)}</span><span class="dvol-use">${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}%</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div><div class="dvol-meta">${tempSpans?`${tempSpans}<span style="opacity:.75">·</span>`:''}<span>⏱ 通电 ${esc(ph)}</span><span style="opacity:.75">·</span><span>${esc(d.fsType)}</span></div></div>`;
     }).join('') || '<div class="empty">未检测到磁盘</div>';
     document.getElementById('ov-info').innerHTML = `<div class="kv-fill">` + [
       ['主机名', j.hostname],['操作系统', j.os],['飞牛版本', j.fnosVersion],['内核', j.kernel],
