@@ -216,7 +216,12 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
   .dlm-head{padding:12px 14px}
   .dlm-list{padding:8px}
   .dlm-card{padding:10px 11px}
-  .dlm-name{font-size:13px}
+  /* 窄屏：避免长徽标（如「获取种子信息…（已发现 N 个 peer）」）把名称压成竖排单列，
+     改为两行式——名称独占第一行，徽标+操作按钮自动换到第二行 */
+  .dlm-row1{flex-wrap:wrap;gap:8px 10px}
+  .dlm-name{flex:1 1 100%;font-size:13px}
+  .dlm-tags{flex:1 1 auto}
+  .dlm-ops{flex:0 0 auto;margin-left:auto}
 }
 /* 下载列表表格：表头随滚动吸顶，行高舒适，状态/操作列不换行 */
 .modal h3{font-size:16px;margin-bottom:12px}
@@ -3650,10 +3655,10 @@ function dlConcurrencyFieldsHTML(pfx){
       '<input type="number" id="' + pfx + '-' + id + '" value="' + (val || def) + '" min="' + lo + '" max="' + hi + '" step="1" style="width:120px"></div>';
   return num('maxtasks', '同时下载任务数', '1-' + (lim.maxTasksHi || 8) + '，默认 3',
       c.maxTasks, 1, lim.maxTasksHi || 8, 3) +
-    num('maxconns', '单任务并发连接数', '4-' + (lim.maxConnsHi || 40) + '，默认 16；越大越快但占连接更多',
-      c.maxConns, 4, lim.maxConnsHi || 40, 16) +
-    num('pipeline', '单连接挂起块数', '4-' + (lim.pipelineHi || 32) + '，默认 16；每块 16KB，越大越吃满高延迟链路',
-      c.pipeline, 4, lim.pipelineHi || 32, 16);
+    num('maxconns', '单任务并发连接数', '4-' + (lim.maxConnsHi || 64) + '，默认 ' + (lim.maxConnsDef || 24) + '；越大越快但占带宽和你发的连接更多（迅雷式提速）',
+      c.maxConns, 4, lim.maxConnsHi || 64, lim.maxConnsDef || 24) +
+    num('pipeline', '单连接挂起块数', '4-' + (lim.pipelineHi || 48) + '，默认 ' + (lim.pipelineDef || 24) + '；每块 16KB，越大越吃满高延迟链路',
+      c.pipeline, 4, lim.pipelineHi || 48, lim.pipelineDef || 24);
 }
 
 // dlConcurrencyPayload 收集并发设置

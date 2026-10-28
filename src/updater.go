@@ -381,6 +381,7 @@ var (
 	dlErr   string
 	dlPath  string
 	dlName  string
+	dlStart time.Time // dlRun 置 true 的时刻（看门狗：running 超时强制复位，防单例锁残留）
 	dlPW    *progressWriter // 下载进度计数器（运行中非 nil）
 )
 
@@ -395,7 +396,13 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 // handleUpdateStatus GET /api/update/status：查询后台下载任务进度/结果。
 func handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	dlMu.Lock()
-	defer dlMu.Unlock()
+	// 看门狗：dlRun 理论上应在成功（updFinishPart）或失败（setFail）后复位，
+	// 但后台 goroutine 若因未知原因卡死/异常，单例锁会永远 true → 之后所有下载都 409。
+	// 这里若 running 超过更新下载整体时限 + 5min 缓冲仍未结束，视为异常残留，强制复位并报错。
+	if dlRun && time.Since(dlStart) > updDlDeadline+5*time.Minute {
+		dlRun, dlDone, dlErr = false, true, "下载任务异常卡死（超过时限无结果），已自动清理，请重新尝试"
+		dlPW = nil
+	}
 	st := map[string]any{"running": dlRun, "done": dlDone, "bytes": int64(0), "path": "", "name": ""}
 	if dlPW != nil {
 		st["bytes"] = dlPW.n
@@ -409,6 +416,7 @@ func handleUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	if dlName != "" {
 		st["name"] = dlName
 	}
+	dlMu.Unlock()
 	ok(w, st)
 }
 
@@ -460,6 +468,7 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dlRun, dlDone, dlErr, dlPath, dlName, dlPW = true, false, "", "", name, &progressWriter{}
+	dlStart = time.Now()
 	dlMu.Unlock()
 	go runDownload(req.URL, isAPI, dst)
 	ok(w, map[string]any{"started": true, "message": "已开始后台下载 " + name + "（可关闭此页，下载在 NAS 上继续）"})
@@ -553,6 +562,13 @@ func runDownload(rawURL string, isAPI bool, dst string) {
 		dlRun, dlDone, dlErr = false, true, msg
 		dlMu.Unlock()
 	}
+	// 兜底：任何 panic 都不能让 dlRun 卡 true——否则之后的所有下载都返回 409「进行中」，
+	// 表现正是「完全停止应用重开才能正常下载」（后台 goroutine panic 后单例锁永不复位）。
+	defer func() {
+		if r := recover(); r != nil {
+			setFail("下载内部异常：" + fmt.Sprint(r))
+		}
+	}()
 	setStage := func(bytes int64) {
 		dlMu.Lock()
 		if dlPW != nil {

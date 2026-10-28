@@ -41,7 +41,7 @@ const (
 	btMetaTryTimeout = 3 * time.Minute // 元数据阶段总窗口（DHT 冷启动/冷门做种需要余地）
 	btMetaMaxPeers   = 64              // 元数据阶段并发拨号上限（先到先得；调大加速出种。v1.3.49 从 24 提高——48+ peer 的热门种 24 路不够吃，拨号失败快速回收后空槽闲置）
 	btMetaIPCap      = 3               // 同一 IP 最多尝试的端口数（防假 seeder 农场占满并发槽）
-	btMaxTrackers    = 20              // 合并磁力自带(含 udp://) + 公共 tracker 的上限
+	btMaxTrackers    = 40              // 合并磁力自带(含 udp://) + 公共 tracker 的上限（v1.3.53 从 20 提高，让公共 tracker 全量进列表）
 	btMaxTorrentSz   = int64(4) << 30
 	btBlockLen       = 16 << 10 // 分块 16KB（协议标准值，不能改）
 	btStalePiece     = 40 * time.Second
@@ -49,10 +49,12 @@ const (
 	btSpeedWin       = 10 // 速度滑动平均窗口（秒）：窗口越长越平滑，整片写盘的空档不会让速度掉到 0
 
 	// 并发默认值（设置页可调；见 dlDefMaxConns / dlDefPipeline）
-	btDefMaxConns = 16 // 单任务并发连接
-	btDefPipeline = 16 // 单连接挂起块数（16*16KB = 256KB 管线）
-	btMaxConnsCap = 40 // 单任务并发连接硬上限
-	btPipeCap     = 32 // 单连接挂起块数硬上限
+	// 迅雷/qBittorrent 式提速：把默认并发与管线放宽，让同一任务在更多 peer 上并行取块、
+	// 单连接窗口更饱满，高 RTT 或慢速 peer 不再成为整速天花板。
+	btDefMaxConns = 24   // 单任务并发连接（v1.3.53 从 16 提高——16 路对热门种常吃不饱带宽）
+	btDefPipeline = 24   // 单连接挂起块数（24*16KB = 384KB 管线）
+	btMaxConnsCap = 64   // 单任务并发连接硬上限（v1.3.53 从 40 提高）
+	btPipeCap     = 48   // 单连接挂起块数硬上限（v1.3.53 从 32 提高）
 )
 
 // 运行时并发参数（由 dlConfig 注入；未设置时用默认值）
@@ -161,14 +163,27 @@ func (l *btLimiter) release() {
 }
 
 // btDefaultTrackers 公共 tracker 兜底：磁力自带 tr 列表薄时保证 peer 发现半径。
-// 只用 http/https（btTrackerLoop 不实现 udp tracker）。
+// 只用 http/https + udp（btTrackerLoop 走 http/https，btUDPTrackerLoop 走 BEP15 udp）。
 var btDefaultTrackers = []string{
+	// 一线公共 tracker（全球用户量最大的几个，务必排前，命中率高）
+	"udp://tracker.opentrackr.org:1337/announce",
 	"http://tracker.opentrackr.org:1337/announce",
-	"http://tracker.openbittorrent.com:6969/announce",
-	"http://exodus.desync.com:6969/announce",
+	"udp://open.tracker.cl:1337/announce",
 	"http://open.tracker.cl:1337/announce",
+	"udp://exodus.desync.com:6969/announce",
+	"http://exodus.desync.com:6969/announce",
+	"http://tracker.openbittorrent.com:6969/announce",
+	"udp://tracker.openbittorrent.com:6969/announce",
 	"https://tracker.tamersunion.org:443/announce",
+	"udp://tracker.torrent.eu.org:451/announce",
+	"https://tracker.gbitt.info:443/announce",
+	"udp://tracker.altrosky.nl:6969/announce",
+	"udp://open.demonii.com:1337/announce",
+	"http://tracker.files.fm:6969/announce",
 	"http://tracker.bt4g.com:2095/announce",
+	// 国内可直连、对中文资源 peer 覆盖面较好的 tracker
+	"http://t.itzmx.com:8080/announce",
+	"udp://t.itzmx.com:8080/announce",
 }
 
 // btMergeTrackers 磁力自带 tr 优先，公共 tracker 兜底，去重截断。

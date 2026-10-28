@@ -77,9 +77,11 @@ func (s *Server) handleDlConfigGet(w http.ResponseWriter, r *http.Request) {
 		"maxConns": cfg.MaxConns,
 		"pipeline": cfg.Pipeline,
 		"limits": map[string]int{
-			"maxTasksHi": btMaxTasks,
-			"maxConnsHi": btMaxConnsCap,
-			"pipelineHi": btPipeCap,
+			"maxTasksHi":  btMaxTasks,
+			"maxConnsHi":  btMaxConnsCap,
+			"pipelineHi":  btPipeCap,
+			"maxConnsDef": btDefMaxConns,
+			"pipelineDef": btDefPipeline,
 		},
 		"suggest": map[string]string{
 			"video": dlDefaultDir("video"),
@@ -150,9 +152,11 @@ func (s *Server) handleDlConfigSave(w http.ResponseWriter, r *http.Request) {
 		"maxConns": cfg.MaxConns,
 		"pipeline": cfg.Pipeline,
 		"limits": map[string]int{
-			"maxTasksHi": btMaxTasks,
-			"maxConnsHi": btMaxConnsCap,
-			"pipelineHi": btPipeCap,
+			"maxTasksHi":  btMaxTasks,
+			"maxConnsHi":  btMaxConnsCap,
+			"pipelineHi":  btPipeCap,
+			"maxConnsDef": btDefMaxConns,
+			"pipelineDef": btDefPipeline,
 		},
 		"suggest": map[string]string{
 			"video": dlDefaultDir("video"),
