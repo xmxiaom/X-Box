@@ -47,7 +47,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .sticky-list:has(> .tblwrap){overflow-y:hidden}
 .sticky-list:has(> .tblwrap) .tblwrap{height:100%;overflow-y:auto}
 /* 媒体页 vdl/mdl：面板自身是 flex 列（说明/搜索框/状态固定顶端），仅结果区滚动（v1.3.49） */
-#media-pane-vdl,#media-pane-mdl{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+#media-pane-vdl,#media-pane-mdl,#media-pane-srt{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 #dlv-results,#dlm-results{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
 
 /* ===== 通用组件 ===== */
@@ -582,11 +582,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="media-tabs">
           <button class="mtab active" id="mtab-vdl" onclick="mediaSwitch('vdl')">⬇️ 视频下载</button>
           <button class="mtab" id="mtab-mdl" onclick="mediaSwitch('mdl')">🎵 音乐下载</button>
-          <button class="mtab" id="mtab-video" onclick="mediaSwitch('video')">🎬 视频管理</button>
+          <button class="mtab" id="mtab-srt" onclick="mediaSwitch('srt')">🎬 短剧</button>
+          <button class="mtab" id="mtab-video" onclick="mediaSwitch('video')">📁 视频管理</button>
           <button class="mtab" id="mtab-audio" onclick="mediaSwitch('audio')">🎵 音乐管理</button>
         </div>
         <div id="media-pane-vdl" style="display:none"></div>
         <div id="media-pane-mdl" style="display:none"></div>
+        <div id="media-pane-srt" style="display:none"></div>
         <div class="rows sticky-list" id="media-rows" style="display:none"></div>
       </div>
 
@@ -1146,12 +1148,13 @@ let mediaCache = [], mediaStates = {}, mediaTab = 'vdl', mediaTimer = null;
 
 function mediaSwitch(kind){
   mediaTab = kind;
-  for(const k of ['video','audio','vdl','mdl']){
+  for(const k of ['video','audio','vdl','mdl','srt']){
     const el = document.getElementById('mtab-' + k);
     if(el) el.classList.toggle('active', kind === k);
   }
   document.getElementById('media-pane-vdl').style.display = kind === 'vdl' ? '' : 'none';
   document.getElementById('media-pane-mdl').style.display = kind === 'mdl' ? '' : 'none';
+  document.getElementById('media-pane-srt').style.display = kind === 'srt' ? '' : 'none';
   document.getElementById('media-rows').style.display = (kind === 'video' || kind === 'audio') ? '' : 'none';
   // 整理页面的副标题/右上刷新按钮只在整理 tab 显示
   const sub = document.getElementById('media-sub');
@@ -1189,6 +1192,7 @@ async function loadMediaTasks(){
 function renderMediaPage(){
   if(mediaTab === 'vdl'){ dlVideoRender(); return; }
   if(mediaTab === 'mdl'){ dlMusicRender(); return; }
+  if(mediaTab === 'srt'){ srtRender(); return; }
   dlListKind = null;
   const isV = mediaTab === 'video';
   const list = mediaCache.filter(t => t.kind === mediaTab);
@@ -3814,6 +3818,156 @@ async function dlMusicDL(s){
     else toast(j.msg || ('已加入下载列表：' + s.name), 'ok');
     dlListRefresh();
   }catch(e){ toast(e.message,'err'); }
+}
+
+/* ---------- 短剧：聚合搜索 → 展示网盘分享链接（复制/跳转） ---------- */
+let srtSearching = false, srtLastKw = '', srtLastResult = null, srtSearchSeq = 0, srtKeepList = [];
+
+function srtRender(){
+  const pane = document.getElementById('media-pane-srt');
+  if(!pane) return;
+  pane.innerHTML =
+    '<div class="proxy-hint">原理：聚合检索「黑豆短剧 / rejusou」两个免登录公开源，命中每部短剧并解析其网盘分享链接。生态限制：短剧站目前几乎只提供夸克/百度网盘分享（无磁力/无直链），而网盘需要登录才能转存，因此本板块不做自动下载——点「复制」或「打开」后到网盘完成保存即可。</div>' +
+    '<div style="display:flex;gap:8px;margin-bottom:12px">' +
+      '<input type="text" id="srt-kw" placeholder="搜索短剧剧名（如 枕边的恶魔）" style="flex:1" onkeydown="if(event.key===\'Enter\')srtSearch()">' +
+      '<button class="btn btn-primary" id="srt-go" onclick="srtSearch()">搜索</button>' +
+    '</div>' +
+    '<div id="srt-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>' +
+    '<div id="srt-results"></div>';
+  const kw = document.getElementById('srt-kw');
+  if(kw && srtLastKw) kw.value = srtLastKw;
+  srtRestore();
+}
+
+function srtRestore(){
+  if(srtLastResult){
+    srtRenderResult(srtLastResult.items, srtLastResult.sources, srtLastResult.ms);
+    return;
+  }
+  const seq = srtSearchSeq;
+  api('/api/dl/search/last?kind=srt').then(j=>{
+    const c = j && j.cache;
+    if(!c || srtLastResult || seq !== srtSearchSeq) return;
+    const kwEl = document.getElementById('srt-kw');
+    if(kwEl && !kwEl.value && c.q) kwEl.value = c.q;
+    srtLastKw = c.q || '';
+    srtRenderResult(c.items || [], c.sources || [], 0);
+    const st = document.getElementById('srt-status');
+    if(st){
+      const at = c.at ? String(c.at).replace('T',' ').slice(0,16) : '';
+      st.textContent = '已恢复上次搜索结果' + (at ? '（' + at + '）' : '') + (st.textContent ? ' · ' + st.textContent : '');
+    }
+  }).catch(()=>{});
+}
+
+async function srtSearch(){
+  const kwEl = document.getElementById('srt-kw');
+  const kw = (kwEl ? kwEl.value : '').trim();
+  if(!kw){ toast('请输入短剧名称','err'); return; }
+  if(srtSearching) return;
+  srtSearching = true; srtLastKw = kw;
+  const seq = ++srtSearchSeq;
+  document.getElementById('srt-results').innerHTML = '<div class="empty">正在搜索短剧…</div>';
+  const go = document.getElementById('srt-go'); if(go) go.disabled = true;
+  const t0 = Date.now();
+  try{
+    const j = await api('/api/dlsrt/search?q=' + encodeURIComponent(kw), {timeoutMs: 25000});
+    if(seq !== srtSearchSeq) return;
+    srtLastResult = {kw: kw, items: j.items || [], sources: j.sources || [], ms: Date.now() - t0};
+    srtRenderResult(srtLastResult.items, srtLastResult.sources, srtLastResult.ms);
+  }catch(e){
+    if(seq === srtSearchSeq){
+      document.getElementById('srt-status').textContent = '';
+      document.getElementById('srt-results').innerHTML = '<div class="empty">搜索失败：' + esc(e.message) + '</div>';
+    }
+  }finally{
+    if(seq === srtSearchSeq){ srtSearching = false; const g=document.getElementById('srt-go'); if(g) g.disabled=false; }
+  }
+}
+
+function srtRenderResult(items, sources, ms){
+  const st = document.getElementById('srt-status');
+  if(st){
+    const parts = (sources||[]).map(s => s.name + (s.err ? '×' : ' ' + s.count));
+    st.textContent = '共 ' + items.length + ' 部 · ' + (sources||[]).length + ' 源（' + parts.join(' / ') + '）' + (ms ? ' · ' + Math.round(ms/100)/10 + 's' : '');
+  }
+  const box = document.getElementById('srt-results');
+  if(!items.length){
+    box.innerHTML = '<div class="empty">没有找到短剧，试试更短的剧名</div>';
+    return;
+  }
+  // 先把每条的 __i 引用索引填上，再拼 HTML 复用真实索引
+  items.forEach((it, i) => { it.__i = i; srtKeepList[i] = it; });
+  box.innerHTML = items.map(it => {
+    const ep = it.episodes ? '<span class="badge badge-blue" style="font-size:10.5px"><span class="dot"></span>' + esc(it.episodes) + '</span>' : '';
+    const dateTxt = it.date ? '<span>' + esc(it.date) + '</span>' : '';
+    const noteTxt = it.note ? '<span style="color:var(--warn)">' + esc(it.note) + '</span>' : '';
+    const links = (it.links || []);
+    let linkRow = '';
+    if(links.length){
+      linkRow = '<div class="desc" style="font-size:11px;color:var(--text3);display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' +
+        links.map((lk, li) =>
+          '<span class="badge ' + (lk.kind==='quark'?'badge-green':'badge-blue') + '" style="font-size:10.5px">' + esc(lk.name||lk.kind) + '</span>' +
+          '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtCopyLink(' + it.__i + ',' + li + ')">📋 复制</button>' +
+          '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtOpenLink(' + it.__i + ',' + li + ')">↗ 打开</button>'
+        ).join('') + '</div>';
+    }
+    const detailTxt = it.detailUrl
+      ? '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtOpenDetail(' + it.__i + ')">详情</button>'
+      : '';
+    return '<div class="row" style="padding:10px 12px">' +
+      '<div class="info" style="min-width:0">' +
+        '<div class="name" style="font-size:13px;word-break:break-all">' + esc(it.title) + '</div>' +
+        '<div class="desc" style="font-size:11px;color:var(--text3);display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">' +
+          '来源 <span class="badge badge-gray" style="font-size:10.5px">' + esc(it.source) + '</span>' +
+          ep + dateTxt + noteTxt +
+        '</div>' +
+        (linkRow || '<div class="desc" style="font-size:11px;margin-top:6px">未解析到网盘链接</div>') +
+      '</div>' +
+      (detailTxt ? '<div class="actions" style="flex:0 0 auto">' + detailTxt + '</div>' : '') +
+    '</div>';
+  }).join('');
+}
+
+function srtCopyLink(itemIdx, linkIdx){
+  const it = srtKeepList[itemIdx];
+  if(!it || !it.links || !it.links[linkIdx]) return;
+  srtWriteClipboard(it.links[linkIdx].url, '网盘链接已复制，请到电脑浏览器登录网盘转存');
+}
+
+function srtOpenLink(itemIdx, linkIdx){
+  const it = srtKeepList[itemIdx];
+  if(!it || !it.links || !it.links[linkIdx]) return;
+  srtWriteClipboard(it.links[linkIdx].url, '已复制网盘链接，可在浏览器打开');
+  try{ window.open(it.links[linkIdx].url, '_blank'); }catch(e){}
+}
+
+function srtOpenDetail(itemIdx){
+  const it = srtKeepList[itemIdx];
+  if(!it || !it.detailUrl) return;
+  try{ window.open(it.detailUrl, '_blank'); }catch(e){ toast('请在浏览器打开详情页','err'); }
+}
+
+function srtWriteClipboard(txt, okMsg){
+  if(navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext){
+    navigator.clipboard.writeText(txt).then(function(){ toast(okMsg,'good'); },
+      function(){ srtShowCopyBox(txt); });
+    return;
+  }
+  srtShowCopyBox(txt);
+}
+
+function srtShowCopyBox(txt){
+  const ov = document.createElement('div');
+  ov.className = 'modal-mask';
+  ov.style.cssText = 'z-index:200;align-items:center;justify-content:center';
+  ov.innerHTML = '<div class="modal" style="max-width:640px;width:90%">' +
+    '<div class="modal-head"><h3>复制网盘链接</h3><button class="btn btn-outline btn-sm" onclick="this.closest(\'.modal-mask\').remove()">关闭</button></div>' +
+    '<div class="modal-body"><textarea readonly style="width:100%;height:120px;box-sizing:border-box" id="srt-copy-ta">' + esc(txt) + '</textarea>' +
+    '<div style="font-size:12px;color:var(--text3);margin-top:4px">文本已自动全选，按 Ctrl+C 复制后到网盘打开转存。</div></div></div>';
+  document.body.appendChild(ov);
+  const ta = ov.querySelector('#srt-copy-ta');
+  if(ta){ ta.focus(); ta.select(); }
 }
 
 // dlMusicLoadTasks 拉音乐任务并渲染进内嵌面板（有运行中任务时 2s 轮询）

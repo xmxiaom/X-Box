@@ -57,6 +57,23 @@ func (s *Server) handleDlSearch(w http.ResponseWriter, r *http.Request) {
 	ok(w, resp)
 }
 
+// handleDlsrtSearch GET /api/dlsrt/search?q=
+// 短剧聚合搜索：黑豆 + rejusou 两个免登录源，返回含网盘分享链接的短剧条目。
+func (s *Server) handleDlsrtSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" || len([]rune(q)) > dlSearchMaxKB {
+		fail(w, 400, "请输入搜索关键词（1-64 字）")
+		return
+	}
+	items, stats := srtSearch(q)
+	if len(items) > dlSearchLimits {
+		items = items[:dlSearchLimits]
+	}
+	resp := map[string]any{"items": items, "sources": stats, "q": q}
+	dlSearchLastSave("srt", resp) // 留存最近一次短剧搜索，重开应用可恢复
+	ok(w, resp)
+}
+
 // handleDlSearchLast GET /api/dl/search/last?kind=video|music
 // 返回最近一次搜索的完整响应（无缓存时 cache 为 null）
 func (s *Server) handleDlSearchLast(w http.ResponseWriter, r *http.Request) {
