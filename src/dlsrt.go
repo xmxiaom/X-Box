@@ -76,6 +76,8 @@ type srtSource struct {
 var srtSources = []srtSource{
 	{Name: "黑豆", Run: srtSrcHddj},
 	{Name: "rejusou", Run: srtSrcRejusou},
+	{Name: "百度短剧", Run: srtSrcKuleuBaidu},
+	{Name: "酷乐全网", Run: srtSrcKuleuQuark},
 	{Name: "m3u8采集", Run: srtSrcM3u8},
 }
 
@@ -387,6 +389,83 @@ func srtTitleContains(title, kw, kwLower string) bool {
 
 // srtHasCJK 判断是否含中日韩字符
 func srtHasCJK(s string) bool { return dlHasCJK(s) }
+
+// ---------- 源 3.5：百度短剧（酷乐 api.kuleu.com，免登录返回百度网盘链接） ----------
+
+// srtSrcKuleuBaidu 酷乐「百度短剧」搜索：bddj 接口按剧名返回百度网盘分享链接。
+// 实测服务端直连稳定（apibay 式公开接口）；链接为 pan.baidu.com，srtClassifyPan 自动标为百度网盘。
+func srtSrcKuleuBaidu(ctx context.Context, kw string) ([]SrtItem, error) {
+	return srtSrcKuleu(ctx, kw, "bddj", "百度短剧")
+}
+
+// srtSrcKuleuQuark 酷乐「全网短剧」搜索：action 接口返回夸克网盘分享链接。
+// 实测 100% 返回 pan.quark.cn（夸克），srtClassifyPan 自动标为夸克网盘。
+func srtSrcKuleuQuark(ctx context.Context, kw string) ([]SrtItem, error) {
+	return srtSrcKuleu(ctx, kw, "action", "酷乐全网")
+}
+
+// srtSrcKuleu 酷乐短剧通用搜索：bddj（百度）/ action（夸克全网）共用一套解析。
+// 响应结构 {code,msg,data:[{name,viewlink,addtime}]}，viewlink 可能含 ?pwd= 提取码。
+// 203 为限流（静默，统计显示 0 条不整体报错）。
+func srtSrcKuleu(ctx context.Context, kw, ep, source string) ([]SrtItem, error) {
+	raw, err := dlFetch(ctx, "https://api.kuleu.com/api/"+ep+"?text="+url.QueryEscape(kw),
+		map[string]string{"Accept": "application/json"})
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Code int `json:"code"`
+		Msg  string `json:"msg"`
+		Data []struct {
+			Name     string `json:"name"`
+			ViewLink string `json:"viewlink"`
+			AddTime  string `json:"addtime"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &doc) != nil || doc.Code != 200 {
+		if doc.Code == 203 { // 限流，静默（统计里会显示 0 条，不整体报错）
+			return nil, nil
+		}
+		return nil, fmt.Errorf("酷乐%s: code=%d msg=%s", source, doc.Code, doc.Msg)
+	}
+	kwLower := strings.ToLower(kw)
+	var items []SrtItem
+	for _, it := range doc.Data {
+		t := strings.TrimSpace(it.Name)
+		u := strings.TrimSpace(it.ViewLink)
+		if t == "" || u == "" {
+			continue
+		}
+		// 服务端自过滤：标题必须含关键词（与 rejusou 一致，CJK 子串 / 英文小写）
+		if !srtTitleContains(t, kw, kwLower) {
+			continue
+		}
+		epTxt := ""
+		if em := srtHddjEpRe.FindStringSubmatch(t); len(em) >= 2 {
+			epTxt = em[1]
+		}
+		kind, name := srtClassifyPan(strings.ToLower(u))
+		items = append(items, SrtItem{
+			Source:   source,
+			Title:    t,
+			Episodes: epTxt,
+			Date:     srtKuleuDate(it.AddTime),
+			Links:    []SrtLink{{Kind: kind, Name: name, URL: u}},
+		})
+		if len(items) >= dlSourceMaxPerSource {
+			break
+		}
+	}
+	return items, nil
+}
+
+// srtKuleuDate 把酷乐时间戳（"2025-07-17 10:32:03"）截成日期 YYYY-MM-DD，异常返回空。
+func srtKuleuDate(t string) string {
+	if len(t) >= 10 {
+		return t[:10]
+	}
+	return t
+}
 // ---------- 源 3：m3u8 采集源（macCMS 接口，免登录返回真实 HLS 播放地址） ----------
 
 // srtM3u8Vod macCMS 采集接口的单条影片字段（ac=detail / ac=videolist 通用）
