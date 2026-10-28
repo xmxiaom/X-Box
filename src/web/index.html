@@ -47,7 +47,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .sticky-list:has(> .tblwrap){overflow-y:hidden}
 .sticky-list:has(> .tblwrap) .tblwrap{height:100%;overflow-y:auto}
 /* 媒体页 vdl/mdl：面板自身是 flex 列（说明/搜索框/状态固定顶端），仅结果区滚动（v1.3.49） */
-#media-pane-vdl,#media-pane-mdl,#media-pane-srt{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+#media-pane-vdl,#media-pane-mdl{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 #dlv-results,#dlm-results{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
 
 /* ===== 通用组件 ===== */
@@ -582,13 +582,11 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
         <div class="media-tabs">
           <button class="mtab active" id="mtab-vdl" onclick="mediaSwitch('vdl')">⬇️ 视频下载</button>
           <button class="mtab" id="mtab-mdl" onclick="mediaSwitch('mdl')">🎵 音乐下载</button>
-          <button class="mtab" id="mtab-srt" onclick="mediaSwitch('srt')">🎬 短剧</button>
           <button class="mtab" id="mtab-video" onclick="mediaSwitch('video')">📁 视频管理</button>
           <button class="mtab" id="mtab-audio" onclick="mediaSwitch('audio')">🎵 音乐管理</button>
         </div>
         <div id="media-pane-vdl" style="display:none"></div>
         <div id="media-pane-mdl" style="display:none"></div>
-        <div id="media-pane-srt" style="display:none"></div>
         <div class="rows sticky-list" id="media-rows" style="display:none"></div>
       </div>
 
@@ -1148,13 +1146,12 @@ let mediaCache = [], mediaStates = {}, mediaTab = 'vdl', mediaTimer = null;
 
 function mediaSwitch(kind){
   mediaTab = kind;
-  for(const k of ['video','audio','vdl','mdl','srt']){
+  for(const k of ['video','audio','vdl','mdl']){
     const el = document.getElementById('mtab-' + k);
     if(el) el.classList.toggle('active', kind === k);
   }
   document.getElementById('media-pane-vdl').style.display = kind === 'vdl' ? '' : 'none';
   document.getElementById('media-pane-mdl').style.display = kind === 'mdl' ? '' : 'none';
-  document.getElementById('media-pane-srt').style.display = kind === 'srt' ? '' : 'none';
   document.getElementById('media-rows').style.display = (kind === 'video' || kind === 'audio') ? '' : 'none';
   // 整理页面的副标题/右上刷新按钮只在整理 tab 显示
   const sub = document.getElementById('media-sub');
@@ -1192,7 +1189,6 @@ async function loadMediaTasks(){
 function renderMediaPage(){
   if(mediaTab === 'vdl'){ dlVideoRender(); return; }
   if(mediaTab === 'mdl'){ dlMusicRender(); return; }
-  if(mediaTab === 'srt'){ srtRender(); return; }
   dlListKind = null;
   const isV = mediaTab === 'video';
   const list = mediaCache.filter(t => t.kind === mediaTab);
@@ -3287,15 +3283,17 @@ function dlVideoRender(){
   // 搜索框骨架无论配置是否就绪都立即渲染（免二次点击）；
   // 目录配置仅影响「设置」弹窗，拿到后静默保存即可
   pane.innerHTML =
-    '<div class="proxy-hint">原理：聚合并行搜索 TPB / YTS / BitSearch / Nyaa / 动漫花园 五个公开源的磁力资源；点「下载」直接加入本应用的内置 BT 下载器下载列表（无需安装任何外置下载器），可实时看到进度与速度。做种数越多的资源下载越快。</div>' +
+    '<div class="proxy-hint">原理：聚合并行搜索 TPB / YTS / BitSearch / Nyaa / 动漫花园 五个公开源的磁力资源（点「下载」直接加入内置 BT 下载器）＋ 黑豆/rejusou 短剧网盘源（点「复制/打开」到网盘转存，短剧站只提供网盘分享、无磁力直链）。做种数越多的资源下载越快。</div>' +
     '<div style="display:flex;gap:8px;margin-bottom:12px">' +
-      '<input type="text" id="dlv-kw" placeholder="搜索电影 / 剧集 / 动漫资源名（支持中英文）" style="flex:1" onkeydown="if(event.key===\'Enter\')dlVideoSearch()">' +
+      '<input type="text" id="dlv-kw" placeholder="搜索电影 / 剧集 / 短剧 / 动漫资源名（支持中英文）" style="flex:1" onkeydown="if(event.key===\'Enter\')dlVideoSearch()">' +
       '<button class="btn btn-primary" id="dlv-go" onclick="dlVideoSearch()">搜索</button>' +
       '<button class="btn btn-outline" onclick="dlListModalOpen(\'video\')">下载列表</button>' +
       '<button class="btn btn-outline" onclick="dlVideoOpenSettings()">设置</button>' +
     '</div>' +
     '<div id="dlv-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>' +
-    '<div id="dlv-results"></div>';
+    '<div id="dlv-srt-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>' +
+    '<div id="dlv-results"></div>' +
+    '<div id="dlv-srt-results" style="border-top:1px solid var(--border);margin-top:14px;padding-top:4px"></div>';
   if(!dlVCfg) dlVideoLoadCfg(true);
   const kw = document.getElementById('dlv-kw');
   if(kw && !kw.value && dlVLastKw) kw.value = dlVLastKw;
@@ -3316,8 +3314,9 @@ async function dlVideoSearch(){
   try{
     const j = await api('/api/dl/search?q=' + encodeURIComponent(kw), {timeoutMs: 25000});
     if(seq !== dlVSearchSeq) return; // 已有更新的搜索，丢弃过期结果
-    dlVLastResult = {kw: kw, items: j.items || [], sources: j.sources || [], ms: Date.now() - t0};
+    dlVLastResult = {kw: kw, items: j.items || [], sources: j.sources || [], srt: j.srt || [], srtSources: j.srtSources || [], ms: Date.now() - t0};
     dlVRender(dlVLastResult.items, dlVLastResult.sources, dlVLastResult.ms);
+    dlVRenderSrt(dlVLastResult.srt, dlVLastResult.srtSources, dlVLastResult.ms);
   }catch(e){
     if(seq === dlVSearchSeq){
       document.getElementById('dlv-status').textContent = '';
@@ -3367,6 +3366,78 @@ function dlVRender(items, sources, ms){
 let dlVKeepList = [];
 function dlVKeep(it){ dlVKeepList.push(it); return dlVKeepList.length - 1; }
 
+// 短剧结果区（并入视频下载面板）：短剧源仅提供网盘分享（无磁力/直链），
+// 故不提供「下载」按钮，改为复制/打开网盘。缓存入 srtKeepList 复用复制/打开逻辑
+function dlVRenderSrt(items, sources, ms){
+  const st = document.getElementById('dlv-srt-status');
+  let sb = '';
+  if(st){
+    const parts = (sources||[]).map(s => s.name + (s.err ? '×' : ' ' + s.count));
+    const hasM3u8 = (items||[]).some(it => it.plays && it.plays.length);
+    sb = '共 ' + items.length + ' 部短剧 · ' + (sources||[]).length + ' 源（' + parts.join(' / ') + '）' +
+      (hasM3u8 ? '· 带「下载整剧」的可内置下载' : '· 仅网盘分享');
+    st.textContent = sb + (ms ? ' · ' + Math.round(ms/100)/10 + 's' : '');
+  }
+  const box = document.getElementById('dlv-srt-results');
+  if(!box) return;
+  if(!items.length){
+    box.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:6px 0"></div>';
+    return;
+  }
+  const head = '<div style="font-size:12px;color:var(--text2);font-weight:600;padding:6px 2px 2px">短剧（有「下载整剧」按钮的可直接用内置下载器免网盘下载）</div>';
+  items.forEach((it, i) => { it.__i = i; srtKeepList[i] = it; });
+  box.innerHTML = head + items.map(it => {
+    const ep = it.episodes ? '<span class="badge badge-blue" style="font-size:10.5px"><span class="dot"></span>' + esc(it.episodes) + '</span>' : '';
+    const dateTxt = it.date ? '<span>' + esc(it.date) + '</span>' : '';
+    const noteTxt = it.note ? '<span style="color:var(--warn)">' + esc(it.note) + '</span>' : '';
+    const links = (it.links || []);
+    let linkRow = '';
+    if(links.length){
+      linkRow = '<div class="desc" style="font-size:11px;color:var(--text3);display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' +
+        links.map((lk, li) =>
+          '<span class="badge ' + (lk.kind==='quark'?'badge-green':'badge-blue') + '" style="font-size:10.5px">' + esc(lk.name||lk.kind) + '</span>' +
+          '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtCopyLink(' + it.__i + ',' + li + ')">📋 复制</button>' +
+          '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtOpenLink(' + it.__i + ',' + li + ')">↗ 打开</button>'
+        ).join('') + '</div>';
+    }
+    const epBadge = (it.plays && it.plays.length) ? '<div class="desc" style="font-size:11px;color:var(--text3);margin-top:4px">可下载 <b>' + it.plays.length + '</b> 集 · 来源 ' + esc(it.playSource || '') + '</div>' : '';
+    const dlBtn = (it.plays && it.plays.length)
+      ? '<button class="btn btn-primary btn-sm" onclick="srtDownloadM3u8(' + it.__i + ')">下载整剧</button>'
+      : '';
+    const detailTxt = it.detailUrl
+      ? '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtOpenDetail(' + it.__i + ')">详情</button>'
+      : '';
+    const actions = (dlBtn || detailTxt)
+      ? '<div class="actions" style="flex:0 0 auto;display:flex;flex-direction:column;gap:6px;align-items:flex-start">' + dlBtn + detailTxt + '</div>'
+      : '';
+    return '<div class="row" style="padding:10px 12px">' +
+      '<div class="info" style="min-width:0">' +
+        '<div class="name" style="font-size:13px;word-break:break-all">' + esc(it.title) + '</div>' +
+        '<div class="desc" style="font-size:11px;color:var(--text3);display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">' +
+          '来源 <span class="badge badge-gray" style="font-size:10.5px">' + esc(it.source) + '</span>' +
+          ep + dateTxt + noteTxt +
+        '</div>' +
+        (linkRow || '') +
+        (epBadge || '') +
+      '</div>' +
+      actions +
+    '</div>';
+  }).join('');
+}
+
+// srtDownloadM3u8 有 m3u8 分集 → 整剧内置下载（专用弹窗后续显示进度）
+async function srtDownloadM3u8(itemIdx){
+  const it = srtKeepList[itemIdx];
+  if(!it || !it.plays || !it.plays.length) return;
+  // eps 转换：后端按集序命名 001.ts …
+  const eps = it.plays.map(p => ({name: p.name || '', url: p.url}));
+  try{
+    const j = await apiRetry('/api/dl/m3u8/start', {method:'POST', body: JSON.stringify({title: it.title, eps}), timeoutMs: 20000});
+    toast(j.msg || (j.dup ? '该短剧已在下载列表中' : '已加入下载列表'), j.dup ? '' : 'ok');
+    dlListRefresh();
+  }catch(e){ toast(e.message,'err'); }
+}
+
 // 最近一次搜索结果留存（v1.3.49）：切页/重开应用不丢，恢复展示免重搜
 let dlVLastResult = null;
 
@@ -3377,6 +3448,7 @@ function dlVideoRestore(){
     const kwEl = document.getElementById('dlv-kw');
     if(kwEl && !kwEl.value && dlVLastResult.kw) kwEl.value = dlVLastResult.kw;
     dlVRender(dlVLastResult.items, dlVLastResult.sources, dlVLastResult.ms);
+    dlVRenderSrt(dlVLastResult.srt || [], dlVLastResult.srtSources || [], dlVLastResult.ms);
     const st = document.getElementById('dlv-status');
     if(st && dlVLastResult.ms > 0) st.textContent = '上次搜索结果 · ' + st.textContent;
     return;
@@ -3389,10 +3461,11 @@ function dlVideoRestore(){
     if(kwEl && !kwEl.value && c.q) kwEl.value = c.q;
     const items = c.items || [];
     dlVRender(items, c.sources || [], 0);
-    const st = document.getElementById('dlv-status');
-    if(st){
+    dlVRenderSrt(c.srt || [], c.srtSources || [], 0);
+    const st3 = document.getElementById('dlv-status');
+    if(st3){
       const at = c.at ? String(c.at).replace('T',' ').slice(0,16) : '';
-      st.textContent = '已恢复上次搜索结果' + (at ? '（' + at + '）' : '') + ' · 共 ' + items.length + ' 条';
+      st3.textContent = '已恢复上次搜索结果' + (at ? '（' + at + '）' : '') + ' · 共 ' + items.length + ' 条';
     }
   }).catch(()=>{});
 }
@@ -3457,9 +3530,13 @@ function dlTaskRow(t, showType){
   const running = t.status === 'downloading' || t.status === 'running';
   let typeTag = '';
   if(showType){
-    typeTag = t.type === 'music'
-      ? (t.sub === 'kuwo' ? '<span class="badge badge-blue" style="font-size:10px">酷我</span>' : '<span class="badge badge-blue" style="font-size:10px">音乐</span>')
-      : (t.sub === 'bt' ? '<span class="badge badge-blue" style="font-size:10px">视频</span>' : '');
+    if(t.type === 'music'){
+      typeTag = t.sub === 'kuwo' ? '<span class="badge badge-blue" style="font-size:10px">酷我</span>' : '<span class="badge badge-blue" style="font-size:10px">音乐</span>';
+    } else if(t.type === 'm3u8'){
+      typeTag = '<span class="badge" style="font-size:10px;background:var(--warn-light);color:#8a5d00">短剧</span>';
+    } else {
+      typeTag = t.sub === 'bt' ? '<span class="badge badge-blue" style="font-size:10px">视频</span>' : '';
+    }
   }
   const pct = t.progress != null ? Math.round(t.progress) : 0;
   const ops =
@@ -3475,10 +3552,16 @@ function dlTaskRow(t, showType){
     : '<div class="dlm-bar"><i style="width:100%;opacity:.28"></i></div>';
   // 元信息：速度（恒显示）· 连接 · 已下/总量 · 进度百分比
   const meta = [];
-  if(running || t.speed > 0) meta.push('速度 <b>' + fmtDlSpeed(t.speed) + '</b>');
-  if(t.peers > 0) meta.push((t.status === 'fetching' ? '已发现 ' : '') + '<b>' + t.peers + '</b> 个连接');
-  if(t.total > 0) meta.push('<b>' + (t.done/1048576).toFixed(1) + '</b> / ' + (t.total/1048576).toFixed(1) + ' MB');
-  if(pctTxt) meta.push('<b>' + pctTxt + '</b>');
+  if(t.type === 'm3u8'){
+    if(running || t.speed > 0) meta.push('速度 <b>' + fmtDlSpeed(t.speed) + '</b>');
+    meta.push('已下 <b>' + (t.done||0) + '</b> / ' + (t.total||0) + ' 集');
+    if(pctTxt) meta.push('<b>' + pctTxt + '</b>');
+  } else {
+    if(running || t.speed > 0) meta.push('速度 <b>' + fmtDlSpeed(t.speed) + '</b>');
+    if(t.peers > 0) meta.push((t.status === 'fetching' ? '已发现 ' : '') + '<b>' + t.peers + '</b> 个连接');
+    if(t.total > 0) meta.push('<b>' + (t.done/1048576).toFixed(1) + '</b> / ' + (t.total/1048576).toFixed(1) + ' MB');
+    if(pctTxt) meta.push('<b>' + pctTxt + '</b>');
+  }
   return '<div class="dlm-card">' +
     '<div class="dlm-row1">' +
       '<div class="dlm-name">' + esc(t.title || '') + '</div>' +
@@ -3820,114 +3903,9 @@ async function dlMusicDL(s){
   }catch(e){ toast(e.message,'err'); }
 }
 
-/* ---------- 短剧：聚合搜索 → 展示网盘分享链接（复制/跳转） ---------- */
-let srtSearching = false, srtLastKw = '', srtLastResult = null, srtSearchSeq = 0, srtKeepList = [];
+/* ---------- 短剧：聚合搜索 → 展示（可内置 m3u8 整剧下载 / 网盘分享链接） ---------- */
+let srtKeepList = [];
 
-function srtRender(){
-  const pane = document.getElementById('media-pane-srt');
-  if(!pane) return;
-  pane.innerHTML =
-    '<div class="proxy-hint">原理：聚合检索「黑豆短剧 / rejusou」两个免登录公开源，命中每部短剧并解析其网盘分享链接。生态限制：短剧站目前几乎只提供夸克/百度网盘分享（无磁力/无直链），而网盘需要登录才能转存，因此本板块不做自动下载——点「复制」或「打开」后到网盘完成保存即可。</div>' +
-    '<div style="display:flex;gap:8px;margin-bottom:12px">' +
-      '<input type="text" id="srt-kw" placeholder="搜索短剧剧名（如 枕边的恶魔）" style="flex:1" onkeydown="if(event.key===\'Enter\')srtSearch()">' +
-      '<button class="btn btn-primary" id="srt-go" onclick="srtSearch()">搜索</button>' +
-    '</div>' +
-    '<div id="srt-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>' +
-    '<div id="srt-results"></div>';
-  const kw = document.getElementById('srt-kw');
-  if(kw && srtLastKw) kw.value = srtLastKw;
-  srtRestore();
-}
-
-function srtRestore(){
-  if(srtLastResult){
-    srtRenderResult(srtLastResult.items, srtLastResult.sources, srtLastResult.ms);
-    return;
-  }
-  const seq = srtSearchSeq;
-  api('/api/dl/search/last?kind=srt').then(j=>{
-    const c = j && j.cache;
-    if(!c || srtLastResult || seq !== srtSearchSeq) return;
-    const kwEl = document.getElementById('srt-kw');
-    if(kwEl && !kwEl.value && c.q) kwEl.value = c.q;
-    srtLastKw = c.q || '';
-    srtRenderResult(c.items || [], c.sources || [], 0);
-    const st = document.getElementById('srt-status');
-    if(st){
-      const at = c.at ? String(c.at).replace('T',' ').slice(0,16) : '';
-      st.textContent = '已恢复上次搜索结果' + (at ? '（' + at + '）' : '') + (st.textContent ? ' · ' + st.textContent : '');
-    }
-  }).catch(()=>{});
-}
-
-async function srtSearch(){
-  const kwEl = document.getElementById('srt-kw');
-  const kw = (kwEl ? kwEl.value : '').trim();
-  if(!kw){ toast('请输入短剧名称','err'); return; }
-  if(srtSearching) return;
-  srtSearching = true; srtLastKw = kw;
-  const seq = ++srtSearchSeq;
-  document.getElementById('srt-results').innerHTML = '<div class="empty">正在搜索短剧…</div>';
-  const go = document.getElementById('srt-go'); if(go) go.disabled = true;
-  const t0 = Date.now();
-  try{
-    const j = await api('/api/dlsrt/search?q=' + encodeURIComponent(kw), {timeoutMs: 25000});
-    if(seq !== srtSearchSeq) return;
-    srtLastResult = {kw: kw, items: j.items || [], sources: j.sources || [], ms: Date.now() - t0};
-    srtRenderResult(srtLastResult.items, srtLastResult.sources, srtLastResult.ms);
-  }catch(e){
-    if(seq === srtSearchSeq){
-      document.getElementById('srt-status').textContent = '';
-      document.getElementById('srt-results').innerHTML = '<div class="empty">搜索失败：' + esc(e.message) + '</div>';
-    }
-  }finally{
-    if(seq === srtSearchSeq){ srtSearching = false; const g=document.getElementById('srt-go'); if(g) g.disabled=false; }
-  }
-}
-
-function srtRenderResult(items, sources, ms){
-  const st = document.getElementById('srt-status');
-  if(st){
-    const parts = (sources||[]).map(s => s.name + (s.err ? '×' : ' ' + s.count));
-    st.textContent = '共 ' + items.length + ' 部 · ' + (sources||[]).length + ' 源（' + parts.join(' / ') + '）' + (ms ? ' · ' + Math.round(ms/100)/10 + 's' : '');
-  }
-  const box = document.getElementById('srt-results');
-  if(!items.length){
-    box.innerHTML = '<div class="empty">没有找到短剧，试试更短的剧名</div>';
-    return;
-  }
-  // 先把每条的 __i 引用索引填上，再拼 HTML 复用真实索引
-  items.forEach((it, i) => { it.__i = i; srtKeepList[i] = it; });
-  box.innerHTML = items.map(it => {
-    const ep = it.episodes ? '<span class="badge badge-blue" style="font-size:10.5px"><span class="dot"></span>' + esc(it.episodes) + '</span>' : '';
-    const dateTxt = it.date ? '<span>' + esc(it.date) + '</span>' : '';
-    const noteTxt = it.note ? '<span style="color:var(--warn)">' + esc(it.note) + '</span>' : '';
-    const links = (it.links || []);
-    let linkRow = '';
-    if(links.length){
-      linkRow = '<div class="desc" style="font-size:11px;color:var(--text3);display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">' +
-        links.map((lk, li) =>
-          '<span class="badge ' + (lk.kind==='quark'?'badge-green':'badge-blue') + '" style="font-size:10.5px">' + esc(lk.name||lk.kind) + '</span>' +
-          '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtCopyLink(' + it.__i + ',' + li + ')">📋 复制</button>' +
-          '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtOpenLink(' + it.__i + ',' + li + ')">↗ 打开</button>'
-        ).join('') + '</div>';
-    }
-    const detailTxt = it.detailUrl
-      ? '<button class="btn btn-outline btn-sm" style="padding:0 8px;font-size:11px" onclick="srtOpenDetail(' + it.__i + ')">详情</button>'
-      : '';
-    return '<div class="row" style="padding:10px 12px">' +
-      '<div class="info" style="min-width:0">' +
-        '<div class="name" style="font-size:13px;word-break:break-all">' + esc(it.title) + '</div>' +
-        '<div class="desc" style="font-size:11px;color:var(--text3);display:flex;gap:6px;flex-wrap:wrap;margin-top:3px">' +
-          '来源 <span class="badge badge-gray" style="font-size:10.5px">' + esc(it.source) + '</span>' +
-          ep + dateTxt + noteTxt +
-        '</div>' +
-        (linkRow || '<div class="desc" style="font-size:11px;margin-top:6px">未解析到网盘链接</div>') +
-      '</div>' +
-      (detailTxt ? '<div class="actions" style="flex:0 0 auto">' + detailTxt + '</div>' : '') +
-    '</div>';
-  }).join('');
-}
 
 function srtCopyLink(itemIdx, linkIdx){
   const it = srtKeepList[itemIdx];

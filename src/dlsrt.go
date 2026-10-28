@@ -26,10 +26,16 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// m3u8 采集源白名单（实测可达、免登录、返回 macCMS 结构，含 e报播地址）
+var srtM3u8Endpoints = []string{
+	"https://mdzyapi.com/api.php/provide/vod/",
+}
 
 // SrtLink 一条网盘分享链接
 type SrtLink struct {
@@ -40,13 +46,24 @@ type SrtLink struct {
 
 // SrtItem 一条短剧搜索结果
 type SrtItem struct {
-	Source    string    `json:"source"`              // 来源显示名（黑豆 / rejusou）
+	Source    string    `json:"source"`              // 来源显示名（黑豆 / rejusou / m3u8）
 	Title     string    `json:"title"`               // 剧名（去站点标记）
 	Episodes  string    `json:"episodes,omitempty"`  // 集数文本（如 76集）
 	Date      string    `json:"date,omitempty"`      // 更新/发布日（YYYY-MM-DD，可空）
 	DetailURL string    `json:"detailUrl,omitempty"` // 站内详情页（可空）
-	Links     []SrtLink `json:"links"`               // 网盘链接（≥1）
+	Links     []SrtLink `json:"links"`               // 网盘链接（≥1，仅网盘源有）
 	Note      string    `json:"note,omitempty"`      // 附加说明
+
+	// m3u8 直链（v1.3.58）：采集源返回的真实播放地址，前端据此提供「内置下载」
+	Plays       []SrtPlay `json:"plays,omitempty"`       // 分集 m3u8（≥1）
+	PlaySource  string    `json:"playSource,omitempty"`  // m3u8 采集源名（m3u8-<host>）
+	PlayEpCount int       `json:"playEpCount,omitempty"` // 可分集数
+}
+
+// SrtPlay 一集 m3u8 播放地址
+type SrtPlay struct {
+	Name string `json:"name"` // 集名（如 第01集）
+	URL  string `json:"url"`  // master m3u8 直链
 }
 
 // srtSource 短剧源（与 BT 搜索的 dlSource 并列，返回 SrtItem）
@@ -59,6 +76,7 @@ type srtSource struct {
 var srtSources = []srtSource{
 	{Name: "黑豆", Run: srtSrcHddj},
 	{Name: "rejusou", Run: srtSrcRejusou},
+	{Name: "m3u8采集", Run: srtSrcM3u8},
 }
 
 // srtSearch 并发查询全部源 → 去重 → 排序，返回条目列表与各源状态
@@ -369,3 +387,195 @@ func srtTitleContains(title, kw, kwLower string) bool {
 
 // srtHasCJK 判断是否含中日韩字符
 func srtHasCJK(s string) bool { return dlHasCJK(s) }
+// ---------- 源 3：m3u8 采集源（macCMS 接口，免登录返回真实 HLS 播放地址） ----------
+
+// srtM3u8Vod macCMS 采集接口的单条影片字段（ac=detail / ac=videolist 通用）
+type srtM3u8Vod struct {
+	VodID    int    `json:"vod_id"`
+	VodName  string `json:"vod_name"`
+	TypeName string `json:"type_name,omitempty"`
+	Remarks  string `json:"vod_remarks"`
+	Pubdate  string `json:"vod_pubdate"`
+	PlayFrom string `json:"vod_play_from"`
+	PlayURL  string `json:"vod_play_url"`
+	DownURL  string `json:"vod_down_url"`
+}
+
+// srtM3u8Detail 采集详情：id → 完整分集 m3u8。返回空切片表示该剧无可下载分集。
+func srtM3u8Detail(ctx context.Context, base string, id int) srtM3u8Vod {
+	u := base + "?ac=videolist&ids=" + strconv.Itoa(id)
+	raw, err := dlFetch(ctx, u, map[string]string{"Referer": base, "Accept": "application/json"})
+	if err != nil {
+		return srtM3u8Vod{}
+	}
+	var doc struct {
+		List []srtM3u8Vod `json:"list"`
+	}
+	if json.Unmarshal(raw, &doc) != nil || len(doc.List) == 0 {
+		return srtM3u8Vod{}
+	}
+	return doc.List[0]
+}
+
+// srtM3u8ParsePlayURL 把 macCMS 的 vod_play_url（"集名$url#集名$url"）解析为分集列表。
+// - 形如 "第01集$https://…/index.m3u8#第02集$…"
+// - 也有 "第01集$m3u8:https://…" 前缀形式（key^name$url），这里只认标准 mac 播放格式。
+func srtM3u8ParsePlayURL(playFrom, playURL string) []SrtPlay {
+	raw := strings.TrimSpace(playURL)
+	if raw == "" || raw == "-" || raw == "$" {
+		return nil
+	}
+	// macCMS 有时 play_url 前带 "源名$" 前缀（如 "modum3u8$第01集$https…"），
+	// 或分集格式为 "第xx集$url"。先按 $ 拆出「集名#url」整体串，再对每集切分。
+	var plays []SrtPlay
+	for _, seg := range strings.Split(raw, "#") {
+		seg = strings.Trim(seg, " \t")
+		if seg == "" {
+			continue
+		}
+		// 每段形如：名称$URL
+		// 兼容 "key^url"（苹果 TV 协议之外罕见）以及前缀 m3u8: 直链
+		s := seg
+		// 去掉 leading "玩法名$"（第一次 $ 前若不含 :// 且后有 $ 视为玩法名）
+		name, u := srtM3u8SplitSeg(s)
+		if u == "" {
+			continue
+		}
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			// 兼容 "m3u8:https://…" / "mp4:https://…" 前缀
+			if i := strings.Index(u, ":"); i > 0 {
+				u = u[i+1:]
+			}
+			if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+				continue
+			}
+		}
+		plays = append(plays, SrtPlay{Name: strings.TrimSpace(name), URL: strings.TrimSpace(u)})
+	}
+	return plays
+}
+
+// srtM3u8SplitSeg 拆一集 "名称$url"。处理前导玩法名（如 "modum3u8$第01集$https…"）。
+// 取最后一个 $ 分隔 URL。若没有 $ 则整段视为 URL。
+func srtM3u8SplitSeg(seg string) (name, url string) {
+	// 规则：最后一个 $ 之后若以 http 开头 → 左侧是名称（可能含玩法名）；否则按普通切分
+	i := strings.LastIndex(seg, "$")
+	if i < 0 {
+		// 无 $：整段算 name，无 url
+		if strings.HasPrefix(seg, "http") {
+			return "", seg
+		}
+		return seg, ""
+	}
+	u := seg[i+1:]
+	name = seg[:i]
+	// 名称里可能还有一层玩法名 "源名$集名"，取最后一层作集名
+	if j := strings.LastIndex(name, "$"); j >= 0 {
+		name = name[j+1:]
+	}
+	return strings.TrimSpace(name), strings.TrimSpace(u)
+}
+
+// srtM3u8EpText 剧名旁的集数文案：优先用 remarks（如 "更新至xx期"），否则用分集数
+func srtM3u8EpText(remarks string, epCount int) string {
+	remarks = strings.TrimSpace(remarks)
+	if remarks != "" && remarks != "-" {
+		return remarks
+	}
+	if epCount > 0 {
+		return fmt.Sprintf("%d集", epCount)
+	}
+	return ""
+}
+
+// srtM3u8Host 取采集接口域名（用于 Source 标注）
+func srtM3u8Host(base string) string {
+	u, err := url.Parse(base)
+	if err != nil {
+		return base
+	}
+	return u.Host
+}
+
+// srtSrcM3u8 短剧 m3u8 采集源。调用 macCMS 采集接口 ac=detail&wd={kw} 搜索短剧，
+// 命中的每条再调 ac=videolist&ids= 取完整分集的 m3u8 播放地址（vod_play_url）。
+// 结果带 Plays 字段，前端据此提供「内置下载」。
+func srtSrcM3u8(ctx context.Context, kw string) ([]SrtItem, error) {
+	var out []SrtItem
+	seen := map[int]bool{}
+	for _, base := range srtM3u8Endpoints {
+		select {
+		case <-ctx.Done():
+			return out, ctx.Err()
+		default:
+		}
+		searchURL := base + "?ac=detail&wd=" + url.QueryEscape(kw)
+		raw, err := dlFetch(ctx, searchURL, map[string]string{"Referer": base, "Accept": "application/json"})
+		if err != nil {
+			continue // 单源失败静默
+		}
+		var doc struct {
+			List []srtM3u8Vod `json:"list"`
+		}
+		if json.Unmarshal(raw, &doc) != nil {
+			continue
+		}
+		for _, it := range doc.List {
+			if it.VodID == 0 || seen[it.VodID] {
+				continue
+			}
+			hit := srtM3u8Hit(it, kw, base)
+			if !hit {
+				continue
+			}
+			seen[it.VodID] = true
+			// 详情取完整分集 m3u8
+			detail := srtM3u8Detail(ctx, base, it.VodID)
+			if detail.VodID == 0 {
+				detail = it
+			}
+			plays := srtM3u8ParsePlayURL(detail.PlayFrom, detail.PlayURL)
+			var links []SrtLink
+			if d := strings.TrimSpace(detail.DownURL); d != "" && strings.HasPrefix(d, "http") {
+				links = append(links, SrtLink{Kind: "m3u8", Name: "直链", URL: d})
+			}
+			title := strings.TrimSpace(detail.VodName)
+			if title == "" {
+				title = strings.TrimSpace(it.VodName)
+			}
+			if title == "" {
+				continue
+			}
+			note := ""
+			if len(plays) == 0 {
+				note = "采集源未返回可下载分集（可能仅网盘）"
+			}
+			out = append(out, SrtItem{
+				Source:      "m3u8采集",
+				Title:       title,
+				Episodes:    srtM3u8EpText(detail.Remarks, len(plays)),
+				Date:        strings.TrimSpace(detail.Pubdate),
+				Note:        note,
+				Links:       links,
+				Plays:       plays,
+				PlaySource:  "m3u8-" + srtM3u8Host(base),
+				PlayEpCount: len(plays),
+			})
+			if len(out) >= dlSourceMaxPerSource {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
+}
+
+// srtM3u8Hit 粗筛：标题含关键词或关键词含糊时命中；短剧站搜索已过滤，这里兜底
+func srtM3u8Hit(it srtM3u8Vod, kw, base string) bool {
+	t := strings.ToLower(it.VodName)
+	k := strings.ToLower(strings.TrimSpace(kw))
+	if t != "" && strings.Contains(t, k) {
+		return true
+	}
+	// 采集接口对中文关键词不过滤时可能返回全库，此时只保留标题含关键词的
+	return srtHasCJK(kw) && strings.Contains(it.VodName, kw)
+}

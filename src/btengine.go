@@ -1989,7 +1989,7 @@ func btViews() []DlTaskView {
 	return out
 }
 
-// dlUnifiedTasks 统一任务列表（BT + 音乐直链任务）
+// dlUnifiedTasks 统一任务列表（BT + 音乐直链 + 短剧 m3u8）
 func dlUnifiedTasks() []DlTaskView {
 	out := btViews()
 	for _, t := range dlMusTaskList() {
@@ -2016,6 +2016,24 @@ func dlUnifiedTasks() []DlTaskView {
 			if tv.Total <= 0 {
 				tv.Total = tv.Done
 			}
+		}
+		if tv.Progress > 100 {
+			tv.Progress = 100
+		}
+		out = append(out, tv)
+	}
+	// 短剧 m3u8 任务（v1.3.58）
+	for _, t := range dlM3u8TaskList() {
+		tv := DlTaskView{
+			ID: t.ID, Type: "m3u8", Sub: "m3u8",
+			Title:     t.Title,
+			Status:    t.Status,
+			Progress:  dlM3u8Progress(&t),
+			Done:      int64(t.DoneEps),
+			Total:     int64(len(t.Eps)),
+			Dir:       t.Dir,
+			Err:       t.Err,
+			CreatedAt: t.CreatedAt,
 		}
 		if tv.Progress > 100 {
 			tv.Progress = 100

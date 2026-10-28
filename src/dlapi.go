@@ -42,6 +42,7 @@ const (
 )
 
 // handleDlSearch GET /api/dl/search?q=
+// 磁力聚合搜索，并入短剧网盘源：返回两组结果——items(磁力种) 与 srt(短剧网盘分享)。
 func (s *Server) handleDlSearch(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" || len([]rune(q)) > dlSearchMaxKB {
@@ -52,25 +53,20 @@ func (s *Server) handleDlSearch(w http.ResponseWriter, r *http.Request) {
 	if len(items) > dlSearchLimits {
 		items = items[:dlSearchLimits]
 	}
-	resp := map[string]any{"items": items, "sources": stats, "q": q}
-	dlSearchLastSave("video", resp) // 留存最近一次搜索，重开应用可恢复
-	ok(w, resp)
-}
-
-// handleDlsrtSearch GET /api/dlsrt/search?q=
-// 短剧聚合搜索：黑豆 + rejusou 两个免登录源，返回含网盘分享链接的短剧条目。
-func (s *Server) handleDlsrtSearch(w http.ResponseWriter, r *http.Request) {
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if q == "" || len([]rune(q)) > dlSearchMaxKB {
-		fail(w, 400, "请输入搜索关键词（1-64 字）")
-		return
+	// 短剧网盘源并入视频下载：磁力与短剧各自独立并发聚合（返回类型不同）。
+	// 短剧源(黑豆/rejusou)只产出网盘分享链接，不做自动下载（见 dlsrt.go 生态说明）。
+	srtItems, srtStats := srtSearch(q)
+	if len(srtItems) > dlSearchLimits {
+		srtItems = srtItems[:dlSearchLimits]
 	}
-	items, stats := srtSearch(q)
-	if len(items) > dlSearchLimits {
-		items = items[:dlSearchLimits]
+	resp := map[string]any{
+		"items":      items,
+		"sources":    stats,
+		"srt":        srtItems,
+		"srtSources": srtStats,
+		"q":          q,
 	}
-	resp := map[string]any{"items": items, "sources": stats, "q": q}
-	dlSearchLastSave("srt", resp) // 留存最近一次短剧搜索，重开应用可恢复
+	dlSearchLastSave("video", resp) // 留存最近一次搜索（含短剧），重开应用可恢复
 	ok(w, resp)
 }
 
@@ -272,6 +268,63 @@ func (s *Server) handleDlStart(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"taskId": t.ID, "msg": msg, "dir": dir, "dup": dup})
 }
 
+// handleDlM3u8Start POST /api/dl/m3u8/start {title, eps:[{name,url}]}
+// 短剧 m3u8 内置下载入队（v1.3.58）。整剧建独立子目录，逐集下 HLS 并拼 .ts。
+func (s *Server) handleDlM3u8Start(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 512<<10))
+	if err != nil {
+		fail(w, 400, "读取请求失败")
+		return
+	}
+	var in struct {
+		Title string `json:"title"`
+		Eps   []struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		} `json:"eps"`
+	}
+	if json.Unmarshal(body, &in) != nil {
+		fail(w, 400, "请求格式错误")
+		return
+	}
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		fail(w, 400, "缺少剧名")
+		return
+	}
+	dir := strings.TrimSpace(loadDlConfig().VideoDir)
+	if dir == "" {
+		dir = dlDefaultDir("video")
+	}
+	if dir == "" {
+		fail(w, 400, "请先在「设置」里选择视频下载目录")
+		return
+	}
+	eps := make([]DlM3u8Ep, 0, len(in.Eps))
+	for i, e := range in.Eps {
+		u := strings.TrimSpace(e.URL)
+		if u == "" {
+			continue
+		}
+		eps = append(eps, DlM3u8Ep{Idx: i + 1, Name: strings.TrimSpace(e.Name), URI: u})
+	}
+	if len(eps) == 0 {
+		fail(w, 400, "没有可下载的分集")
+		return
+	}
+	t, dup, err := dlM3u8StartDedup(title, dir, eps)
+	if err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	msg := "已加入下载列表"
+	if dup {
+		msg = "该短剧已在下载列表中，无需重复添加"
+	}
+	dlPersistTouch()
+	ok(w, map[string]any{"taskId": t.ID, "msg": msg, "dir": t.Dir, "dup": dup})
+}
+
 // handleDlTasks GET /api/dl/tasks —— 统一任务列表
 func (s *Server) handleDlTasks(w http.ResponseWriter, r *http.Request) {
 	tasks := dlUnifiedTasks()
@@ -296,9 +349,12 @@ func (s *Server) handleDlRemove(w http.ResponseWriter, r *http.Request) {
 	deleteFiles := r.URL.Query().Get("files") == "1"
 	var n int
 	var err error
-	if strings.HasPrefix(id, "bt") {
+	switch {
+	case strings.HasPrefix(id, "bt"):
 		n, err = btRemoveWithFiles(id, deleteFiles)
-	} else {
+	case strings.HasPrefix(id, "m3u8"):
+		n, err = dlM3u8RemoveWithFiles(id, deleteFiles)
+	default:
 		n, err = dlMusRemoveWithFiles(id, deleteFiles)
 	}
 	if err != nil {
@@ -309,16 +365,19 @@ func (s *Server) handleDlRemove(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"files": n})
 }
 
-// handleDlCancel POST /api/dl/cancel?id= —— 统一停止（BT / 音乐）
+// handleDlCancel POST /api/dl/cancel?id= —— 统一停止（BT / 音乐 / 短剧）
 func (s *Server) handleDlCancel(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
 		fail(w, 400, "缺少任务 id")
 		return
 	}
-	if strings.HasPrefix(id, "bt") {
+	switch {
+	case strings.HasPrefix(id, "bt"):
 		btCancel(id)
-	} else {
+	case strings.HasPrefix(id, "m3u8"):
+		dlM3u8Cancel(id)
+	default:
 		dlMusCancel(id)
 	}
 	dlPersistTouch()
@@ -332,12 +391,16 @@ func (s *Server) handleDlPause(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "缺少任务 id")
 		return
 	}
-	if strings.HasPrefix(id, "bt") {
-		if !btPause(id) {
-			fail(w, 400, "该任务当前不可暂停")
-			return
-		}
-	} else if !dlMusPause(id) {
+	okP := true
+	switch {
+	case strings.HasPrefix(id, "bt"):
+		okP = btPause(id)
+	case strings.HasPrefix(id, "m3u8"):
+		dlM3u8Pause(id)
+	default:
+		okP = dlMusPause(id)
+	}
+	if !okP {
 		fail(w, 400, "该任务当前不可暂停")
 		return
 	}
@@ -352,14 +415,19 @@ func (s *Server) handleDlResume(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "缺少任务 id")
 		return
 	}
-	if strings.HasPrefix(id, "bt") {
+	switch {
+	case strings.HasPrefix(id, "bt"):
 		if !btResume(id) {
 			fail(w, 400, "该任务当前不可继续")
 			return
 		}
-	} else if !dlMusResume(id) {
-		fail(w, 400, "该任务当前不可继续")
-		return
+	case strings.HasPrefix(id, "m3u8"):
+		dlM3u8Resume(id)
+	default:
+		if !dlMusResume(id) {
+			fail(w, 400, "该任务当前不可继续")
+			return
+		}
 	}
 	dlPersistTouch()
 	ok(w, nil)
@@ -369,10 +437,16 @@ func (s *Server) handleDlResume(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDlPauseAll(w http.ResponseWriter, r *http.Request) {
 	n := btPauseAll()
 	for _, t := range dlUnifiedTasks() {
-		if t.Type == "music" && t.Status == "running" {
+		if t.Status != "running" {
+			continue
+		}
+		if t.Type == "music" {
 			if dlMusPause(t.ID) {
 				n++
 			}
+		} else if t.Type == "m3u8" {
+			dlM3u8Pause(t.ID)
+			n++
 		}
 	}
 	dlPersistTouch()
@@ -383,10 +457,16 @@ func (s *Server) handleDlPauseAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDlResumeAll(w http.ResponseWriter, r *http.Request) {
 	n := btResumeAll()
 	for _, t := range dlUnifiedTasks() {
-		if t.Type == "music" && t.Status == "paused" {
+		if t.Status != "paused" {
+			continue
+		}
+		if t.Type == "music" {
 			if dlMusResume(t.ID) {
 				n++
 			}
+		} else if t.Type == "m3u8" {
+			dlM3u8Resume(t.ID)
+			n++
 		}
 	}
 	dlPersistTouch()
@@ -397,9 +477,17 @@ func (s *Server) handleDlResumeAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDlCancelAll(w http.ResponseWriter, r *http.Request) {
 	n := btCancelAllTasks()
 	for _, t := range dlUnifiedTasks() {
-		if t.Type == "music" && (t.Status == "running" || t.Status == "paused") {
-			dlMusCancel(t.ID)
-			n++
+		switch t.Type {
+		case "music":
+			if t.Status == "running" || t.Status == "paused" {
+				dlMusCancel(t.ID)
+				n++
+			}
+		case "m3u8":
+			if t.Status == "running" || t.Status == "paused" {
+				dlM3u8Cancel(t.ID)
+				n++
+			}
 		}
 	}
 	dlPersistTouch()
@@ -410,6 +498,7 @@ func (s *Server) handleDlCancelAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDlClearDone(w http.ResponseWriter, r *http.Request) {
 	n := btClearDone()
 	n += dlMusClearDone()
+	n += dlM3u8ClearDone()
 	dlPersistTouch()
 	ok(w, map[string]any{"count": n})
 }
@@ -418,6 +507,7 @@ func (s *Server) handleDlClearDone(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDlClearAll(w http.ResponseWriter, r *http.Request) {
 	n := btClearAll()
 	n += dlMusClearAll()
+	n += dlM3u8ClearAll()
 	dlPendingClear() // 待重试（目录未就绪）的记录也一并丢弃，否则下次快照又写回去
 	dlPersistTouch() // 清空必须立刻落盘，否则重启后任务又冒回来
 	ok(w, map[string]any{"count": n})

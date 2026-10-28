@@ -73,6 +73,10 @@ type dlPersistRec struct {
 	Path   string `json:"path,omitempty"`
 	Bytes  int64  `json:"bytes,omitempty"`
 	Totals int64  `json:"totals,omitempty"`
+
+	// 短剧 m3u8（v1.3.58）
+	Eps    []DlM3u8Ep `json:"eps,omitempty"` // 全部分集（含 m3u8 直链）
+	DoneEp int        `json:"doneEp,omitempty"`
 }
 
 // dlPersistDoc 快照文件结构
@@ -130,9 +134,12 @@ func dlPendingRetry() {
 	var keep []dlPersistRec
 	for _, r := range recs {
 		retry := false
-		if r.Kind == "music" {
+		switch r.Kind {
+		case "music":
 			retry = dlRestoreMusic(r)
-		} else {
+		case "m3u8":
+			retry = dlRestoreM3u8(r)
+		default:
 			retry = dlRestoreBT(r)
 		}
 		if retry {
@@ -270,6 +277,15 @@ func dlPersistSnapshot() []dlPersistRec {
 		})
 	}
 
+	for _, t := range dlM3u8TaskList() {
+		r := dlPersistRec{
+			Kind: "m3u8", ID: t.ID, Title: t.Title,
+			Dir: t.Dir, Status: t.Status, Err: t.Err, CreatedAt: t.CreatedAt,
+			Eps: t.Eps, DoneEp: t.DoneEps, Paused: t.Status == "paused",
+		}
+		out = append(out, r)
+	}
+
 	// 超出上限丢最老的（BT 在前、音乐在后，按创建时间统一裁）；上限只为防异常膨胀
 	out = append(out, dlPendingRecs()...)
 	if len(out) > dlPersistRecs {
@@ -311,9 +327,12 @@ func dlRestoreTasks() {
 	sortRecsOldestFirst(doc.Tasks)
 	for _, r := range doc.Tasks {
 		retry := false
-		if r.Kind == "music" {
+		switch r.Kind {
+		case "music":
 			retry = dlRestoreMusic(r)
-		} else {
+		case "m3u8":
+			retry = dlRestoreM3u8(r)
+		default:
 			retry = dlRestoreBT(r)
 		}
 		if retry {
@@ -492,6 +511,63 @@ func dlRestoreMusic(r dlPersistRec) (retry bool) {
 		st.Status = "pending"
 		dlMusStore.mu.Unlock()
 		dlMusLaunch(st)
+	}
+	return false
+}
+
+// dlRestoreM3u8 恢复一个短剧 m3u8 任务（v1.3.58）。
+// 已存在的集不重下（dlM3u8FirstPending 按盘上 .ts 判断），只补未完成集。
+// 返回 true 表示目录暂时不可用、值得稍后重试。
+func dlRestoreM3u8(r dlPersistRec) (retry bool) {
+	dlM3u8Init()
+	id := r.ID
+	if id == "" || !strings.HasPrefix(id, "m3u8") {
+		return false
+	}
+	if _, safe := safeDownloadDir(r.Dir); !safe {
+		return true // 目录不存在/存储卷未就绪：宁可不恢复
+	}
+	if len(r.Eps) == 0 {
+		return false
+	}
+	dlM3u8Store.mu.Lock()
+	_, dup := dlM3u8Store.tasks[id]
+	dlM3u8Store.mu.Unlock()
+	if dup {
+		return false
+	}
+	at := r.CreatedAt
+	if at.IsZero() {
+		at = time.Now()
+	}
+	t := &DlM3u8Task{
+		ID: id, Title: r.Title, Dir: r.Dir,
+		Status: r.Status, Err: r.Err, CreatedAt: at, At: at,
+		Eps: r.Eps, DoneEps: r.DoneEp, CurEp: -1, paused: r.Paused,
+	}
+	// 视盘上已有文件重算已完成集数（跨集 .ts 已存在的直接跳过）
+	if t.DoneEps == 0 {
+		for i, ep := range t.Eps {
+			if _, err := os.Stat(filepath.Join(t.Dir, dlM3u8EpName(ep, i))); err == nil {
+				t.DoneEps = i + 1
+			} else {
+				break
+			}
+		}
+	}
+	dlM3u8Store.mu.Lock()
+	dlM3u8Store.tasks[id] = t
+	dlM3u8Store.mu.Unlock()
+
+	switch r.Status {
+	case "paused":
+		t.paused = true
+		t.Status = "paused"
+	case "done", "error", "cancel":
+		// 终态：只保留记录，不自动拉起
+	default:
+		// running/pending（进程被杀多半停在这）→ 自动续传
+		dlM3u8Launch(t)
 	}
 	return false
 }
