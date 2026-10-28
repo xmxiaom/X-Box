@@ -46,6 +46,11 @@ const (
 	btBlockLen       = 16 << 10 // 分块 16KB（协议标准值，不能改）
 	btStalePiece     = 40 * time.Second
 	btPeersChCap     = 256
+	// 未放行(choke)等待窗口：做种者 optimistic-unchoke 约 30s 轮换一次、通常只放行少数
+	// 连接。被 choke 的连接需熬过 1~2 轮放行才有机会被真正青睐；设 2 分钟，过后仍没
+	// unchoke 才让出并发槽去拨别的 peer。太短会在轮换还没轮到自己时就断开，导致热议种
+	// 的连接数长期只剩被乐观放行的 1~2 个（v1.3.53 提速后仍上不去的根因之一）。
+	btUnchokeWait = 2 * time.Minute
 	btSpeedWin       = 10 // 速度滑动平均窗口（秒）：窗口越长越平滑，整片写盘的空档不会让速度掉到 0
 
 	// 并发默认值（设置页可调；见 dlDefMaxConns / dlDefPipeline）
@@ -1216,6 +1221,7 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 	if err != nil {
 		return
 	}
+	connStart := time.Now() // 连接建立时刻（choke 超时从此刻起算）
 	defer conn.Close()
 	if _, err := btHandshake(conn, t.hash); err != nil {
 		return
@@ -1260,6 +1266,12 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 	}()
 	pendAt := time.Now()
 	idleRound := 0
+	// 协议规定连接初始为 choke；做种者合法地不主动发 choke(0)，若用零值判断超时
+	// 会永不触发，被 choke 的连接挂着不死、占满并发槽 → 新 peer 拨不进来（连接数
+	// 长期 1~2 的直接原因）。改为从连接建立起计时。
+	chokedAt = connStart
+	nextInterest := time.Now()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1366,12 +1378,34 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 				holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
 			}
 		}
-		// 选片 / 派块（bitfield 到手才能干活）
+		// 选片 / 派块（bitfield 到手才能干活）——choke 期间仍要持续读消息以便
+		// 捕获对端放行的 unchoke，不能阻塞在 select/sleep。
 		if peerBF == nil {
 			continue
 		}
-		if choked && !chokedAt.IsZero() && time.Since(chokedAt) > 45*time.Second {
-			return // 等 unchoke 超时（对端乐观放行轮换一般 ~30s）：让出并发槽去拨别的 peer
+		// 定期重申 interested（~25s）：做种者乐观放行轮换的「候选提醒」。
+		// 只发一次的话等轮换轮到自己前对端早把我们当惰性下者，重申能留在其放行池。
+		if choked && time.Since(nextInterest) > 25*time.Second {
+			if btWriteMsg(conn, 2, nil) != nil { // interested
+				return
+			}
+			nextInterest = time.Now()
+		}
+		if choked && time.Since(chokedAt) > btUnchokeWait {
+			// 等 unchoke 超过窗口仍被 choke：让出并发槽去拨别的 peer
+			return
+		}
+		if choked {
+			// 被 choke：释放已持有的片（本连接传不了数据，片让给能传的 worker），
+			// 但仍保持连接、挂到下次循环走重申 interested 的路径，等对端放行。
+			if holding && curPiece >= 0 {
+				techMu.Lock()
+				delete(tech, curPiece)
+				techMu.Unlock()
+				holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
+			}
+			// 不选新片、不派块，直接继续读等放行
+			continue
 		}
 		if curPiece < 0 {
 			np, ok := btNextPiece(t, techMu, tech, meta, peerBF)
