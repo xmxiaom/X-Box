@@ -110,7 +110,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .stat .s-k{font-size:12px;color:var(--text3);margin-top:3px}
 .bar{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:8px}
 .bar i{display:block;height:100%;border-radius:4px;transition:width .4s}
-.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
 @media(max-width:1100px){.grid2{grid-template-columns:minmax(0,1fr)}}
 .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;max-width:100%;min-width:0;box-sizing:border-box}
 /* 电脑端表格滚动条增强：横向 12px、thumb 加深、hover 反馈（手机端 14 行媒体查询内恢复全局 8px） */
@@ -125,6 +125,8 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--text3)}
 .kv .v{font-weight:500}
+.vdisk{display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:1px 8px;white-space:nowrap}
+.vdisk .vdisk-name{color:var(--text2)}
 /* 网络信息：网卡纵向列表（替代横滑表格），排列在网关信息之上 */
 .net-list{margin-bottom:10px}
 .net-block{padding:9px 0;border-bottom:1px solid #F7F8FA}
@@ -471,7 +473,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
           </div>
         </div>
         <div class="grid2" style="margin-top:14px">
-          <div class="card"><h3>💾 存储空间</h3><div id="ov-disks"></div><div id="ov-disktemps" style="border-top:1px solid #F7F8FA;padding-top:9px"></div></div>
+          <div class="card"><h3>💾 存储空间</h3><div id="ov-disks"></div></div>
           <div class="card"><h3>ℹ️ 系统信息</h3><div id="ov-info"></div></div>
         </div>
       </div>
@@ -1690,16 +1692,19 @@ async function loadOverview(){
       const used = d.totalKB - d.availKB, pct = d.totalKB>0 ? (used/d.totalKB*100).toFixed(1) : '0';
       const color = pct>90?'var(--danger)':pct>75?'var(--warning)':'var(--primary)';
       const ph = d.powerOnHours>0 ? fmtHours(d.powerOnHours) : '—';
-      // 温度：按该卷底层物理盘匹配温度表（取最高），显示在文件系统类型之后
-      let dt = null, hotDev = null;
-      (d.physDevs||[]).forEach(pdv=>{ const m=(_tmp.disks||[]).find(x=>x.device===pdv); if(m&&m.tempC>0&&(dt===null||m.tempC>dt)){ dt=m.tempC; hotDev=pdv; } });
-      // id 用物理盘名(hotDev)，使 3s 的 applyTemps 能用 disk-temp-<物理盘> 精确刷新该行温度
-      const tempId = hotDev?`disk-temp-${esc(hotDev)}`:'';
-      const tempHtml = dt!=null ? `<span id="${tempId}" style="color:${diskTempColor(dt,hotDev)}"> · 🌡️ ${dt.toFixed(0)}°C</span>` : '';
-      // 存储空间内联温度：显示在文件系统类型之后
-      return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ⏱ ${ph} · ${esc(d.fsType)}${tempHtml}</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
+      // 温度：该卷底层物理盘各自匹配温度表；每块盘单独一个 id，便于 3s 的 applyTemps 精确刷新
+      const phys = (d.physDevs||[]);
+      const tempSpans = phys.map(pdv=>{
+        const m=(_tmp.disks||[]).find(x=>x.device===pdv);
+        const tc = m&&m.tempC>0 ? m.tempC : null;
+        const tcolor = tc!=null ? diskTempColor(tc,pdv) : 'var(--text3)';
+        const ttxt = tc!=null ? tc.toFixed(0)+'°C' : '—';
+        return `<span class="vdisk"><span class="vdisk-name">${esc(pdv)}</span> <span id="disk-temp-${esc(pdv)}" style="color:${tcolor}">${ttxt}</span></span>`;
+      }).join('');
+      const tempHtml = tempSpans ? `<div style="display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;color:var(--text3);margin-top:4px">💽 ${tempSpans}</div>` : '';
+      // 存储空间内联温度：显示在文件系统类型之后；通电时长显示在行首
+      return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ⏱ ${ph} · ${esc(d.fsType)}</span></div>${tempHtml}<div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
     }).join('') || '<div class="empty">未检测到磁盘</div>';
-    document.getElementById('ov-disktemps').innerHTML = renderDiskTemps(_tmp);
     document.getElementById('ov-info').innerHTML = [
       ['主机名', j.hostname],['操作系统', j.os],['飞牛版本', j.fnosVersion],['内核', j.kernel],
       ['X-Box 版本', 'v'+j.version],
@@ -1772,13 +1777,6 @@ function diskTempColor(t, dev){
   if(/^nvme/.test(String(dev||''))) return t>=75?'var(--danger)':t>=65?'var(--warning)':'var(--success)';
   return t>=55?'var(--danger)':t>=45?'var(--warning)':'var(--success)';
 }
-function renderDiskTemps(temps){
-  const disks = (temps||{}).disks||[];
-  if(!disks.length) return '<div style="font-size:12.5px;color:var(--text3)">硬盘温度：暂无可用传感器（部分硬盘需 smartctl 支持）</div>';
-  return '<div style="display:flex;flex-wrap:wrap;gap:8px 16px;font-size:12.5px;color:var(--text2)">' +
-    disks.map(d=>`<span title="${esc(d.note||d.source||'')}">盘 ${esc(d.device)}：<b id="disk-temp-all-${esc(d.device)}" style="color:${d.tempC>0?diskTempColor(d.tempC,d.device):'var(--text3)'}">${d.tempC>0?d.tempC.toFixed(1)+'°C':'—'}</b>${d.mount&&d.mount!=='/'?`<span style="color:var(--text3)">（${esc(d.mount)}）</span>`:''}</span>`).join('') +
-    '</div>';
-}
 function applyTemps(t){
   t = (t && t.temps) || t || {};   // 兼容 {temps:{...}} 与扁平两种结构
   const cpuEl = document.getElementById('stat-cpu-temp');
@@ -1788,16 +1786,10 @@ function applyTemps(t){
     else cpuEl.textContent = '🌡️ —';
   }
   const disks = (t||{}).disks||[];
-  // 存储卡底部汇总行
-  const dtEl = document.getElementById('ov-disktemps');
-  if(dtEl) dtEl.innerHTML = renderDiskTemps(t);
-  // 挂载行内的温度 span（id 与 device 对应）
+  // 存储卷行内的温度 span（id 与 device 对应），每块物理盘独立更新
   disks.forEach(d=>{
     const el = document.getElementById('disk-temp-'+d.device);
-    // 行内温度（存储卷汇总行内）：保留 ' · 🌡️ ' 前缀与格式，避免覆盖时破坏对齐
-    if(el){ if(d.tempC>0){ el.style.color = diskTempColor(d.tempC, d.device); el.textContent = ' · 🌡️ '+d.tempC.toFixed(0)+'°C'; } else el.textContent=''; }
-    const el2 = document.getElementById('disk-temp-all-'+d.device);
-    if(el2){ if(d.tempC>0){ el2.style.color=diskTempColor(d.tempC, d.device); el2.textContent=d.tempC.toFixed(0)+'°C'; } else el2.textContent='—'; }
+    if(el){ if(d.tempC>0){ el.style.color = diskTempColor(d.tempC, d.device); el.textContent = d.tempC.toFixed(0)+'°C'; } else el.textContent='—'; }
   });
 }
 let tempsTimerStarted = false, tempsTimer = null;

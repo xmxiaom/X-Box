@@ -362,24 +362,26 @@ func parseSmartPowerOnHours(out string) int64 {
 	return -1
 }
 
-// reMDDev md 软RAID 卷设备名：md0 / md127（不含分区，物理盘识别用）。
-var reMDDev = regexp.MustCompile(`^md\d+$`)
-
-// reDMDev device-mapper 卷：dm-0 / dm-2（LVM 等）。
-var reDMDev = regexp.MustCompile(`^dm-\d+$`)
-
-// resolvePhysDisks 把挂载设备名解析为底层物理盘集合（用于 SMART 通电时长）。
-// 自适应：
-//   - md 软RAID（md0）→ 读 /sys/block/md0/slaves/ 下钻出组成盘（sda/sdb…）
-//   - dm/LVM（dm-0）→ 读 /sys/block/dm-0/slaves/ 下钻（底层可能是整盘或再嵌套 md）
+// resolvePhysDisks 把挂载设备名解析为底层物理盘集合（用于 SMART 通电时长/温度关联）。
+// 自适应，不依赖设备名必须匹配 md/dm 前缀：
+//   - md/dm/mapper 卷（md0 / dm-0 / mapper/xxx）→ 读 /sys/class/block/<real>/slaves 下钻
+//   - mapper/xxx 先经 EvalSymlinks 还原为 dm-N 再下钻
 //   - 物理整盘（sda / nvme0n1 / mmcblk0）→ 自身
 //   - 分区（sda1 / nvme0n1p3）→ 所属整盘
+//   - 再嵌套（dm→md→sd…）递归处理，最终归一到物理整盘
 func resolvePhysDisks(name string) []string {
 	name = strings.TrimPrefix(name, "/dev/")
-	var list []string
-	if reMDDev.MatchString(name) || reDMDev.MatchString(name) {
-		// md / dm 卷：下钻 slaves 目录还原底层物理盘
-		ents, _ := os.ReadDir("/sys/block/" + name + "/slaves")
+	// /dev/mapper/xxx → /dev/dm-N（/sys 里只在 dm-N 上有 slaves）
+	if strings.HasPrefix(name, "mapper/") {
+		if rl, err := filepath.EvalSymlinks("/dev/" + name); err == nil {
+			name = filepath.Base(rl)
+		} else {
+			return nil
+		}
+	}
+	// 通用下钻：任何有 slaves 目录的设备（md/dm/LVM）都视为聚合卷
+	if ents, err := os.ReadDir("/sys/class/block/" + name + "/slaves"); err == nil && len(ents) > 0 {
+		var list []string
 		for _, e := range ents {
 			list = append(list, resolvePhysDisks(e.Name())...)
 		}
@@ -388,9 +390,16 @@ func resolvePhysDisks(name string) []string {
 	if rePhysDisk.MatchString(name) {
 		return []string{name}
 	}
-	// 分区 → 所属整盘
-	if b := baseDiskDevice(name); b != "" && rePhysDisk.MatchString(b) {
-		return []string{b}
+	// 分区（md0p1 / nvme0n1p3 / sda1）→ 去分区后缀回退到聚合卷再下钻 / 整盘
+	if b := baseDiskDevice(name); b != "" {
+		if b != name {
+			if r := resolvePhysDisks(b); len(r) > 0 {
+				return r
+			}
+		}
+		if rePhysDisk.MatchString(b) {
+			return []string{b}
+		}
 	}
 	return nil
 }
