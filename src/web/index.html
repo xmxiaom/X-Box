@@ -121,6 +121,10 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .kv-fill .kv{margin:0}
 .kv-fill .kv+.kv{margin-top:0}
 .kv-fill .kv{flex:1;display:flex;align-items:center}
+/* NAT 结果卡：内容纵向填满拉伸后的卡高，与网络信息卡等高 */
+.nat-fill{display:flex;flex-direction:column;flex:1;min-height:100%}
+.nat-fill .kv{margin:0;flex:1;display:flex;align-items:center}
+.nat-fill .nat-tip{margin-top:12px}
 @media(max-width:1100px){.grid2{grid-template-columns:minmax(0,1fr)}}
 .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;max-width:100%;min-width:0;box-sizing:border-box}
 /* 电脑端表格滚动条增强：横向 12px、thumb 加深、hover 反馈（手机端 14 行媒体查询内恢复全局 8px） */
@@ -472,14 +476,14 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
       <div class="page active" id="page-overview">
         <div class="page-head"><h2>仪表盘</h2><span class="sub" id="ov-updated"></span><div class="spacer"></div><button class="btn btn-primary btn-sm" onclick="loadOverview()">刷新</button></div>
         <div class="stats" id="ov-stats"></div>
-        <div class="grid2">
+        <div class="grid2-equal">
           <div class="card">
             <h3>🌐 网络信息</h3>
-            <div id="ov-net"><div class="empty" style="padding:24px 0">加载中…</div></div>
+            <div class="card-body" id="ov-net"><div class="empty" style="padding:24px 0">加载中…</div></div>
           </div>
           <div class="card">
             <h3>🛰️ NAT 类型检测 <span class="h-action"><button class="btn btn-primary btn-sm" id="btn-nat" onclick="runNAT(true)">开始检测</button></span></h3>
-            <div id="nat-result"><div class="empty" style="padding:24px 0">进入仪表盘后自动探测（需 UDP 出站可达，约 5–10 秒）</div></div>
+            <div class="card-body" id="nat-result"><div class="empty" style="padding:24px 0">进入仪表盘后自动探测（需 UDP 出站可达，约 5–10 秒）</div></div>
           </div>
         </div>
         <div class="grid2-equal" style="margin-top:14px">
@@ -1876,6 +1880,7 @@ async function runNAT(force){
       ? '<span class="badge badge-orange"><span class="dot"></span>CGNAT</span>'
       : '<span class="badge badge-green"><span class="dot"></span>非 CGNAT</span>';
     box.innerHTML = `
+      <div class="nat-fill">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
         <span class="${lvCls}">${esc(lvTxt)}</span>
         ${n.publicIP?`<span class="mono" style="font-weight:600">${esc(n.publicIP)}:${n.publicPort}</span>`:''}
@@ -1885,7 +1890,8 @@ async function runNAT(force){
       <div class="kv"><span class="k">P2P 建议</span><span class="v" style="text-align:right;max-width:65%">${esc(n.p2pNote||'—')}</span></div>
       <div class="kv"><span class="k">探测说明</span><span class="v" style="text-align:right;max-width:65%;font-weight:400;color:var(--text2)">${esc(n.detail||'—')}</span></div>
       <div class="kv"><span class="k">检测时间</span><span class="v">${esc(n.testedAt||'')}</span></div>
-      ${(lv&&lv!==1&&n.optimize&&natTipNew)?`<div class="nat-tip${lv>=3?' nat-tip-warn':''}" id="nat-tip-box"><b>优化建议</b>${esc(n.optimize)}</div>`:''}`;
+      ${(lv&&lv!==1&&n.optimize&&natTipNew)?`<div class="nat-tip${lv>=3?' nat-tip-warn':''}" id="nat-tip-box"><b>优化建议</b>${esc(n.optimize)}</div>`:''}
+      </div>`;
     // 优化建议展示：5 秒后淡出（手动/自动一致，用户确认保留淡出）
     const tip = document.getElementById('nat-tip-box');
     if(tip){
