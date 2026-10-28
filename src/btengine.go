@@ -51,15 +51,20 @@ const (
 	// unchoke 才让出并发槽去拨别的 peer。太短会在轮换还没轮到自己时就断开，导致热议种
 	// 的连接数长期只剩被乐观放行的 1~2 个（v1.3.53 提速后仍上不去的根因之一）。
 	btUnchokeWait = 2 * time.Minute
-	btSpeedWin       = 10 // 速度滑动平均窗口（秒）：窗口越长越平滑，整片写盘的空档不会让速度掉到 0
+	btSpeedWin    = 10 // 速度滑动平均窗口（秒）：窗口越长越平滑，整片写盘的空档不会让速度掉到 0
+	// 端游(Endgame)阈值：剩余未完成片 ≤ 该值时进入竞争收尾模式。
+	// 下载快结束时只有少数慢片，独占 worker 若被慢 peer 拖着，其余空闲 worker
+	// 空等退场 → 「最后一点点越下越慢」。端游让空闲 worker 竞速这些尾片，
+	// 谁先拼齐谁写盘（写盘幂等，快 peer 不必再被慢 peer 拖死）。
+	btEndgamePieces = 2
 
 	// 并发默认值（设置页可调；见 dlDefMaxConns / dlDefPipeline）
 	// 迅雷/qBittorrent 式提速：把默认并发与管线放宽，让同一任务在更多 peer 上并行取块、
 	// 单连接窗口更饱满，高 RTT 或慢速 peer 不再成为整速天花板。
-	btDefMaxConns = 24   // 单任务并发连接（v1.3.53 从 16 提高——16 路对热门种常吃不饱带宽）
-	btDefPipeline = 24   // 单连接挂起块数（24*16KB = 384KB 管线）
-	btMaxConnsCap = 64   // 单任务并发连接硬上限（v1.3.53 从 40 提高）
-	btPipeCap     = 48   // 单连接挂起块数硬上限（v1.3.53 从 32 提高）
+	btDefMaxConns = 24 // 单任务并发连接（v1.3.53 从 16 提高——16 路对热门种常吃不饱带宽）
+	btDefPipeline = 24 // 单连接挂起块数（24*16KB = 384KB 管线）
+	btMaxConnsCap = 64 // 单任务并发连接硬上限（v1.3.53 从 40 提高）
+	btPipeCap     = 48 // 单连接挂起块数硬上限（v1.3.53 从 32 提高）
 )
 
 // 运行时并发参数（由 dlConfig 注入；未设置时用默认值）
@@ -234,9 +239,9 @@ type btTask struct {
 	speed int64
 
 	peersActive int
-	peersReady  int                 // 握手完成的可用连接数（展示用；peersActive 含拨号尝试，脉冲式涨跌会误导）
+	peersReady  int                  // 握手完成的可用连接数（展示用；peersActive 含拨号尝试，脉冲式涨跌会误导）
 	peerSeen    map[string]time.Time // 见过的候选地址 → 最近一次派工时间（持续补拨用，v1.3.49）
-	seenN       int                 // 已发现的候选 peer 数（fetching 态诊断展示）
+	seenN       int                  // 已发现的候选 peer 数（fetching 态诊断展示）
 	inflight    map[string]time.Time // 最近连过的 peer（30s 内不重复拨）
 
 	cancel context.CancelFunc
@@ -962,9 +967,9 @@ func btUDPTrackerAnnounce(tr string, ih [20]byte, out func(btPeerAddr), eventSta
 	copy(req[12:16], tx[:])
 	copy(req[16:36], ih[:])
 	copy(req[36:56], btSelfID[:])
-	binary.BigEndian.PutUint64(req[56:64], 0)   // downloaded
-	binary.BigEndian.PutUint64(req[64:72], 1)   // left
-	binary.BigEndian.PutUint64(req[72:80], 0)   // uploaded
+	binary.BigEndian.PutUint64(req[56:64], 0) // downloaded
+	binary.BigEndian.PutUint64(req[64:72], 1) // left
+	binary.BigEndian.PutUint64(req[72:80], 0) // uploaded
 	event := uint32(0)
 	if eventStarted {
 		event = 2 // started
@@ -1249,16 +1254,17 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 	var peerBF []bool
 	curPiece := -1
 	curBuf := []byte{}
-	got := 0                                // 该片已收字节数（判定整片收齐，避免 sent 重扫把已收块再请求一遍）
-	sent := map[int]bool{}  // 该片已请求未回的块偏移
-	recv := map[int]bool{}  // 该片已收到的块偏移
+	got := 0               // 该片已收字节数（判定整片收齐，避免 sent 重扫把已收块再请求一遍）
+	sent := map[int]bool{} // 该片已请求未回的块偏移
+	recv := map[int]bool{} // 该片已收到的块偏移
 	holding := false
-	pexID := byte(0)       // 对端 ut_pex 消息 id（0=未知，收到其扩展握手后记下）
-	choked := true         // 协议规定连接初始为 choke 态，收到 unchoke 才能取数据
+	pexID := byte(0) // 对端 ut_pex 消息 id（0=未知，收到其扩展握手后记下）
+	choked := true   // 协议规定连接初始为 choke 态，收到 unchoke 才能取数据
 	chokedAt := time.Time{}
 	lastProg := time.Now() // 最近一次该连接收到新字节的时间（零进展看门狗）
-	defer func() { // worker 退出释放挂起片
-		if holding && curPiece >= 0 {
+	endgame := false       // 端游竞速：当前 curPiece 是否为竞争片（不设/不删 tech，允许多 worker 抢同尾片）
+	defer func() {         // worker 退出释放挂起片
+		if holding && curPiece >= 0 && !endgame {
 			techMu.Lock()
 			delete(tech, curPiece)
 			techMu.Unlock()
@@ -1287,9 +1293,11 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 			if holding && time.Since(pendAt) > btStalePiece {
 				if time.Since(lastProg) > 3*time.Minute {
 					// 重发多轮仍零进展：这条 peer 养不熟这片，释放让别的连接接手
-					techMu.Lock()
-					delete(tech, curPiece)
-					techMu.Unlock()
+					if !endgame {
+						techMu.Lock()
+						delete(tech, curPiece)
+						techMu.Unlock()
+					}
 					holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
 				} else {
 					// 只重发未回的块，已收的（recv/curBuf）全保留——此前整片丢弃重收，
@@ -1372,9 +1380,11 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 						t.mu.Unlock()
 					}
 				}
-				techMu.Lock()
-				delete(tech, idx)
-				techMu.Unlock()
+				if !endgame { // 独占 worker 才释放占用；端游竞速 worker 未设过 tech，删了会误删独占锁
+					techMu.Lock()
+					delete(tech, idx)
+					techMu.Unlock()
+				}
 				holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
 			}
 		}
@@ -1398,7 +1408,7 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 		if choked {
 			// 被 choke：释放已持有的片（本连接传不了数据，片让给能传的 worker），
 			// 但仍保持连接、挂到下次循环走重申 interested 的路径，等对端放行。
-			if holding && curPiece >= 0 {
+			if holding && curPiece >= 0 && !endgame {
 				techMu.Lock()
 				delete(tech, curPiece)
 				techMu.Unlock()
@@ -1407,7 +1417,22 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 			// 不选新片、不派块，直接继续读等放行
 			continue
 		}
+		// 端游竞速片若已被别的 worker 拼齐写盘（have[curPiece] 变 true）：立即放弃，
+		// 重新选片，不再为已完成的片浪费带宽。
+		if endgame && curPiece >= 0 {
+			t.mu.Lock()
+			donep := false
+			if curPiece < len(t.have) && t.have[curPiece] {
+				donep = true
+			}
+			t.mu.Unlock()
+			if donep {
+				endgame = false
+				holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
+			}
+		}
 		if curPiece < 0 {
+			endgame = false // 先按独占短想：下面是独占成功则保持 false；端游路径才置 true
 			np, ok := btNextPiece(t, techMu, tech, meta, peerBF)
 			if !ok {
 				t.mu.Lock()
@@ -1416,8 +1441,24 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 				if alldone {
 					return
 				}
+				// 端游竞争：独占没片但任务还没完（最后 1~2 片被慢 peer 独占）→
+				// 让空闲 worker 竞速尾片，谁先拼齐谁写盘（写盘幂等）。否则空闲
+				// worker 只能 idleRound 空等 2s×60 后退场，快 peer 帮不上忙。
+				if ep, eok := btPickEndgame(t, meta, peerBF); eok {
+					np, ok, endgame = ep, true, true
+					idleRound = 0
+				} else {
+					idleRound++
+					if idleRound > 60 { // 这条 peer 没有我们缺的块，退场让位
+						return
+					}
+					time.Sleep(2 * time.Second)
+					continue
+				}
+			}
+			if !(np >= 0) {
 				idleRound++
-				if idleRound > 60 { // 这条 peer 没有我们缺的块，退场让位
+				if idleRound > 60 {
 					return
 				}
 				time.Sleep(2 * time.Second)
@@ -1441,9 +1482,11 @@ func runWorker(ctx context.Context, t *btTask, addr string, techMu *sync.Mutex, 
 			if time.Since(pendAt) > btStalePiece { // 全挂起但长期无返回
 				if time.Since(lastProg) > 3*time.Minute {
 					// 零进展看门狗：释放该片，别的连接接手
-					techMu.Lock()
-					delete(tech, curPiece)
-					techMu.Unlock()
+					if !endgame {
+						techMu.Lock()
+						delete(tech, curPiece)
+						techMu.Unlock()
+					}
 					holding, curPiece, curBuf, sent, recv, got = false, -1, nil, map[int]bool{}, map[int]bool{}, 0
 				} else {
 					// 只重发未回的块、保留已收（与 keep-alive 分支同策略，防慢 peer 死循环）
@@ -1542,6 +1585,26 @@ func btNextPiece(t *btTask, techMu *sync.Mutex, tech map[int]bool, meta *btMeta,
 	for i := 0; i < meta.btNumPieces(); i++ {
 		if i < len(have) && !have[i] && peerBF[i] && !tech[i] {
 			tech[i] = true
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+// btPickEndgame 端游竞争选片：独占 worker 拿不到空缺片（最后 1~2 片被慢 peer 独占）
+// 时，让空闲 worker 竞速这些未完成尾片。**不设 tech[i]**（允许多 worker 抢同片），
+// 各自从自己的 peer 拉整片，谁先拼齐谁写盘（写盘幂等，have 互斥防 doneN 重复）。
+// 这样快 peer 不必再等被慢 peer 独占的尾片，收尾不再越下越慢。
+func btPickEndgame(t *btTask, meta *btMeta, peerBF []bool) (int, bool) {
+	t.mu.Lock()
+	have := t.have
+	doneN := t.doneN
+	t.mu.Unlock()
+	if meta.btNumPieces()-doneN > btEndgamePieces { // 未进入尾段，不做端游竞争
+		return -1, false
+	}
+	for i := 0; i < meta.btNumPieces(); i++ {
+		if i < len(have) && !have[i] && peerBF[i] {
 			return i, true
 		}
 	}
@@ -1940,9 +2003,9 @@ func dlUnifiedTasks() []DlTaskView {
 		}
 		tv := DlTaskView{
 			ID: t.ID, Type: "music", Sub: sub,
-			Title:     strings.TrimSpace(t.Artist + " - " + t.Song),
-			Status:    status,
-			Done:      t.Bytes, Total: t.Totals,
+			Title:  strings.TrimSpace(t.Artist + " - " + t.Song),
+			Status: status,
+			Done:   t.Bytes, Total: t.Totals,
 			Path: t.Path, Dir: t.Dir, Err: t.Err, CreatedAt: t.At,
 		}
 		if tv.Total > 0 {

@@ -690,8 +690,9 @@ func updCopyWithWatch(body io.Reader, part string, base int64, setStage func(int
 	}
 	defer f.Close()
 	var n int64
-	buf := make([]byte, 64<<10)
+	buf := make([]byte, 256<<10) // 256KB 缓冲：减少小块写系统调用（64KB 在 SD 卡/NAS 上尾段写放大明显）
 	last := time.Now()
+	lastStage := time.Now()
 	for {
 		nw, rerr := body.Read(buf)
 		if nw > 0 {
@@ -700,18 +701,26 @@ func updCopyWithWatch(body io.Reader, part string, base int64, setStage func(int
 			}
 			n += int64(nw)
 			last = time.Now()
-			setStage(base + n)
+			// 进度刷新节流：≥512KB 或 ≥1s 才更新一次，避免每 256KB 抢全局锁
+			// 跟 handleUpdateStatus 轮询争锁（高频 setStage 在高速盘上产生锁抖动）。
+			if n >= 512<<10 || time.Since(lastStage) > time.Second {
+				setStage(base + n)
+				lastStage = time.Now()
+			}
 			if base+n > updDlMaxSize {
 				return n, false, fmt.Errorf("超出大小上限")
 			}
 		}
 		if rerr == io.EOF {
+			setStage(base + n) // 终值铺满（末段可能不足 512KB/1s 未刷新）
 			return n, false, nil
 		}
 		if rerr != nil {
+			setStage(base + n)
 			return n, false, rerr
 		}
 		if time.Since(last) > updDlIdleWatch {
+			setStage(base + n)
 			return n, true, nil // 空转：主动断开，外层续传
 		}
 	}
