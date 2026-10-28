@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ============ 数据结构 ============
@@ -36,8 +37,8 @@ var tcpStates = map[string]string{
 }
 
 func (s *Server) handlePorts(w http.ResponseWriter, r *http.Request) {
-	uidMap := loadPasswdUsers()
-	inodeProc := buildInodeProcMap()
+	uidMap := cachedPasswdUsers()
+	inodeProc := buildInodeProcMapCached()
 
 	var entries []PortEntry
 	for _, src := range []struct {
@@ -198,6 +199,22 @@ func classifyExposure(local string) string {
 type procInfo struct {
 	pid  int
 	comm string
+}
+
+// 进程 fd → socket inode 映射缓存：overview 与端口页都会触发该扫描
+// （前者为统计监听数量，后者为逐个解析进程名），netdog 同步期间 /proc 遍历
+// 与 readlink 叠加争抢会显著拖慢。这里用短 TTL 缓存，
+// 让高频轮询命中缓存、秒开仪表盘。
+var inodeProcCache map[string]procInfo
+var inodeProcCacheAt time.Time
+
+func buildInodeProcMapCached() map[string]procInfo {
+	if inodeProcCache != nil && time.Since(inodeProcCacheAt) < 2*time.Second {
+		return inodeProcCache
+	}
+	m := buildInodeProcMap()
+	inodeProcCache, inodeProcCacheAt = m, time.Now()
+	return m
 }
 
 // buildInodeProcMap 扫描 /proc/[pid]/fd/*，建立 socket:[inode] → 进程 的映射。

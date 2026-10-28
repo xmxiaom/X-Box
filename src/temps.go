@@ -271,6 +271,82 @@ func parseSmartTemp(out string) (float64, bool) {
 // rePhysDisk 物理整盘设备名：sda / vd b / hda / nvme0n1 / mmcblk0（排除分区 sda1、nvme0n1p3）。
 var rePhysDisk = regexp.MustCompile(`^(sd[a-z]+|vd[a-z]+|hd[a-z]+|nvme\d+n\d+|mmcblk\d+)$`)
 
+// ---- 通电时长（SMART Power_On_Hours）----
+// 概览页的磁盘信息区要在每块盘显示通电时长。通电时长是极少变化的静态数据，
+// 用较长 TTL 缓存（10 分钟），避免 overview 30s 轮询反复 spawn smartctl；
+// 网盘同步繁忙时也不会因此拖慢仪表盘。仅对物理整盘读取（md RAID 卷跳过）。
+// 首次访问缺缓存时**异步后台补采并立刻返回 -1**（不阻塞 overview），
+// 下一次刷新（30s 后）即有真实值。
+var (
+	smartPwrMu    sync.Mutex
+	smartPwrCache = map[string]smartPwrEnt{}
+	smartPwrMiss  = map[string]bool{} // 正在后台采集中
+)
+
+type smartPwrEnt struct {
+	at    time.Time
+	hours int64
+}
+
+// smartPowerOnHours 返回物理盘通电小时数；未就绪或过期返回 -1（后台已开始补采）。
+func smartPowerOnHours(dev string) int64 {
+	smartPwrMu.Lock()
+	if e, ok := smartPwrCache[dev]; ok {
+		if time.Since(e.at) < 10*time.Minute {
+			smartPwrMu.Unlock()
+			return e.hours
+		}
+		delete(smartPwrCache, dev) // 过期：移除并触发重采
+	}
+	if smartPwrMiss[dev] { // 已在采，避免重复 spawn
+		smartPwrMu.Unlock()
+		return -1
+	}
+	smartPwrMiss[dev] = true
+	smartPwrMu.Unlock()
+	go func() {
+		h := readSmartPowerOnHours(dev)
+		smartPwrMu.Lock()
+		smartPwrCache[dev] = smartPwrEnt{time.Now(), h}
+		delete(smartPwrMiss, dev)
+		smartPwrMu.Unlock()
+	}()
+	return -1
+}
+
+func readSmartPowerOnHours(dev string) int64 {
+	if _, err := exec.LookPath("smartctl"); err != nil {
+		return -1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "smartctl", "-A", "-n", "standby", "/dev/"+dev).Output()
+	if err != nil {
+		return -1
+	}
+	return parseSmartPowerOnHours(string(out))
+}
+
+// parseSmartPowerOnHours 从 smartctl -A 输出解析通电小时数（属性 9 Power_On_Hours 的 RAW_VALUE）。
+// 纯函数，便于测试。
+func parseSmartPowerOnHours(out string) int64 {
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.Contains(line, "Power_On_Hours") {
+			continue
+		}
+		f := strings.Fields(line)
+		// SMART 属性行：ID NAME FLAG VALUE WORST THRESH TYPE UPDATED WHEN_FAILED RAW_VALUE
+		if len(f) >= 10 {
+			if v, err := strconv.ParseInt(f[9], 10, 64); err == nil && v >= 0 {
+				return v
+			}
+		}
+	}
+	return -1
+}
+
 // collectTemps 采集 CPU 与硬盘温度。硬盘并发探测，单盘 smartctl 超时 3s。
 // 硬盘遍历 /sys/class/block 全量物理盘而非挂载表：fnOS 存储空间常为 md RAID
 // （挂载设备是 md0），只有遍历物理盘才能读到每块盘（含 RAID 从属盘）的温度。

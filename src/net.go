@@ -61,8 +61,26 @@ var netLastMu sync.Mutex
 var netLastStat map[string][2]int64 // name -> [rx,tx]
 var netLastAt time.Time
 
+// collectNetInfo 静态信息（网卡/IP/网关/DNS/默认路由）短缓存：概览页每次刷新都调用，
+// 但网卡结构、网关、DNS 是低频变化的系统信息，5s 内复用上次结果即可——
+// 缓存命中能省去 spawn `ip route` 子进程与反复扫描 /proc（网盘同步繁忙时尤其明显）。
+// 速率本身实时性要求高，这里只作为速率的备用来源（主实时速率走 /api/netrates），
+// 5s 滞后无感知。
+var netInfoCache NetInfo
+var netInfoCacheAt time.Time
+var netInfoCached bool
+
 // collectNetInfo 收集当前网络信息（速率基于上次采集差值）。
 func collectNetInfo() NetInfo {
+	if netInfoCached && time.Since(netInfoCacheAt) < 5*time.Second {
+		return netInfoCache
+	}
+	info := collectNetInfoLive()
+	netInfoCache, netInfoCacheAt, netInfoCached = info, time.Now(), true
+	return info
+}
+
+func collectNetInfoLive() NetInfo {
 	info := NetInfo{}
 	dev, err := readProcNetDev()
 	if err != nil {

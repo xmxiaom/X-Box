@@ -956,6 +956,8 @@ function fmtKB(n){return fmtB(n*1024)}
 function baseDevName(dev){let b=String(dev||'').split('/').pop();if(/^(nvme|mmcblk)/.test(b))return b.replace(/p\d+$/,'');return b.replace(/\d+$/,'')}
 function fmtRate(bps){if(!bps||bps<=0)return '0 B/s';return fmtB(bps)+'/s'}
 function fmtUp(s){if(s==null)return'—';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+' 天 ':'')+h+' 小时 '+m+' 分'}
+// 通电时长：直接显示小时数（如 4320 H）。
+function fmtHours(h){ if(h==null||isNaN(h)||h<0) return '—'; return h+' H'; }
 function esc(s){return (s==null?'':s).toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 // 瞬时传输错误静音：网关忙/中转窗口期的「响应解析失败」「HTTP 0」「超时」等，
 // api 层已自动重试、轮询下一轮会自愈，弹窗纯属打扰（应用错误 4xx 不受影响，照常提示）
@@ -1687,8 +1689,9 @@ async function loadOverview(){
     document.getElementById('ov-disks').innerHTML = (j.disks||[]).map(d=>{
       const used = d.totalKB - d.availKB, pct = d.totalKB>0 ? (used/d.totalKB*100).toFixed(1) : '0';
       const color = pct>90?'var(--danger)':pct>75?'var(--warning)':'var(--primary)';
+      const ph = d.powerOnHours>0 ? fmtHours(d.powerOnHours) : '—';
       // 磁盘行内不再显示温度（部分盘读不到会导致各行不对齐），统一看存储卡底部温度汇总行
-      return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ${esc(d.fsType)}</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
+      return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ⏱ ${ph} · ${esc(d.fsType)}</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
     }).join('') || '<div class="empty">未检测到磁盘</div>';
     document.getElementById('ov-disktemps').innerHTML = renderDiskTemps(_tmp);
     document.getElementById('ov-info').innerHTML = [

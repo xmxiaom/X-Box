@@ -25,12 +25,13 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 // ============ 系统概览 ============
 
 type DiskInfo struct {
-	Mount   string `json:"mount"`
-	Device  string `json:"device"`
-	FsType  string `json:"fsType"`
-	TotalKB int64  `json:"totalKB"`
-	FreeKB  int64  `json:"freeKB"`
-	AvailKB int64  `json:"availKB"`
+	Mount        string `json:"mount"`
+	Device       string `json:"device"`
+	FsType       string `json:"fsType"`
+	TotalKB      int64  `json:"totalKB"`
+	FreeKB       int64  `json:"freeKB"`
+	AvailKB      int64  `json:"availKB"`
+	PowerOnHours int64  `json:"powerOnHours"` // SMART 通电小时数，-1=未知（异步补采中/不支持）
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -110,8 +111,8 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 	// 端口概况（供概览页直接展示）
 	portEntries := &[]PortEntry{}
-	uidMap := loadPasswdUsers()
-	inodeProc := buildInodeProcMap()
+	uidMap := cachedPasswdUsers()
+	inodeProc := buildInodeProcMapCached()
 	for _, src := range []struct {
 		file, proto string
 	}{
@@ -203,11 +204,17 @@ func listDisks() []DiskInfo {
 			continue
 		}
 		bsize := int64(st.Bsize)
+		base := baseDiskDevice(dev)
 		d := DiskInfo{
 			Mount: mount, Device: dev, FsType: fsType,
-			TotalKB: int64(st.Blocks) * bsize / 1024,
-			FreeKB:  int64(st.Bfree) * bsize / 1024,
-			AvailKB: int64(st.Bavail) * bsize / 1024,
+			TotalKB:      int64(st.Blocks) * bsize / 1024,
+			FreeKB:       int64(st.Bfree) * bsize / 1024,
+			AvailKB:      int64(st.Bavail) * bsize / 1024,
+			PowerOnHours: -1, // 默认未知
+		}
+		// 仅物理整盘关联 SMART 通电时长（md/RAID/lvm 卷跳过，避免误读）
+		if rePhysDisk.MatchString(base) {
+			d.PowerOnHours = smartPowerOnHours(base)
 		}
 		out = append(out, d)
 	}
