@@ -1690,13 +1690,18 @@ async function loadOverview(){
       const used = d.totalKB - d.availKB, pct = d.totalKB>0 ? (used/d.totalKB*100).toFixed(1) : '0';
       const color = pct>90?'var(--danger)':pct>75?'var(--warning)':'var(--primary)';
       const ph = d.powerOnHours>0 ? fmtHours(d.powerOnHours) : '—';
-      // 磁盘行内不再显示温度（部分盘读不到会导致各行不对齐），统一看存储卡底部温度汇总行
-      return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ⏱ ${ph} · ${esc(d.fsType)}</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
+      // 温度：按该卷底层物理盘匹配温度表（取最高），显示在文件系统类型之后
+      let dt = null, hotDev = null;
+      (d.physDevs||[]).forEach(pdv=>{ const m=(_tmp.disks||[]).find(x=>x.device===pdv); if(m&&m.tempC>0&&(dt===null||m.tempC>dt)){ dt=m.tempC; hotDev=pdv; } });
+      // id 用物理盘名(hotDev)，使 3s 的 applyTemps 能用 disk-temp-<物理盘> 精确刷新该行温度
+      const tempId = hotDev?`disk-temp-${esc(hotDev)}`:'';
+      const tempHtml = dt!=null ? `<span id="${tempId}" style="color:${diskTempColor(dt,hotDev)}"> · 🌡️ ${dt.toFixed(0)}°C</span>` : '';
+      // 存储空间内联温度：显示在文件系统类型之后
+      return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ⏱ ${ph} · ${esc(d.fsType)}${tempHtml}</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
     }).join('') || '<div class="empty">未检测到磁盘</div>';
     document.getElementById('ov-disktemps').innerHTML = renderDiskTemps(_tmp);
     document.getElementById('ov-info').innerHTML = [
-      ['主机名', j.hostname],['操作系统', j.os],['CPU', `${j.cpuModel} × ${j.cpuCores} 核`],
-      ['飞牛版本', j.fnosVersion],['内核', j.kernel],
+      ['主机名', j.hostname],['操作系统', j.os],['飞牛版本', j.fnosVersion],['内核', j.kernel],
       ['X-Box 版本', 'v'+j.version],
     ].map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v" style="max-width:60%;text-align:right;word-break:break-all">${esc(v||'—')}</span></div>`).join('');
     document.getElementById('ov-net').innerHTML = renderNet(j.net);
@@ -1789,7 +1794,8 @@ function applyTemps(t){
   // 挂载行内的温度 span（id 与 device 对应）
   disks.forEach(d=>{
     const el = document.getElementById('disk-temp-'+d.device);
-    if(el && d.tempC>0){ el.style.color = diskTempColor(d.tempC, d.device); el.textContent = '🌡️ '+d.tempC.toFixed(1)+'°C'; }
+    // 行内温度（存储卷汇总行内）：保留 ' · 🌡️ ' 前缀与格式，避免覆盖时破坏对齐
+    if(el){ if(d.tempC>0){ el.style.color = diskTempColor(d.tempC, d.device); el.textContent = ' · 🌡️ '+d.tempC.toFixed(0)+'°C'; } else el.textContent=''; }
     const el2 = document.getElementById('disk-temp-all-'+d.device);
     if(el2){ if(d.tempC>0){ el2.style.color=diskTempColor(d.tempC, d.device); el2.textContent=d.tempC.toFixed(0)+'°C'; } else el2.textContent='—'; }
   });

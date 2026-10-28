@@ -25,13 +25,14 @@ func execCommand(ctx context.Context, name string, args ...string) ([]byte, erro
 // ============ 系统概览 ============
 
 type DiskInfo struct {
-	Mount        string `json:"mount"`
-	Device       string `json:"device"`
-	FsType       string `json:"fsType"`
-	TotalKB      int64  `json:"totalKB"`
-	FreeKB       int64  `json:"freeKB"`
-	AvailKB      int64  `json:"availKB"`
-	PowerOnHours int64  `json:"powerOnHours"` // SMART 通电小时数，-1=未知（异步补采中/不支持）
+	Mount        string   `json:"mount"`
+	Device       string   `json:"device"`
+	FsType       string   `json:"fsType"`
+	TotalKB      int64    `json:"totalKB"`
+	FreeKB       int64    `json:"freeKB"`
+	AvailKB      int64    `json:"availKB"`
+	PowerOnHours int64    `json:"powerOnHours"` // SMART 通电小时数，-1=未知（异步补采中/不支持）
+	PhysDevs     []string `json:"physDevs"`     // 该挂载卷对应的底层物理盘名（sda/nvme0n1…，前端据此匹配温度）
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
@@ -213,6 +214,7 @@ func listDisks() []DiskInfo {
 		}
 		// 通电时长自适应：物理整盘(机械/固态)直接读，md/dm 卷下钻底层物理盘再读
 		d.PowerOnHours = smartPowerOnHoursForMount(dev)
+		d.PhysDevs = resolvePhysDisks(dev) // 温度关联用底层物理盘名
 		out = append(out, d)
 	}
 	// 根分区排最前，其余按挂载点
