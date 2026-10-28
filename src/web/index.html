@@ -999,6 +999,13 @@ function fmtVol(usedKB, totalKB){
   return { used: f(usedKB), total: f(totalKB) };
 }
 function fmtKB(n){return fmtB(n*1024)}
+// 触屏/窄屏判定：用于避免在手机端自动 focus 输入框（会立刻弹出软键盘）
+function isTouchMobile(){
+  try{
+    if(window.matchMedia && window.matchMedia('(max-width:860px)').matches) return true;
+    return (navigator.maxTouchPoints||0) > 0 && /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent||'');
+  }catch(e){ return false; }
+}
 function baseDevName(dev){let b=String(dev||'').split('/').pop();if(/^(nvme|mmcblk)/.test(b))return b.replace(/p\d+$/,'');return b.replace(/\d+$/,'')}
 function fmtRate(bps){if(!bps||bps<=0)return '0 B/s';return fmtB(bps)+'/s'}
 function fmtUp(s){if(s==null)return'—';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+' 天 ':'')+h+' 小时 '+m+' 分'}
@@ -2780,7 +2787,9 @@ function browserNewTab(url){
   f.addEventListener('load', function(){ browserOnFrameLoad(t); });
   browserSetActive(browserTabs.length-1);
   browserRenderTabs();
-  if(!url) document.getElementById('browser-url').focus();
+  // 空标签页才把焦点放到网址栏，方便直接输入；但手机端不自动聚焦——
+  // 触屏聚焦 input 会立即弹出软键盘，切到浏览器板块就被输入法挡住，体验很差
+  if(!url && !isTouchMobile()) document.getElementById('browser-url').focus();
   return t;
 }
 /* 空状态层：当前激活标签无真实 URL 时显示引导，否则隐藏 */
