@@ -139,16 +139,15 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .kv:last-child{border-bottom:none}
 .kv .k{color:var(--text3)}
 .kv .v{font-weight:500}
-.vdisk{display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:1px 8px;white-space:nowrap}
-.vdisk .vdisk-name{color:var(--text2)}
+.vdisk{display:inline-flex;align-items:center;gap:2px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:1px 6px;white-space:nowrap}
 /* 存储空间每卷区块：桌面=紧凑单行(挂载点+用量/进度条/元信息横排)；手机=三段式堆叠(见媒体查询覆盖) */
-.dvol{display:grid;grid-template-columns:minmax(0,1fr) 130px minmax(0,1fr);align-items:center;column-gap:12px;padding:8px 0;border-bottom:1px dashed var(--border)}
+.dvol{display:grid;grid-template-columns:minmax(0,1fr) 130px auto;align-items:center;column-gap:12px;padding:8px 0;border-bottom:1px dashed var(--border)}
 .dvol:last-child{padding-bottom:8px;border-bottom:none}
-.dvol-h{display:flex;align-items:center;gap:8px;font-size:13px;justify-self:start;min-width:0}
-.dvol-mount{color:var(--text2);min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dvol-h{display:flex;align-items:center;gap:8px;font-size:13px;justify-self:start;min-width:0;overflow:hidden}
+.dvol-mount{color:var(--text2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dvol-use{color:var(--text1);font-weight:500;white-space:nowrap;flex-shrink:0}
 .dvol .bar{width:100%;min-width:0;max-width:100%}
-.dvol-meta{display:flex;justify-self:end;align-items:center;gap:4px 8px;font-size:12px;color:var(--text3);white-space:nowrap;min-width:0;flex-wrap:wrap;justify-content:flex-end}
+.dvol-meta{display:flex;justify-self:end;align-items:center;gap:0 6px;font-size:12px;color:var(--text3);white-space:nowrap;flex-wrap:nowrap;justify-content:flex-end}
 /* 网络信息：网卡纵向列表（替代横滑表格），排列在网关信息之上 */
 .net-list{margin-bottom:10px}
 .net-block{padding:9px 0;border-bottom:1px solid #F7F8FA}
@@ -367,10 +366,11 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
   .dvol{display:flex;flex-direction:column;align-items:stretch;gap:6px;padding:10px 0 14px}
   .dvol:last-child{padding-bottom:6px}
   .dvol-h{justify-content:space-between}
-  .dvol-mount{max-width:none}
+  .dvol-mount{flex:1 1 auto}
   .dvol .bar{flex:1 1 auto;min-width:0}
   .dvol-meta{justify-self:auto;white-space:normal;justify-content:flex-start}
   .dvol-meta > span{white-space:nowrap}
+  .dvol-meta{flex-wrap:nowrap}
   /* 分类/列表行：元信息与按钮换行 */
   .row{flex-wrap:wrap;padding:12px 14px;gap:10px;width:100%}
   .row .meta{gap:12px;margin-left:0;width:auto;flex:0 1 auto;min-width:0;justify-content:space-between;flex-wrap:wrap}
@@ -1729,10 +1729,10 @@ async function loadOverview(){
         const tc = m&&m.tempC>0 ? m.tempC : null;
         const tcolor = tc!=null ? diskTempColor(tc,pdv) : 'var(--text3)';
         const ttxt = tc!=null ? tc.toFixed(0)+'°C' : '—';
-        return `<span class="vdisk"><span class="vdisk-name">${esc(pdv)}</span> <span id="disk-temp-${esc(pdv)}" style="color:${tcolor}">${ttxt}</span></span>`;
+        return `<span class="vdisk"><span id="disk-temp-${esc(pdv)}" style="color:${tcolor}">${ttxt}</span></span>`;
       }).join('');
       // 存储空间卡片式区块：标题行(挂载点+用量) / 进度条 / 元信息(通电+fsType · 温度chip放最后)
-      return `<div class="dvol"><div class="dvol-h"><span class="dvol-mount mono">${esc(d.mount)}</span><span class="dvol-use">${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}%</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div><div class="dvol-meta"><span>⏱ 通电 ${esc(ph)}</span><span style="opacity:.75">·</span><span>${esc(d.fsType)}</span>${tempSpans?`<span style="opacity:.75">·</span>${tempSpans}`:''}</div></div>`;
+      return `<div class="dvol"><div class="dvol-h"><span class="dvol-mount mono">${esc(d.mount)}</span><span class="dvol-use">${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}%</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div><div class="dvol-meta"><span>⏱ 通电 ${esc(ph)}</span><span>${esc(d.fsType)}</span>${tempSpans?`<span>${tempSpans}</span>`:''}</div></div>`;
     }).join('') || '<div class="empty">未检测到磁盘</div>';
     document.getElementById('ov-info').innerHTML = `<div class="kv-fill">` + [
       ['主机名', j.hostname],['操作系统', j.os],['飞牛版本', j.fnosVersion],['内核', j.kernel],
