@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // DlItem 一条磁力搜索结果（跨源统一格式）
@@ -163,6 +164,11 @@ func dlSearchVideo(keyword string) ([]DlItem, []dlSourceStat) {
 	for i := range out {
 		items = append(items, out[i]...)
 	}
+	// 中文/日文关键词：英文索引源(TPB/YTS/BitSearch)对无匹配的中文关键词会
+	// 回退返回站内当前最热门(高做种)的英文种，导致"搜中文却刷出英文热门种"。
+	// 此时仅保留标题含 CJK 字符的结果，滤掉无关英文种。(动漫花园/Nyaa 本来就是
+	// 中文源，命中即含 CJK，不受影响。)
+	items = dlFilterCJK(kw, items)
 	items = dlDedup(items)
 	sort.Slice(items, func(a, b int) bool {
 		if items[a].Seeds != items[b].Seeds {
@@ -203,6 +209,37 @@ func dlDedup(items []DlItem) []DlItem {
 func dlNormTitle(s string) string {
 	f := strings.Fields(s)
 	return strings.ToLower(strings.Join(f, " "))
+}
+
+// dlHasCJK 判断字符串是否含中日韩(CJK)字符：用于识别"中文关键词"、
+// 以及过滤掉不含 CJK 的无关英文种子以端正中文搜结果。
+// 覆盖中日韩统一表意文字、扩展区及兼容表意文字（\u3400-\u4dbf, \u4e00-\u9fff, \uf900-\ufaff）。
+func dlHasCJK(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+		// 追加日文假名与日文汉字区（部分日文资源标题纯假名）
+		if (r >= 0x3040 && r <= 0x30ff) || (r >= 0x3400 && r <= 0x4dbf) || (r >= 0x4e00 && r <= 0x9fff) || (r >= 0xf900 && r <= 0xfaff) {
+			return true
+		}
+	}
+	return false
+}
+
+// dlFilterCJK 关键词含 CJK 时，仅保留标题含 CJK 字符的结果，滤掉英文索引源
+// 对无匹配中文关键词回退返回的热门英文种。关键词纯英文/数字时不做过滤。
+func dlFilterCJK(kw string, items []DlItem) []DlItem {
+	if !dlHasCJK(kw) {
+		return items
+	}
+	kept := make([]DlItem, 0, len(items))
+	for _, it := range items {
+		if dlHasCJK(it.Title) {
+			kept = append(kept, it)
+		}
+	}
+	return kept
 }
 
 // dlMagnetHash 从磁力提取 btih 哈希（hex 或 base32）
