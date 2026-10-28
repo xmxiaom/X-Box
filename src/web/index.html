@@ -1738,7 +1738,7 @@ async function loadOverview(){
         return `<span class="vdisk"><span id="disk-temp-${esc(pdv)}" style="color:${tcolor}">${ttxt}</span></span>`;
       }).join('');
       // 存储空间卡片式区块：标题行(挂载点+用量) / 进度条 / 元信息(通电+fsType · 温度chip放最后)
-      return `<div class="dvol"><div class="dvol-h"><span class="dvol-mount mono">${esc(d.mount)}</span><span class="dvol-use">${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}%</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div><div class="dvol-meta"><span>⏱ 通电 ${esc(ph)}</span><span>${esc(d.fsType)}</span>${tempSpans?`<span>${tempSpans}</span>`:''}</div></div>`;
+      return `<div class="dvol"><div class="dvol-h"><span class="dvol-mount mono">${esc(d.mount)}</span><span class="dvol-use">${fmtKB(used)} / ${fmtKB(d.totalKB)} ${pct}%</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div><div class="dvol-meta"><span>⏱ 通电 ${esc(ph)}</span><span>${esc(d.fsType)}</span>${tempSpans?`<span>${tempSpans}</span>`:''}</div></div>`;
     }).join('') || '<div class="empty">未检测到磁盘</div>';
     document.getElementById('ov-info').innerHTML = `<div class="kv-fill">` + [
       ['主机名', j.hostname],['操作系统', j.os],['飞牛版本', j.fnosVersion],['内核', j.kernel],
