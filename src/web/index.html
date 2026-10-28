@@ -111,6 +111,16 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .bar{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:8px}
 .bar i{display:block;height:100%;border-radius:4px;transition:width .4s}
 .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
+/* 等高网格：两卡同高，卡内容纵向填充填满 */
+.grid2-equal{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch}
+.grid2-equal>.card{display:flex;flex-direction:column}
+.grid2-equal>.card>.card-body{flex:1;display:flex;flex-direction:column}
+@media(max-width:1100px){.grid2-equal{grid-template-columns:minmax(0,1fr)}}
+/* 系统信息键值行纵向均匀分布填满卡高 */
+.kv-fill{display:flex;flex-direction:column;flex:1}
+.kv-fill .kv{margin:0}
+.kv-fill .kv+.kv{margin-top:0}
+.kv-fill .kv{flex:1;display:flex;align-items:center}
 @media(max-width:1100px){.grid2{grid-template-columns:minmax(0,1fr)}}
 .tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;max-width:100%;min-width:0;box-sizing:border-box}
 /* 电脑端表格滚动条增强：横向 12px、thumb 加深、hover 反馈（手机端 14 行媒体查询内恢复全局 8px） */
@@ -472,9 +482,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
             <div id="nat-result"><div class="empty" style="padding:24px 0">进入仪表盘后自动探测（需 UDP 出站可达，约 5–10 秒）</div></div>
           </div>
         </div>
-        <div class="grid2" style="margin-top:14px">
-          <div class="card"><h3>💾 存储空间</h3><div id="ov-disks"></div></div>
-          <div class="card"><h3>ℹ️ 系统信息</h3><div id="ov-info"></div></div>
+        <div class="grid2-equal" style="margin-top:14px">
+          <div class="card"><h3>💾 存储空间</h3><div class="card-body" id="ov-disks"></div></div>
+          <div class="card"><h3>ℹ️ 系统信息</h3><div class="card-body" id="ov-info"></div></div>
         </div>
       </div>
 
@@ -1704,10 +1714,10 @@ async function loadOverview(){
       // 存储空间内联温度：每块底层盘一个 chip，内联在文件系统类型之后
       return `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;gap:8px;font-size:13px;margin-bottom:5px"><span class="mono" style="color:var(--text2)">${esc(d.mount)}</span><span>${fmtKB(used)} / ${fmtKB(d.totalKB)} · ${pct}% · ⏱ ${ph} · ${esc(d.fsType)} ${tempSpans}</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div></div>`;
     }).join('') || '<div class="empty">未检测到磁盘</div>';
-    document.getElementById('ov-info').innerHTML = [
+    document.getElementById('ov-info').innerHTML = `<div class="kv-fill">` + [
       ['主机名', j.hostname],['操作系统', j.os],['飞牛版本', j.fnosVersion],['内核', j.kernel],
       ['X-Box 版本', 'v'+j.version],
-    ].map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v" style="max-width:60%;text-align:right;word-break:break-all">${esc(v||'—')}</span></div>`).join('');
+    ].map(([k,v])=>`<div class="kv"><span class="k">${k}</span><span class="v" style="max-width:60%;text-align:right;word-break:break-all">${esc(v||'—')}</span></div>`).join('') + `</div>`;
     document.getElementById('ov-net').innerHTML = renderNet(j.net);
     netPrev = null; // 网络块刚重建，速率基线重置（下一轮重新取基线）
     if(!natLoaded) runNAT(false); // 首次进入仪表盘自动探测 NAT，之后沿用结果不重复探测
