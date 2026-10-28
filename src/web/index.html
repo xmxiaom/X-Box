@@ -990,6 +990,14 @@ async function detectChannel(){
   return 'none';
 }
 function fmtB(n){if(n==null||isNaN(n))return'—';if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<3);return n.toFixed(2)+' '+u[i]}
+// 存储空间按「总容量」统一单位：>=1TB 用 TB，否则用 GB（避免两处单位混用、文字过长挤压布局）
+// 入参单位是 KB：1GB = 1024*1024 KB = 1048576；1TB = 1024^3 KB = 1073741824
+function fmtVol(usedKB, totalKB){
+  const tb = Number(totalKB) >= 1073741824;
+  const div = tb ? 1073741824 : 1048576, unit = tb ? 'TB' : 'GB';
+  const f = v => (v==null||isNaN(v)) ? '—' : (Number(v)/div).toFixed(2)+' '+unit;
+  return { used: f(usedKB), total: f(totalKB) };
+}
 function fmtKB(n){return fmtB(n*1024)}
 function baseDevName(dev){let b=String(dev||'').split('/').pop();if(/^(nvme|mmcblk)/.test(b))return b.replace(/p\d+$/,'');return b.replace(/\d+$/,'')}
 function fmtRate(bps){if(!bps||bps<=0)return '0 B/s';return fmtB(bps)+'/s'}
@@ -1726,6 +1734,7 @@ async function loadOverview(){
       <div class="stat"><div class="s-icon" style="background:var(--purple-light);color:var(--purple)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/></svg></div><div><div class="s-v">${j.listeningPorts!=null?j.listeningPorts:'—'} <span style="font-size:12px;color:var(--text3);font-weight:400">/ ${j.publicPorts!=null?j.publicPorts:'—'} 对外</span></div><div class="s-k">监听端口 / 公网暴露</div></div></div>`;
     document.getElementById('ov-disks').innerHTML = (j.disks||[]).map(d=>{
       const used = d.totalKB - d.availKB, pct = d.totalKB>0 ? (used/d.totalKB*100).toFixed(1) : '0';
+      const v = fmtVol(used, d.totalKB); // 按总容量统一单位（>=1TB 用 TB，否则 GB）
       const color = pct>90?'var(--danger)':pct>75?'var(--warning)':'var(--primary)';
       const ph = d.powerOnHours>0 ? fmtHours(d.powerOnHours) : '—';
       // 温度：该卷底层物理盘各自匹配温度表；每块盘单独一个 id，便于 3s 的 applyTemps 精确刷新
@@ -1738,7 +1747,7 @@ async function loadOverview(){
         return `<span class="vdisk"><span id="disk-temp-${esc(pdv)}" style="color:${tcolor}">${ttxt}</span></span>`;
       }).join('');
       // 存储空间卡片式区块：标题行(挂载点+用量) / 进度条 / 元信息(通电+fsType · 温度chip放最后)
-      return `<div class="dvol"><div class="dvol-h"><span class="dvol-mount mono">${esc(d.mount)}</span><span class="dvol-use">${fmtKB(used)} / ${fmtKB(d.totalKB)} ${pct}%</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div><div class="dvol-meta"><span>⏱ 通电 ${esc(ph)}</span><span>${esc(d.fsType)}</span>${tempSpans?`<span>${tempSpans}</span>`:''}</div></div>`;
+      return `<div class="dvol"><div class="dvol-h"><span class="dvol-mount mono">${esc(d.mount)}</span><span class="dvol-use">${v.used} / ${v.total} ${pct}%</span></div><div class="bar" style="margin-top:0"><i style="width:${Math.min(pct,100)}%;background:${color}"></i></div><div class="dvol-meta"><span>⏱ 通电 ${esc(ph)}</span><span>${esc(d.fsType)}</span>${tempSpans?`<span>${tempSpans}</span>`:''}</div></div>`;
     }).join('') || '<div class="empty">未检测到磁盘</div>';
     document.getElementById('ov-info').innerHTML = `<div class="kv-fill">` + [
       ['主机名', j.hostname],['操作系统', j.os],['飞牛版本', j.fnosVersion],['内核', j.kernel],
