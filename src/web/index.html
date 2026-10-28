@@ -141,7 +141,12 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .kv .v{font-weight:500}
 .vdisk{display:inline-flex;align-items:center;gap:2px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:1px 6px;white-space:nowrap}
 /* 存储空间每卷区块：桌面=紧凑单行(挂载点+用量/进度条/元信息横排)；手机=三段式堆叠(见媒体查询覆盖) */
-.dvol{display:grid;grid-template-columns:minmax(0,1fr) 130px auto;align-items:center;column-gap:12px;padding:8px 0;border-bottom:1px dashed var(--border)}
+/* 存储空间：容器统一列轨道，各行 subgrid 继承 → 所有进度条左右严格对齐 */
+#ov-disks{display:grid;grid-template-columns:minmax(0,1fr) 130px auto;column-gap:12px}
+#ov-disks>.empty{grid-column:1/-1}
+.dvol{display:grid;grid-column:1/-1;grid-template-columns:minmax(0,1fr) 130px auto;column-gap:12px;align-items:center;padding:8px 0;border-bottom:1px dashed var(--border)}
+/* 支持 subgrid 时改为继承父轨道，彻底消除逐行列宽差异 */
+@supports(grid-template-columns:subgrid){.dvol{grid-template-columns:subgrid}}
 .dvol:last-child{padding-bottom:8px;border-bottom:none}
 .dvol-h{display:flex;align-items:center;gap:8px;font-size:13px;justify-self:start;min-width:0;overflow:hidden}
 .dvol-mount{color:var(--text2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -363,12 +368,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--primary)
   .stat .s-v{font-size:15px}
   .stat .s-k{font-size:11px}
   /* 存储空间：窄屏堆叠为三段式(标题/进度条/元信息)，整洁不挤压 */
-  .dvol{display:flex;flex-direction:column;align-items:stretch;gap:6px;padding:10px 0 14px}
+  #ov-disks{display:block}
+  .dvol{display:flex;grid-column:auto;flex-direction:column;align-items:stretch;gap:6px;padding:10px 0 14px}
   .dvol:last-child{padding-bottom:6px}
-  .dvol-h{justify-content:space-between}
+  .dvol-h{justify-content:space-between;overflow:visible}
   .dvol-mount{flex:1 1 auto}
-  .dvol .bar{flex:1 1 auto;min-width:0}
-  .dvol-meta{justify-self:auto;white-space:normal;justify-content:flex-start}
+  .dvol .bar{flex:1 1 auto;min-width:0;width:100%}
+  .dvol-meta{justify-self:auto;white-space:normal;justify-content:flex-end}
   .dvol-meta > span{white-space:nowrap}
   .dvol-meta{flex-wrap:nowrap}
   /* 分类/列表行：元信息与按钮换行 */
