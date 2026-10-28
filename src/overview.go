@@ -204,7 +204,6 @@ func listDisks() []DiskInfo {
 			continue
 		}
 		bsize := int64(st.Bsize)
-		base := baseDiskDevice(dev)
 		d := DiskInfo{
 			Mount: mount, Device: dev, FsType: fsType,
 			TotalKB:      int64(st.Blocks) * bsize / 1024,
@@ -212,10 +211,8 @@ func listDisks() []DiskInfo {
 			AvailKB:      int64(st.Bavail) * bsize / 1024,
 			PowerOnHours: -1, // 默认未知
 		}
-		// 仅物理整盘关联 SMART 通电时长（md/RAID/lvm 卷跳过，避免误读）
-		if rePhysDisk.MatchString(base) {
-			d.PowerOnHours = smartPowerOnHours(base)
-		}
+		// 通电时长自适应：物理整盘(机械/固态)直接读，md/dm 卷下钻底层物理盘再读
+		d.PowerOnHours = smartPowerOnHoursForMount(dev)
 		out = append(out, d)
 	}
 	// 根分区排最前，其余按挂载点

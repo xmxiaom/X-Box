@@ -327,24 +327,101 @@ func readSmartPowerOnHours(dev string) int64 {
 	return parseSmartPowerOnHours(string(out))
 }
 
-// parseSmartPowerOnHours 从 smartctl -A 输出解析通电小时数（属性 9 Power_On_Hours 的 RAW_VALUE）。
+// parseSmartPowerOnHours 从 smartctl -A 输出解析通电小时数。
+// 自适应两种格式：
+//   - SATA/机械盘：属性表第 9 项 Power_On_Hours 的 RAW_VALUE（下划线，第 10 列）
+//   - NVMe/固态盘：SMART/Health Information 段的 "Power On Hours: 4,320"（空格、冒号、千分位）
+//
 // 纯函数，便于测试。
 func parseSmartPowerOnHours(out string) int64 {
 	sc := bufio.NewScanner(strings.NewReader(out))
 	for sc.Scan() {
 		line := sc.Text()
-		if !strings.Contains(line, "Power_On_Hours") {
+		// NVMe 段：行含 "Power On Hours"（空格分隔）且不含属性表的下划线 "Power_On_Hours"
+		if strings.Contains(line, "Power On Hours") && !strings.Contains(line, "Power_On_Hours") {
+			f := strings.Fields(line)
+			// 取 value（千分位可能带逗号）；冒号前键忽略，从键后取第一个纯数字 token
+			for _, tk := range f {
+				v, err := strconv.ParseInt(strings.ReplaceAll(tk, ",", ""), 10, 64)
+				if err == nil && v >= 0 {
+					return v
+				}
+			}
 			continue
 		}
-		f := strings.Fields(line)
-		// SMART 属性行：ID NAME FLAG VALUE WORST THRESH TYPE UPDATED WHEN_FAILED RAW_VALUE
-		if len(f) >= 10 {
-			if v, err := strconv.ParseInt(f[9], 10, 64); err == nil && v >= 0 {
-				return v
+		// SATA 属性行：ID NAME FLAG VALUE WORST THRESH TYPE UPDATED WHEN_FAILED RAW_VALUE
+		if strings.Contains(line, "Power_On_Hours") {
+			f := strings.Fields(line)
+			if len(f) >= 10 {
+				if v, err := strconv.ParseInt(f[9], 10, 64); err == nil && v >= 0 {
+					return v
+				}
 			}
 		}
 	}
 	return -1
+}
+
+// reMDDev md 软RAID 卷设备名：md0 / md127（不含分区，物理盘识别用）。
+var reMDDev = regexp.MustCompile(`^md\d+$`)
+
+// reDMDev device-mapper 卷：dm-0 / dm-2（LVM 等）。
+var reDMDev = regexp.MustCompile(`^dm-\d+$`)
+
+// resolvePhysDisks 把挂载设备名解析为底层物理盘集合（用于 SMART 通电时长）。
+// 自适应：
+//   - md 软RAID（md0）→ 读 /sys/block/md0/slaves/ 下钻出组成盘（sda/sdb…）
+//   - dm/LVM（dm-0）→ 读 /sys/block/dm-0/slaves/ 下钻（底层可能是整盘或再嵌套 md）
+//   - 物理整盘（sda / nvme0n1 / mmcblk0）→ 自身
+//   - 分区（sda1 / nvme0n1p3）→ 所属整盘
+func resolvePhysDisks(name string) []string {
+	name = strings.TrimPrefix(name, "/dev/")
+	var list []string
+	if reMDDev.MatchString(name) || reDMDev.MatchString(name) {
+		// md / dm 卷：下钻 slaves 目录还原底层物理盘
+		ents, _ := os.ReadDir("/sys/block/" + name + "/slaves")
+		for _, e := range ents {
+			list = append(list, resolvePhysDisks(e.Name())...)
+		}
+		return dedupStrings(list)
+	}
+	if rePhysDisk.MatchString(name) {
+		return []string{name}
+	}
+	// 分区 → 所属整盘
+	if b := baseDiskDevice(name); b != "" && rePhysDisk.MatchString(b) {
+		return []string{b}
+	}
+	return nil
+}
+
+func dedupStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// smartPowerOnHoursForMount 对挂载设备解析通电时长：底层可能是多块物理盘（RAID），
+// 逐块读 SMART 取最大值。无底层物理盘或全部读不到返回 -1。
+func smartPowerOnHoursForMount(name string) int64 {
+	phys := resolvePhysDisks(name)
+	if len(phys) == 0 {
+		return -1
+	}
+	mx := int64(-1)
+	for _, p := range phys {
+		if h := smartPowerOnHours(p); h > mx {
+			mx = h
+		}
+	}
+	return mx
 }
 
 // collectTemps 采集 CPU 与硬盘温度。硬盘并发探测，单盘 smartctl 超时 3s。
