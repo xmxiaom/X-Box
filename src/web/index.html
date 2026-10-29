@@ -897,6 +897,10 @@ function xhrApi(url, method, timeoutMs){
       const xhr = new XMLHttpRequest();
       xhr.timeout = timeoutMs || 10000;
       xhr.open(method || 'GET', url, true);
+      // 隧道 URL 对同一 API 恒定不变，GET 必须显式禁缓存，
+      // 否则浏览器/网关会缓存首个响应（如 /api/sync/list 的进度快照），轮询永远拿到旧值
+      xhr.setRequestHeader('Cache-Control', 'no-cache');
+      xhr.setRequestHeader('Pragma', 'no-cache');
       xhr.onreadystatechange = function(){
         if(xhr.readyState !== 4) return;
         if(xhr.status === 200){
@@ -970,7 +974,9 @@ function navApi(path, opts, timeoutMs){
     };
     frame.onerror = () => { if(done) return; done = true; clearTimeout(timer); const e = new Error('网络错误'); e.transport = true; reject(e); cleanup(); };
     document.body.appendChild(frame);
-    frame.src = apiTunnel(path, opts);
+    // iframe 无法设置请求头，用时间戳查询参数强制绕过缓存：
+    // 隧道 URL 对同一 API 恒定不变，不加时间戳会命中缓存导致轮询拿到旧响应
+    frame.src = apiTunnel(path, opts) + '&_t=' + Date.now();
   });
 }
 // 启动时探测通道（全部走隧道 URL）：以「传输层是否可达」判定——
@@ -1139,11 +1145,14 @@ async function loadSyncTasks(){
           '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="syncDelete(\'' + esc(t.id) + '\')">删除</button>' +
         '</div></div>';
     }).join('') || '<div class="empty">还没有同步任务，点右上角「添加同步任务」</div>');
-    if(syncTimer) clearTimeout(syncTimer);
-    syncTimer = setTimeout(syncPollTick, 1500);
   }catch(e){
     // 同步页轮询失败（多为网关忙的瞬时 HTTP 0/5xx）：静默，心跳会自动重试
     if(!/HTTP (0|5\d\d)/.test(String(e.message))){ toast(e.message,'err'); }
+  }finally{
+    // 轮询链必须无条件续期：放在 catch 里一旦某次失败就会永久断链，
+    // 表现为进度条卡死在失败那一刻（旧版必须手动点「刷新」才恢复）
+    if(syncTimer) clearTimeout(syncTimer);
+    syncTimer = setTimeout(syncPollTick, 1500);
   }
 }
 function openSyncForm(id){

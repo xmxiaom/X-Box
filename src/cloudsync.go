@@ -783,7 +783,9 @@ func syncYield() {
 		time.Sleep(150 * time.Millisecond)
 		return
 	}
-	panelBusy := now-atomic.LoadInt64(&panelLastReq) < int64(2*time.Second)
+	// 面板忙让路窗口必须短于前端同步页轮询间隔（1.5s），
+	// 否则每次轮询都把窗口续满，同步会一直让路、速度被压到极低
+	panelBusy := now-atomic.LoadInt64(&panelLastReq) < int64(800*time.Millisecond)
 	if panelBusy {
 		atomic.StoreInt64(&syncLastYield, now)
 		time.Sleep(120 * time.Millisecond)

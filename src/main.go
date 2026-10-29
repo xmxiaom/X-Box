@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.75"
+	version = "1.3.76"
 	// 面板监听策略：生产形态只监听 fnOS 统一网关 unix socket（XBOX_SOCKET），
 	// 登录态由网关注入；不监听任何 TCP 端口。仅 XBOX_DEV=1 时开 127.0.0.1 回环
 	// 端口供本地开发/自动化测试。请勿改为 ":8899" 通配绑定。
@@ -338,6 +338,11 @@ func formBridge(next http.Handler) http.Handler {
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// 所有 API 响应一律不缓存：隧道 URL 对同一接口恒定不变（如轮询 /api/sync/list），
+	// 一旦被浏览器或网关缓存就会永远返回首个快照，表现为进度条/实时数据不刷新
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
