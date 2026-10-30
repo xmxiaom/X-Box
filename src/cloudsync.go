@@ -14,6 +14,7 @@ package main
 //   - 单次运行有文件数上限，避免首次全量把设备拖死。
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -361,14 +363,113 @@ func planSync(task SyncTask, idx map[string]syncIdxEnt, files []srcEntry) (pendi
 	return pending, newIdx, srcSet
 }
 
-// warmupSource 预热远程挂载的目录项。
-// fnOS 的网盘经「文件管理 → 远程挂载」呈现为本地目录（FUSE/NFS/CIFS 等），
-// 目录项与属性带内核/客户端缓存 TTL：网盘侧刚新增或修改的文件，在 TTL 内
-// readdir/stat 可能仍返回旧结果，表现为「到了同步间隔点却扫不到变化、不复制」。
-// 反复 open + 全量 readdir + close 会促使文件系统重新拉取目录项，提高下一轮命中率。
-// 只预热根目录及一级子目录（扫描本身会全量遍历，此处只求打破缓存，控制开销）。
+// mountInfoOf 找到包含 p 的最具体挂载点，返回挂载点、文件系统类型、设备名。
+func mountInfoOf(p string) (mountPoint, fstype, device string) {
+	b, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return "", "", ""
+	}
+	return parseMountInfo(string(b), p)
+}
+
+// parseMountInfo 从 /proc/mounts 文本里找出包含 path 的最具体挂载点。
+// 注意：/proc/mounts 里的路径恒为 Unix 风格，必须用 path 包（分隔符固定 "/"）
+// 而非 filepath——后者在 Windows 上会把 "/a/b" 变成 "\a\b" 导致匹配失败。
+// 抽成纯函数便于单测（开发机无 /proc/mounts）。
+func parseMountInfo(content, path2 string) (mountPoint, fstype, device string) {
+	clean := path.Clean(path2)
+	bestLen := -1
+	unesc := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`)
+	for _, line := range strings.Split(content, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		mp := path.Clean(unesc.Replace(f[1]))
+		if clean == mp || strings.HasPrefix(clean, strings.TrimSuffix(mp, "/")+"/") {
+			if len(mp) > bestLen {
+				bestLen, mountPoint, fstype, device = len(mp), mp, f[2], f[0]
+			}
+		}
+	}
+	return
+}
+
+// rcloneWarnMu / rcloneWarnAt 限频记录「rclone rc 不可用」的告警，避免每轮扫描都刷日志
+var (
+	rcloneWarnMu sync.Mutex
+	rcloneWarnAt = map[string]time.Time{}
+)
+
+// syncIdleMu / syncIdle 实时模式连续「无变化」轮次计数：
+// 用于把深度刷新重扫降到每 30 轮一次，兼顾实时性与性能
+var (
+	syncIdleMu sync.Mutex
+	syncIdle   = map[string]int{}
+)
+
+// refreshRemoteMount 让远程挂载 daemon 丢弃目录项缓存。
+// 关键：像 rclone mount 这类 daemon 自己缓存目录列表（--dir-cache-time 默认 5 分钟），
+// 用户态 open+readdir 只会命中它的缓存、拿不到网盘侧的新文件——这也是「实时检测间隔
+// 到了却看不到新文件」的根因。必须走 daemon 的控制接口才能真正刷新：rclone 提供
+// rc 服务（--rc，默认端口 5572）的 vfs/refresh。返回 true 表示已真正刷新。
+func refreshRemoteMount(p string) bool {
+	mp, fstype, dev := mountInfoOf(p)
+	if mp == "" {
+		return false
+	}
+	low := strings.ToLower(fstype + " " + dev)
+	if !strings.Contains(low, "rclone") {
+		return false // 非 rclone 挂载（davfs/内核 NFS 等）没有通用刷新接口
+	}
+	rel := "/"
+	if clean := path.Clean(p); clean != mp {
+		rel = strings.TrimPrefix(clean, strings.TrimSuffix(mp, "/"))
+		if rel == "" {
+			rel = "/"
+		} else if !strings.HasPrefix(rel, "/") {
+			rel = "/" + rel
+		}
+	}
+	payload, _ := json.Marshal(map[string]any{"dir": rel, "recursive": true})
+	cl := &http.Client{Timeout: 4 * time.Second}
+	for _, addr := range []string{"127.0.0.1:5572", "127.0.0.1:5573", "127.0.0.1:5574"} {
+		req, err := http.NewRequest("POST", "http://"+addr+"/vfs/refresh", bytes.NewReader(payload))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := cl.Do(req)
+		if err != nil {
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == 200 {
+			log.Printf("[同步] 已通过 rclone rc(%s) 刷新挂载目录 %s", addr, rel)
+			return true
+		}
+	}
+	// rc 不可用：限频提示一次，便于排查「刷不到新文件」的原因
+	rcloneWarnMu.Lock()
+	if time.Since(rcloneWarnAt[mp]) > 5*time.Minute {
+		rcloneWarnAt[mp] = time.Now()
+		log.Printf("[同步] 检测到 rclone 挂载 %s，但其 rc 服务不可访问（未启动 --rc，默认端口 5572），"+
+			"无法强制刷新目录缓存；网盘新文件可能延迟到 rclone 的 --poll-interval（默认 1 分钟）后才可见", mp)
+	}
+	rcloneWarnMu.Unlock()
+	return false
+}
+
+// warmupSource 刷新远程挂载的目录项，确保接下来的扫描能看到网盘侧的最新内容。
+// 优先走 daemon 控制接口（rclone vfs/refresh，真正清缓存）；不可用时退化为
+// open + readdir + close 预热，对内核 dentry 缓存（秒级 TTL）有效。
+// 只预热根目录及有限个一级子目录（扫描本身会全量遍历，此处只求打破缓存、控制开销）。
 func warmupSource(root string) {
-	const maxDirs = 32 // 只预热有限个一级子目录，避免超大网盘目录造成额外开销
+	if refreshRemoteMount(root) {
+		return // 缓存已由 daemon 真正刷新，无需再逐目录 readdir
+	}
+	const maxDirs = 32
 	dirs := []string{root}
 	if d, err := os.Open(root); err == nil {
 		names, _ := d.Readdirnames(512) // 限制读取条目数，取到前若干项即可
@@ -417,13 +518,27 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	pending, newIdx, srcSet := planSync(task, idx, files)
 
 	// 挂载缓存兜底：本轮判定「无变化」时，可能只是远程挂载的目录项缓存还没过期
-	// （网盘侧已新增/修改，readdir 仍返回旧结果）。刷新挂载目录后递进重扫两次
-	// （1.2s、3s），跨越常见的秒级 TTL，取到变化即停止。
-	// 实时模式本身轮询间隔很短（1~2s），持续在读，跳过以免反复空转。
-	if len(pending) == 0 && len(idx) > 0 && !task.Realtime {
-		for _, wait := range []time.Duration{syncRescanWait, 3 * time.Second} {
+	// （网盘侧已新增/修改，readdir 仍返回旧结果）。刷新挂载目录后重扫：
+	//   - 普通模式：递进两次（1.2s、3s），跨越秒级 TTL
+	//   - 实时模式：本身 1~2s 一轮，若每轮都重扫会让网盘扫描翻倍、明显拖慢；
+	//     改为每 30 轮（约 60s）做一次深度刷新重扫，覆盖挂载 daemon 的缓存/poll 周期
+	doRescan, waits := false, []time.Duration{syncRescanWait, 3 * time.Second}
+	if task.Realtime {
+		syncIdleMu.Lock()
+		syncIdle[task.ID]++
+		doRescan = syncIdle[task.ID]%30 == 0
+		syncIdleMu.Unlock()
+		waits = []time.Duration{syncRescanWait}
+	} else {
+		syncIdleMu.Lock()
+		syncIdle[task.ID] = 0
+		syncIdleMu.Unlock()
+		doRescan = true
+	}
+	if len(pending) == 0 && len(idx) > 0 && doRescan {
+		for _, wait := range waits {
 			time.Sleep(wait)
-			warmupSource(task.Source) // 刷新挂载目录，促使网盘重新拉取目录项
+			warmupSource(task.Source) // 再次刷新挂载目录
 			files2, err2 := scanSource(task.Source, excludes, nil)
 			if err2 != nil || len(files2) == 0 {
 				continue
@@ -438,6 +553,10 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			setSyncState(task.ID, func(x *SyncState) { x.Scanning = len(files) })
 			break
 		}
+	} else if len(pending) > 0 {
+		syncIdleMu.Lock()
+		syncIdle[task.ID] = 0
+		syncIdleMu.Unlock()
 	}
 	st.Total = len(pending)
 	var totalBytes int64
