@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,13 +41,34 @@ type davItem struct {
 	isDir bool
 }
 
-// davAddrs 候选网关地址：可用 XBOX_SYNC_DAV 覆盖，默认扫 fnOS 常用端口
+// davAddrs 候选网关地址：XBOX_SYNC_DAV 显式指定 > 上次探测成功的地址 >
+// 本机正在监听的端口（自动发现）> 常见端口兜底。
 func davAddrs() []string {
 	var a []string
 	if v := strings.TrimSpace(os.Getenv("XBOX_SYNC_DAV")); v != "" {
 		a = append(a, strings.TrimRight(v, "/"))
 	}
+	davBaseMu.Lock()
+	cached := davBaseHit
+	davBaseMu.Unlock()
+	if cached != "" {
+		a = append(a, cached)
+	}
+	for _, p := range localListenPorts() {
+		a = append(a, fmt.Sprintf("http://127.0.0.1:%d", p))
+	}
 	return append(a, "http://127.0.0.1:15244", "http://127.0.0.1:15245", "http://127.0.0.1:15246")
+}
+
+var (
+	davBaseMu  sync.Mutex
+	davBaseHit string // 上次成功识别出的网关地址（避免每次都全端口扫）
+)
+
+func davRememberBase(b string) {
+	davBaseMu.Lock()
+	davBaseHit = b
+	davBaseMu.Unlock()
 }
 
 func davEscaped(p string) string {
@@ -55,25 +77,25 @@ func davEscaped(p string) string {
 }
 
 // davList 对网关目录发 PROPFIND（Depth:1），返回子项（不含自身）
-func davList(cl *http.Client, base, dir string) ([]davItem, bool) {
+func davList(cl *http.Client, base, dir string) ([]davItem, int, bool) {
 	req, err := http.NewRequest("PROPFIND", base+davEscaped(dir), strings.NewReader(davPropfindBody))
 	if err != nil {
-		return nil, false
+		return nil, 0, false
 	}
 	req.Header.Set("Depth", "1")
 	req.Header.Set("Content-Type", "application/xml")
 	resp, err := cl.Do(req)
 	if err != nil {
-		return nil, false
+		return nil, -1, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 207 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return nil, false
+		return nil, resp.StatusCode, false
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return nil, false
+		return nil, resp.StatusCode, false
 	}
 	self := strings.TrimRight(dir, "/")
 	var out []davItem
@@ -105,22 +127,22 @@ func davList(cl *http.Client, base, dir string) ([]davItem, bool) {
 		}
 		out = append(out, item)
 	}
-	return out, true
+	return out, resp.StatusCode, true
 }
 
 // davFindRoot 在网关根目录里找到与挂载点同名的那一层（挂载点路径与网关路径不一回事）
-func davFindRoot(cl *http.Client, base, mountName string) (root string, seen []string, ok bool) {
-	items, good := davList(cl, base, "/")
+func davFindRoot(cl *http.Client, base, mountName string) (root string, seen []string, code int, ok bool) {
+	items, code, good := davList(cl, base, "/")
 	if !good {
-		return "", nil, false
+		return "", nil, code, false
 	}
 	for _, it := range items {
 		seen = append(seen, it.name)
 		if it.isDir && it.name == mountName {
-			return "/" + mountName, seen, true
+			return "/" + mountName, seen, code, true
 		}
 	}
-	return "", seen, false
+	return "", seen, code, false
 }
 
 // davWalk 递归列出网关目录（限制深度/条目，避免网盘大目录把一轮拖死）
@@ -129,7 +151,7 @@ func davWalk(cl *http.Client, base, dir, prefix string, excludes []string, out *
 		return
 	}
 	*budget--
-	items, ok := davList(cl, base, dir)
+	items, _, ok := davList(cl, base, dir)
 	if !ok {
 		return
 	}
@@ -190,12 +212,17 @@ func davFillMissing(task SyncTask, excludes []string, idx map[string]syncIdxEnt,
 	if mp == "" || !strings.Contains(strings.ToLower(fstype), "rclone") {
 		return 0, ""
 	}
-	cl := &http.Client{Timeout: 10 * time.Minute}
+	clProbe := &http.Client{Timeout: 900 * time.Millisecond} // 探测网关：必须快，端口可能几十个
+	clGet := &http.Client{Timeout: 10 * time.Minute}       // 下载大文件：给足时间
 	mountName := filepath.Base(mp)
 	note := ""
+	authNote := ""
 	for _, base := range davAddrs() {
-		root, seen, ok := davFindRoot(cl, base, mountName)
+		root, seen, code, ok := davFindRoot(clProbe, base, mountName)
 		if !ok {
+			if code == 401 || code == 403 {
+				authNote = "网关 " + base[len("http://"):] + " 需要鉴权（HTTP " + strconv.Itoa(code) + "）"
+			}
 			if note == "" {
 				if len(seen) > 0 {
 					if len(seen) > 6 {
@@ -208,6 +235,7 @@ func davFillMissing(task SyncTask, excludes []string, idx map[string]syncIdxEnt,
 			}
 			continue
 		}
+		davRememberBase(base) // 记住可用地址，后续轮次直接命中
 		sub := ""
 		if r, err := filepath.Rel(mp, task.Source); err == nil && r != "." && r != "" {
 			sub = "/" + strings.TrimPrefix(filepath.ToSlash(r), "/")
@@ -216,7 +244,7 @@ func davFillMissing(task SyncTask, excludes []string, idx map[string]syncIdxEnt,
 
 		budget := 1200
 		var all []srcEntry
-		davWalk(cl, base, davDir, "", excludes, &all, &budget)
+		davWalk(clProbe, base, davDir, "", excludes, &all, &budget)
 
 		var fresh []srcEntry
 		var totalBytes int64
@@ -247,7 +275,7 @@ func davFillMissing(task SyncTask, excludes []string, idx map[string]syncIdxEnt,
 			if syncGenAborted(task.ID, gen) { // 用户暂停：立即停下
 				return st.Files, "网关直读已中止"
 			}
-			n, err := davGetTo(cl, base, davDir+"/"+f.rel, filepath.Join(task.Target, f.rel))
+			n, err := davGetTo(clGet, base, davDir+"/"+f.rel, filepath.Join(task.Target, f.rel))
 			doneBytes += n
 			done := i + 1
 			if err != nil {
@@ -265,5 +293,36 @@ func davFillMissing(task SyncTask, excludes []string, idx map[string]syncIdxEnt,
 		}
 		return len(fresh), fmt.Sprintf("网关直读：已补收 %d 个新文件", len(fresh))
 	}
+	if authNote != "" {
+		return 0, authNote
+	}
 	return 0, note
+}
+
+// parseNetTcp 从 /proc/net/tcp{,6} 内容里取本机 LISTEN 端口（纯函数，便于单测）。
+// 每行格式：sl local_address rem_address st ...，状态 0A 表示 LISTEN，端口为十六进制。
+func parseNetTcp(content string) []int {
+	var out []int
+	seen := map[int]bool{}
+	for i, line := range strings.Split(content, "\n") {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 4 || f[3] != "0A" {
+			continue
+		}
+		addr := f[1]
+		ci := strings.LastIndex(addr, ":")
+		if ci < 0 {
+			continue
+		}
+		p, err := strconv.ParseInt(addr[ci+1:], 16, 32)
+		if err != nil || p <= 0 || p > 65535 || seen[int(p)] {
+			continue
+		}
+		seen[int(p)] = true
+		out = append(out, int(p))
+	}
+	return out
 }
