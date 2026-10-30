@@ -632,8 +632,12 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	})
 
 	// 阶段二：逐个复制，实时上报进度与网速
-	copyStart := time.Now()
-	var doneBytes int64
+	// 速度只统计「真实写入目标的字节」：DoneBytes 里含被 sameFileInfo 跳过的文件
+	// （没读过一个字节），拿它算速度会瞬间飙到几百 MB/s，与实际严重不符。
+	var doneBytes int64   // 进度用：含跳过项
+	var copiedBytes int64 // 速度用：只算真正写入的字节
+	var spd speedSampler
+	baseCopied := int64(0) // 已完成文件累计的真实写入字节
 	for i, f := range pending {
 		if isAborted() { // 暂停：不再开始新文件
 			return st, errSyncPaused
@@ -662,11 +666,12 @@ func syncOnce(task SyncTask) (SyncState, error) {
 				return false
 			}
 			syncYield() // 动态优先级：面板忙/系统负载高时让路
+			copiedBytes = baseCopied + w
+			speed, hasSpeed := spd.sample(copiedBytes, time.Now())
 			setSyncState(task.ID, func(x *SyncState) {
 				x.DoneBytes = localBase + w
-				// 网速：按已复制字节 / 复制耗时（剔除前 300ms 抖动窗口）
-				if el := time.Since(copyStart); el > 300*time.Millisecond && x.DoneBytes > 0 {
-					x.Speed = fmtBytesRate(float64(x.DoneBytes) / el.Seconds())
+				if hasSpeed {
+					x.Speed = speed
 				}
 			})
 			return true
@@ -675,6 +680,10 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			return st, errSyncPaused
 		}
 		doneBytes += n
+		if n > 0 && cerr == nil {
+			baseCopied += n
+			copiedBytes = baseCopied
+		}
 		done := i + 1
 		if cerr != nil {
 			st.LastErr = "复制失败 " + f.rel + "：" + cerr.Error()
@@ -1127,6 +1136,32 @@ func syncYield() {
 		atomic.StoreInt64(&syncLastYield, now)
 		time.Sleep(80 * time.Millisecond)
 	}
+}
+
+// speedSampler 计算同步的瞬时速度：只统计「真实写入目标的字节」，
+// 每满 1 秒采样一次。用累计 DoneBytes 会算入被跳过（内容已相同）的文件，
+// 那些文件一个字节都没读，会让速度虚高到几百 MB/s。
+type speedSampler struct {
+	started bool
+	at      time.Time
+	base    int64
+}
+
+func (s *speedSampler) sample(copied int64, now time.Time) (string, bool) {
+	if !s.started {
+		s.started, s.at, s.base = true, now, copied
+		return "", false
+	}
+	el := now.Sub(s.at)
+	if el < time.Second {
+		return "", false
+	}
+	rate := float64(copied-s.base) / el.Seconds()
+	if rate < 0 {
+		rate = 0
+	}
+	s.at, s.base = now, copied
+	return fmtBytesRate(rate), true
 }
 
 func fmtBytesRate(bps float64) string {
