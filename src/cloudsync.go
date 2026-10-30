@@ -25,8 +25,8 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -425,6 +425,37 @@ func indexUnchanged(e syncIdxEnt, f srcEntry) bool {
 	return d <= int64(2*time.Second)
 }
 
+// isRcloneCmdline 判断一组命令行参数是否为服务 mountPoint 的 rclone 挂载进程。
+// 纯函数（跨平台共用，便于单测）。
+//
+// 必须严格：SIGHUP 对非 rclone 进程是「终止」而不是「刷缓存」，误判会导致网盘
+// 挂载掉线。因此除「含挂载点参数」外，还要求出现 rclone 专属特征（可执行名含
+// rclone，或带 --dir-cache-time / --vfs-cache-mode / --poll-interval 这类 rclone
+// 独有参数）。fnOS 把 rclone 重命名成 /usr/trim/bin/webdav，但其挂载命令行仍带
+// 这些参数，可据此识别。
+func isRcloneCmdline(args []string, mountPoint string) bool {
+	hasMount := false
+	strong := false
+	for _, a := range args {
+		low := strings.ToLower(a)
+		if mountPoint != "" && a == mountPoint {
+			hasMount = true
+		}
+		if strings.Contains(low, "rclone") {
+			strong = true
+			continue
+		}
+		switch {
+		case strings.HasPrefix(low, "--dir-cache-time"),
+			strings.HasPrefix(low, "--vfs-cache-mode"),
+			strings.HasPrefix(low, "--poll-interval"),
+			strings.HasPrefix(low, "--vfs-cache-max-age"):
+			strong = true
+		}
+	}
+	return strong && hasMount
+}
+
 // planSync 依据源清单与上次索引，算出本轮待复制项、新索引与源文件集合。
 // verifyTarget 为 false 时跳过「索引命中项在目标端是否存在」的校验：
 // 该校验要对每个文件做一次 stat，实时模式高频轮询下会把 dentry 缓存挤出去、
@@ -567,12 +598,21 @@ func refreshRemoteMount(p string) bool {
 }
 
 // warmupSource 刷新远程挂载的目录项，确保接下来的扫描能看到网盘侧的最新内容。
-// 优先走 daemon 控制接口（rclone vfs/refresh，真正清缓存）；不可用时退化为
-// open + readdir + close 预热，对内核 dentry 缓存（秒级 TTL）有效。
+// 优先级：
+//  1. SIGHUP 刷新 rclone VFS 缓存（官方解法，立即生效，fnOS 远程挂载即此架构）
+//  2. rclone rc vfs/refresh（需挂载进程带 --rc，部分场景可用）
+//  3. open + readdir 预热兜底（对内核 dentry 缓存有效，对 daemon 自身缓存无效）
 // 只预热根目录及有限个一级子目录（扫描本身会全量遍历，此处只求打破缓存、控制开销）。
 func warmupSource(root string) {
+	mp, _, _ := mountInfoOf(root)
+	if mp != "" {
+		if n, err := flushRcloneVFS(mp); err == nil && n > 0 {
+			time.Sleep(300 * time.Millisecond) // 给 rclone 重新拉取目录列表的时间
+			return
+		}
+	}
 	if refreshRemoteMount(root) {
-		return // 缓存已由 daemon 真正刷新，无需再逐目录 readdir
+		return // rc vfs/refresh 已真正刷新缓存
 	}
 	const maxDirs = 32
 	dirs := []string{root}
