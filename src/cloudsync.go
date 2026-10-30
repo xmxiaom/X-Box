@@ -711,8 +711,16 @@ func refreshRemoteMount(p string) bool {
 //  3. open + readdir 预热兜底（对内核 dentry 缓存有效，对 daemon 自身缓存无效）
 // 只预热根目录及有限个一级子目录（扫描本身会全量遍历，此处只求打破缓存、控制开销）。
 func warmupSource(root string) string {
+	// 首选 fnOS 自己的刷新接口（等价于文件管理里的刷新按钮）：
+	// 这是唯一能让网关重新向网盘拉目录的动作，SIGHUP/readdir 都会被网关缓存挡住。
 	mp, fstype, dev := mountInfoOf(root)
 	failHint := ""
+	if tokOK, note := trimRefreshMount(root); tokOK {
+		time.Sleep(300 * time.Millisecond)
+		return note
+	} else if loadTrimToken() != "" && note != "" {
+		failHint = note // 配了令牌但调用失败：把原因带出去，继续走兜底
+	}
 	if mp != "" {
 		if n, hint, err := flushRcloneVFS(mp, fstype); err == nil && n > 0 {
 			time.Sleep(300 * time.Millisecond) // 给 rclone 重新拉取目录列表的时间
@@ -1279,6 +1287,20 @@ func (s *Server) handleSyncPause(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	ok(w, map[string]any{"id": id, "paused": !on})
+}
+
+// handleTrimToken GET/POST /api/sync/trimtoken —— 读写 fnOS 令牌
+func (s *Server) handleTrimToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "POST" {
+		tok := strings.TrimSpace(r.URL.Query().Get("token"))
+		if err := saveTrimToken(tok); err != nil {
+			fail(w, 500, "保存失败："+err.Error())
+			return
+		}
+		ok(w, map[string]any{"configured": tok != ""})
+		return
+	}
+	ok(w, map[string]any{"configured": loadTrimToken() != ""})
 }
 
 // handleSyncDirs 简单的目录候选（便于前端提示当前卷）
