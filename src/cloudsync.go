@@ -417,18 +417,26 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	pending, newIdx, srcSet := planSync(task, idx, files)
 
 	// 挂载缓存兜底：本轮判定「无变化」时，可能只是远程挂载的目录项缓存还没过期
-	// （网盘侧已新增/修改，readdir 仍返回旧结果）。等待一个短窗口后预热重扫一次，
-	// 跨过常见的秒级 TTL。实时模式本身轮询间隔很短（1~2s），跳过以免反复空转。
+	// （网盘侧已新增/修改，readdir 仍返回旧结果）。刷新挂载目录后递进重扫两次
+	// （1.2s、3s），跨越常见的秒级 TTL，取到变化即停止。
+	// 实时模式本身轮询间隔很短（1~2s），持续在读，跳过以免反复空转。
 	if len(pending) == 0 && len(idx) > 0 && !task.Realtime {
-		time.Sleep(syncRescanWait)
-		warmupSource(task.Source)
-		if files2, err2 := scanSource(task.Source, excludes, nil); err2 == nil && len(files2) > 0 {
-			if p2, n2, s2 := planSync(task, idx, files2); len(p2) > 0 {
-				log.Printf("[同步] %s 挂载缓存刷新后重扫，取到 %d 项待复制", task.ID, len(p2))
-				files, pending, newIdx, srcSet = files2, p2, n2, s2
-				st.Scanned = len(files)
-				setSyncState(task.ID, func(x *SyncState) { x.Scanning = len(files) })
+		for _, wait := range []time.Duration{syncRescanWait, 3 * time.Second} {
+			time.Sleep(wait)
+			warmupSource(task.Source) // 刷新挂载目录，促使网盘重新拉取目录项
+			files2, err2 := scanSource(task.Source, excludes, nil)
+			if err2 != nil || len(files2) == 0 {
+				continue
 			}
+			p2, n2, s2 := planSync(task, idx, files2)
+			if len(p2) == 0 {
+				continue
+			}
+			log.Printf("[同步] %s 刷新挂载目录后重扫，取到 %d 项待复制", task.ID, len(p2))
+			files, pending, newIdx, srcSet = files2, p2, n2, s2
+			st.Scanned = len(files)
+			setSyncState(task.ID, func(x *SyncState) { x.Scanning = len(files) })
+			break
 		}
 	}
 	st.Total = len(pending)
