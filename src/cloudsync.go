@@ -470,9 +470,10 @@ func indexUnchanged(e syncIdxEnt, f srcEntry) bool {
 
 // syncProc 一条进程信息（从 /proc 采集，或测试里伪造）
 type syncProc struct {
-	pid  int
-	args []string
-	exe  string // 可执行文件名（小写，取 /proc/<pid>/exe 的 basename）
+	pid   int
+	args  []string
+	exe   string // 可执行文件名（小写，取 /proc/<pid>/exe 的 basename）
+	holds bool   // 该进程的 mountinfo 里挂了 mountPoint（fnOS 的挂载进程常不带路径参数）
 }
 
 // decideFlushTargets 从进程表里挑出「可以安全 SIGHUP」的 rclone 挂载进程。
@@ -490,7 +491,7 @@ func decideFlushTargets(procs []syncProc, mountPoint, fstype string) (pids []int
 	matched := 0
 	var seen []string
 	for _, p := range procs {
-		if p.pid <= 1 || !hasArg(p.args, mountPoint) {
+		if p.pid <= 1 || (!hasArg(p.args, mountPoint) && !p.holds) {
 			continue
 		}
 		matched++
@@ -515,7 +516,7 @@ func decideFlushTargets(procs []syncProc, mountPoint, fstype string) (pids []int
 	case matched > 0:
 		return nil, "找到服务该挂载点的进程但无法确认是 rclone，已跳过（" + strings.Join(seen, " | ") + "）"
 	default:
-		return nil, "未找到服务 " + mountPoint + " 的挂载进程"
+		return nil, "未找到服务 " + mountPoint + " 的挂载进程（命令行与 mountinfo 均未命中）"
 	}
 }
 

@@ -24,8 +24,10 @@ import (
 	"syscall"
 )
 
-// listProcs 采集当前所有进程的 pid / 命令行 / 可执行名。
-func listProcs() ([]syncProc, error) {
+// listProcs 采集当前所有进程的 pid / 命令行 / 可执行名，并标记谁的 mountinfo
+// 里挂着 mountPoint。fnOS 的挂载进程命令行常常只有卷号或干脆没有路径参数
+// （实测：/vol02/1000-1-a54fba1b 不出现在任何 cmdline 里），只能靠 mountinfo 定位。
+func listProcs(mountPoint string) ([]syncProc, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, err
@@ -48,7 +50,14 @@ func listProcs() ([]syncProc, error) {
 		if link, lerr := os.Readlink(filepath.Join("/proc", e.Name(), "exe")); lerr == nil {
 			exe = strings.ToLower(filepath.Base(link))
 		}
-		out = append(out, syncProc{pid: pid, args: args, exe: exe})
+		holds := false
+		if mountPoint != "" {
+			// mountinfo 里挂载点位于第 5 列，格式：… /mount/point rw,… 0 0
+			if mi, merr := os.ReadFile(filepath.Join("/proc", e.Name(), "mountinfo")); merr == nil {
+				holds = strings.Contains(string(mi), " "+mountPoint+" ")
+			}
+		}
+		out = append(out, syncProc{pid: pid, args: args, exe: exe, holds: holds})
 	}
 	return out, nil
 }
@@ -56,7 +65,7 @@ func listProcs() ([]syncProc, error) {
 // flushRcloneVFS 找到服务 mountPoint 的 rclone 进程并发 SIGHUP。
 // 返回 (命中进程数, 诊断说明, 错误)；诊断说明写进同步状态给面板显示。
 func flushRcloneVFS(mountPoint, fstype string) (int, string, error) {
-	procs, err := listProcs()
+	procs, err := listProcs(mountPoint)
 	if err != nil {
 		return 0, "读 /proc 失败: " + err.Error(), err
 	}
