@@ -1098,12 +1098,6 @@ async function loadSyncTasks(){
     const head = '<div class="proxy-hint">原理：网盘由飞牛「文件管理 → 远程挂载」挂到本机，本板块只负责比对文件变化并复制到本地目录（不接管挂载）。' +
       '同步规则：<b>网盘有 → 本地没有/有变化</b> 则复制/覆盖；<b>网盘没有、本地有</b> 默认<b>保留本地</b>（勾选"镜像删除"才会删除）。' +
       '你手动删掉本地文件后，下一轮会被网盘版本恢复；恢复节奏由检测间隔决定。</div>' +
-      '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">' +
-        '<span style="font-size:12px;color:var(--text2)">fnOS 令牌（用于刷新挂载缓存，等价于点文件管理的刷新按钮）：</span>' +
-        '<input type="password" id="trim-token" placeholder="留空表示不启用" style="flex:1;min-width:180px;max-width:320px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">' +
-        '<button class="btn btn-text btn-sm" onclick="saveTrimToken()">保存令牌</button>' +
-        '<span id="trim-token-state" style="font-size:12px;color:var(--text3)"></span>' +
-      '</div>' +
       '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openSyncForm(null)">+ 添加同步任务</button></div>';
     c.innerHTML = head + (syncCache.map(t => {
       const st = t.state || {};
@@ -1141,10 +1135,6 @@ async function loadSyncTasks(){
         detail = '尚未同步过';
       }
       detail = errText + detail; // 错误原因直接显示在行内，不再只靠悬停
-      // 挂载目录刷新诊断：SIGHUP 是否命中、失败原因（没找到进程/权限不足/非 rclone）
-      if(st.refreshHint){
-        detail += ' · <span style="color:var(--text3)">刷新挂载：' + esc(st.refreshHint) + '</span>';
-      }
       return '<div class="row">' +
         '<div class="icon" style="background:var(--primary-light);color:var(--primary)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15a4 4 0 0 1 4-4h1a5 5 0 0 1 9.6-1.6A4 4 0 0 1 19 17H7a3 3 0 0 1-3-2z"/></svg></div>' +
         '<div class="info"><div class="name">' + esc(t.name) + ' ' + badge +
@@ -1165,7 +1155,6 @@ async function loadSyncTasks(){
           '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="syncDelete(\'' + esc(t.id) + '\')">删除</button>' +
         '</div></div>';
     }).join('') || '<div class="empty">还没有同步任务，点右上角「添加同步任务」</div>');
-    refreshTrimTokenState();
   }catch(e){
     // 同步页轮询失败（多为网关忙的瞬时 HTTP 0/5xx）：静默，心跳会自动重试
     if(!/HTTP (0|5\d\d)/.test(String(e.message))){ toast(e.message,'err'); }
@@ -1175,25 +1164,6 @@ async function loadSyncTasks(){
     if(syncTimer) clearTimeout(syncTimer);
     syncTimer = setTimeout(syncPollTick, 1500);
   }
-}
-async function refreshTrimTokenState(){
-  const el = document.getElementById('trim-token-state');
-  if(!el) return;
-  try{
-    const j = await apiRetry('/api/sync/trimtoken');
-    el.textContent = j.configured ? '已配置（刷新挂载将直调 fnOS 接口）' : '未配置';
-    el.style.color = j.configured ? 'var(--success)' : 'var(--text3)';
-  }catch(e){ el.textContent = ''; }
-}
-async function saveTrimToken(){
-  const inp = document.getElementById('trim-token');
-  if(!inp) return;
-  try{
-    await apiRetry('/api/sync/trimtoken?token=' + encodeURIComponent(inp.value.trim()), {method:'POST'});
-    inp.value = '';
-    toast('令牌已保存','ok');
-    refreshTrimTokenState();
-  }catch(e){ toast(e.message,'err'); }
 }
 function openSyncForm(id){
   const t = id ? syncCache.find(x => x.id === id) : null;

@@ -14,7 +14,6 @@ package main
 //   - 单次运行有文件数上限，避免首次全量把设备拖死。
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +21,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -64,9 +62,6 @@ type SyncState struct {
 	TotalBytes int64     `json:"totalBytes"` // 本轮待复制总字节
 	DoneBytes  int64     `json:"doneBytes"`  // 已复制字节（运行中实时更新）
 	Duration string    `json:"duration"` // 上次耗时
-	// RefreshHint 挂载目录刷新的诊断结果（如「已 SIGHUP pid=123」/「未找到 rclone 进程」/
-	// 「SIGHUP 权限不足」）。挂在状态里是为了让用户不用看系统日志就能在面板上看到原因。
-	RefreshHint string `json:"refreshHint"`
 }
 
 var syncStore struct {
@@ -83,6 +78,19 @@ var syncStore struct {
 var (
 	syncCtlMu sync.Mutex
 	syncGen   = map[string]int{}
+)
+
+// syncIdleMu / syncIdle 实时模式连续「无变化」轮次计数：
+// 用于把深度重扫降到每 30 轮一次，兼顾实时性与性能
+var (
+	syncIdleMu sync.Mutex
+	syncIdle   = map[string]int{}
+)
+
+// syncVerifyMu / syncVerifyCnt 实时模式目标端校验轮次计数（每 12 轮校验一次）
+var (
+	syncVerifyMu  sync.Mutex
+	syncVerifyCnt = map[string]int{}
 )
 
 func syncGenOf(id string) int {
@@ -468,101 +476,6 @@ func indexUnchanged(e syncIdxEnt, f srcEntry) bool {
 	return d <= int64(2*time.Second)
 }
 
-// syncProc 一条进程信息（从 /proc 采集，或测试里伪造）
-type syncProc struct {
-	pid   int
-	args  []string
-	exe   string // 可执行文件名（小写，取 /proc/<pid>/exe 的 basename）
-	holds bool   // 该进程的 mountinfo 里挂了 mountPoint（fnOS 的挂载进程常不带路径参数）
-}
-
-// decideFlushTargets 从进程表里挑出「可以安全 SIGHUP」的 rclone 挂载进程。
-// 纯函数：开发机（Windows）也能单测，覆盖 fnOS 的真实命令行形态。
-//
-// 判定必须严格——SIGHUP 对非 rclone 进程是终止信号，误判会让网盘挂载掉线。
-// 规则：命令行必须精确含该挂载点，且满足其一：
-//   - 出现 rclone 专属参数（--dir-cache-time / --vfs-cache-mode / --poll-interval / --vfs-cache-max-age）
-//   - 可执行名含 rclone
-//   - 挂载类型本身是 fuse.rclone 且可执行名含 webdav（fnOS 把 rclone 改名成 webdav）
-//
-// 返回待发信号的 pid 列表与诊断说明（诊断会显示在面板上）。
-func decideFlushTargets(procs []syncProc, mountPoint, fstype string) (pids []int, hint string) {
-	isFuseRclone := strings.Contains(strings.ToLower(fstype), "rclone")
-	matched := 0
-	var seen []string
-	for _, p := range procs {
-		if p.pid <= 1 || (!hasArg(p.args, mountPoint) && !p.holds) {
-			continue
-		}
-		matched++
-		if len(seen) < 3 {
-			seen = append(seen, fmt.Sprintf("pid%d(%s): %s", p.pid, p.exe, strings.Join(p.args, " ")))
-		}
-		if !isRcloneCmdline(p.args, mountPoint) {
-			nameOK := strings.Contains(p.exe, "rclone") ||
-				(isFuseRclone && strings.Contains(p.exe, "webdav"))
-			if !nameOK {
-				continue
-			}
-		}
-		pids = append(pids, p.pid)
-	}
-	switch {
-	case len(pids) > 0:
-		return pids, ""
-	case !isFuseRclone:
-		// 不是 fuse.rclone（本地盘/其他文件系统）：本来就没有 VFS 目录缓存问题
-		return nil, "非 rclone 挂载（fstype=" + fstype + "），无 SIGHUP 可用"
-	case matched > 0:
-		return nil, "找到服务该挂载点的进程但无法确认是 rclone，已跳过（" + strings.Join(seen, " | ") + "）"
-	default:
-		return nil, "未找到服务 " + mountPoint + " 的挂载进程（命令行与 mountinfo 均未命中）"
-	}
-}
-
-func hasArg(args []string, want string) bool {
-	if want == "" {
-		return false
-	}
-	for _, a := range args {
-		if a == want {
-			return true
-		}
-	}
-	return false
-}
-
-// isRcloneCmdline 判断一组命令行参数是否为服务 mountPoint 的 rclone 挂载进程。
-// 纯函数（跨平台共用，便于单测）。
-//
-// 必须严格：SIGHUP 对非 rclone 进程是「终止」而不是「刷缓存」，误判会导致网盘
-// 挂载掉线。因此除「含挂载点参数」外，还要求出现 rclone 专属特征（可执行名含
-// rclone，或带 --dir-cache-time / --vfs-cache-mode / --poll-interval 这类 rclone
-// 独有参数）。fnOS 把 rclone 重命名成 /usr/trim/bin/webdav，但其挂载命令行仍带
-// 这些参数，可据此识别。
-func isRcloneCmdline(args []string, mountPoint string) bool {
-	hasMount := false
-	strong := false
-	for _, a := range args {
-		low := strings.ToLower(a)
-		if mountPoint != "" && a == mountPoint {
-			hasMount = true
-		}
-		if strings.Contains(low, "rclone") {
-			strong = true
-			continue
-		}
-		switch {
-		case strings.HasPrefix(low, "--dir-cache-time"),
-			strings.HasPrefix(low, "--vfs-cache-mode"),
-			strings.HasPrefix(low, "--poll-interval"),
-			strings.HasPrefix(low, "--vfs-cache-max-age"):
-			strong = true
-		}
-	}
-	return strong && hasMount
-}
-
 // planSync 依据源清单与上次索引，算出本轮待复制项、新索引与源文件集合。
 // verifyTarget 为 false 时跳过「索引命中项在目标端是否存在」的校验：
 // 该校验要对每个文件做一次 stat，实时模式高频轮询下会把 dentry 缓存挤出去、
@@ -600,145 +513,14 @@ func shouldVerifyTarget(task SyncTask) bool {
 	return syncVerifyCnt[task.ID]%12 == 1 // 首轮也校验
 }
 
-// mountInfoOf 找到包含 p 的最具体挂载点，返回挂载点、文件系统类型、设备名。
-func mountInfoOf(p string) (mountPoint, fstype, device string) {
-	b, err := os.ReadFile("/proc/mounts")
-	if err != nil {
-		return "", "", ""
-	}
-	return parseMountInfo(string(b), p)
-}
-
-// parseMountInfo 从 /proc/mounts 文本里找出包含 path 的最具体挂载点。
-// 注意：/proc/mounts 里的路径恒为 Unix 风格，必须用 path 包（分隔符固定 "/"）
-// 而非 filepath——后者在 Windows 上会把 "/a/b" 变成 "\a\b" 导致匹配失败。
-// 抽成纯函数便于单测（开发机无 /proc/mounts）。
-func parseMountInfo(content, path2 string) (mountPoint, fstype, device string) {
-	clean := path.Clean(path2)
-	bestLen := -1
-	unesc := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`)
-	for _, line := range strings.Split(content, "\n") {
-		f := strings.Fields(line)
-		if len(f) < 3 {
-			continue
-		}
-		mp := path.Clean(unesc.Replace(f[1]))
-		if clean == mp || strings.HasPrefix(clean, strings.TrimSuffix(mp, "/")+"/") {
-			if len(mp) > bestLen {
-				bestLen, mountPoint, fstype, device = len(mp), mp, f[2], f[0]
-			}
-		}
-	}
-	return
-}
-
-// rcloneWarnMu / rcloneWarnAt 限频记录「rclone rc 不可用」的告警，避免每轮扫描都刷日志
-var (
-	rcloneWarnMu sync.Mutex
-	rcloneWarnAt = map[string]time.Time{}
-)
-
-// syncIdleMu / syncIdle 实时模式连续「无变化」轮次计数：
-// 用于把深度刷新重扫降到每 30 轮一次，兼顾实时性与性能
-var (
-	syncIdleMu sync.Mutex
-	syncIdle   = map[string]int{}
-)
-
-// syncVerifyMu / syncVerifyCnt 实时模式目标端校验轮次计数（每 12 轮校验一次）
-var (
-	syncVerifyMu  sync.Mutex
-	syncVerifyCnt = map[string]int{}
-)
-
-// refreshRemoteMount 让远程挂载 daemon 丢弃目录项缓存。
-// 关键：像 rclone mount 这类 daemon 自己缓存目录列表（--dir-cache-time 默认 5 分钟），
-// 用户态 open+readdir 只会命中它的缓存、拿不到网盘侧的新文件——这也是「实时检测间隔
-// 到了却看不到新文件」的根因。必须走 daemon 的控制接口才能真正刷新：rclone 提供
-// rc 服务（--rc，默认端口 5572）的 vfs/refresh。返回 true 表示已真正刷新。
-func refreshRemoteMount(p string) bool {
-	mp, fstype, dev := mountInfoOf(p)
-	if mp == "" {
-		return false
-	}
-	low := strings.ToLower(fstype + " " + dev)
-	if !strings.Contains(low, "rclone") {
-		return false // 非 rclone 挂载（davfs/内核 NFS 等）没有通用刷新接口
-	}
-	rel := "/"
-	if clean := path.Clean(p); clean != mp {
-		rel = strings.TrimPrefix(clean, strings.TrimSuffix(mp, "/"))
-		if rel == "" {
-			rel = "/"
-		} else if !strings.HasPrefix(rel, "/") {
-			rel = "/" + rel
-		}
-	}
-	payload, _ := json.Marshal(map[string]any{"dir": rel, "recursive": true})
-	cl := &http.Client{Timeout: 4 * time.Second}
-	for _, addr := range []string{"127.0.0.1:5572", "127.0.0.1:5573", "127.0.0.1:5574"} {
-		req, err := http.NewRequest("POST", "http://"+addr+"/vfs/refresh", bytes.NewReader(payload))
-		if err != nil {
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := cl.Do(req)
-		if err != nil {
-			continue
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode == 200 {
-			log.Printf("[同步] 已通过 rclone rc(%s) 刷新挂载目录 %s", addr, rel)
-			return true
-		}
-	}
-	// rc 不可用：限频提示一次，便于排查「刷不到新文件」的原因
-	rcloneWarnMu.Lock()
-	if time.Since(rcloneWarnAt[mp]) > 5*time.Minute {
-		rcloneWarnAt[mp] = time.Now()
-		log.Printf("[同步] 检测到 rclone 挂载 %s，但其 rc 服务不可访问（未启动 --rc，默认端口 5572），"+
-			"无法强制刷新目录缓存；网盘新文件可能延迟到 rclone 的 --poll-interval（默认 1 分钟）后才可见", mp)
-	}
-	rcloneWarnMu.Unlock()
-	return false
-}
-
-// warmupSource 刷新远程挂载的目录项，确保接下来的扫描能看到网盘侧的最新内容。
-// 优先级：
-//  1. SIGHUP 刷新 rclone VFS 缓存（官方解法，立即生效，fnOS 远程挂载即此架构）
-//  2. rclone rc vfs/refresh（需挂载进程带 --rc，部分场景可用）
-//  3. open + readdir 预热兜底（对内核 dentry 缓存有效，对 daemon 自身缓存无效）
-// 只预热根目录及有限个一级子目录（扫描本身会全量遍历，此处只求打破缓存、控制开销）。
-func warmupSource(root string) string {
-	// 首选 fnOS 自己的刷新接口（等价于文件管理里的刷新按钮）：
-	// 这是唯一能让网关重新向网盘拉目录的动作，SIGHUP/readdir 都会被网关缓存挡住。
-	mp, fstype, dev := mountInfoOf(root)
-	failHint := ""
-	if tokOK, note := trimRefreshMount(root); tokOK {
-		time.Sleep(300 * time.Millisecond)
-		return note
-	} else if loadTrimToken() != "" && note != "" {
-		failHint = note // 配了令牌但调用失败：把原因带出去，继续走兜底
-	}
-	if mp != "" {
-		if n, hint, err := flushRcloneVFS(mp, fstype); err == nil && n > 0 {
-			time.Sleep(300 * time.Millisecond) // 给 rclone 重新拉取目录列表的时间
-			return hint
-		} else if hint != "" {
-			failHint = hint
-		}
-	} else {
-		failHint = "路径不在任何挂载点内"
-	}
-	if refreshRemoteMount(root) {
-		return "rc vfs/refresh 已刷新" // rc vfs/refresh 已真正刷新缓存
-	}
-	_ = dev
+// warmupSource 预热远程挂载的目录项（open + readdir + close）。
+// 对内核 dentry 缓存的秒级 TTL 有效；挂载层自身的长缓存无法从用户态打破，
+// 这是已知限制，不再做额外尝试。只预热根目录及有限个一级子目录，控制开销。
+func warmupSource(root string) {
 	const maxDirs = 32
 	dirs := []string{root}
 	if d, err := os.Open(root); err == nil {
-		names, _ := d.Readdirnames(512) // 限制读取条目数，取到前若干项即可
+		names, _ := d.Readdirnames(512)
 		_ = d.Close()
 		for _, n := range names {
 			if len(dirs) > maxDirs {
@@ -753,18 +535,14 @@ func warmupSource(root string) string {
 	for i := 0; i < 2; i++ {
 		for _, d := range dirs {
 			if h, err := os.Open(d); err == nil {
-				_, _ = h.Readdirnames(64) // 走一遍 readdir 即可触发刷新
+				_, _ = h.Readdirnames(64)
 				_ = h.Close()
 			}
 		}
 		if i == 0 && len(dirs) > 1 {
-			time.Sleep(150 * time.Millisecond) // 给网络文件系统一点刷新时间
+			time.Sleep(150 * time.Millisecond)
 		}
 	}
-	if failHint != "" {
-		return "readdir 兜底（" + failHint + "）"
-	}
-	return "readdir 兜底"
 }
 
 // syncOnce 执行一次单向同步（源 → 目标）。
@@ -777,11 +555,7 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	gen := syncGenOf(task.ID)
 	isAborted := func() bool { return syncGenAborted(task.ID, gen) }
 	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
-	// 扫描前打破挂载目录缓存（网盘侧刚变更的文件否则读不到）；同时把刷新结论记进状态，
-	// 便于用户在面板上直接看到「为什么没刷到新文件」，不必翻系统日志。
-	rh := warmupSource(task.Source)
-	st.RefreshHint = rh // 同时写进本地副本：runSyncTask 最后会用 st 整体覆盖共享状态
-	setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = rh })
+	warmupSource(task.Source) // 扫描前预热挂载目录（对秒级目录缓存有效）
 	files, err := scanSource(task.Source, excludes, func(n int) {
 		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
 	}, isAborted)
@@ -822,8 +596,7 @@ func syncOnce(task SyncTask) (SyncState, error) {
 				return st, errSyncPaused
 			}
 			time.Sleep(wait)
-			rh2 := warmupSource(task.Source) // 再次刷新挂载目录
-			setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = rh2 })
+			warmupSource(task.Source) // 再次预热挂载目录
 			files2, err2 := scanSource(task.Source, excludes, nil, isAborted)
 			if errors.Is(err2, errSyncPaused) {
 				return st, errSyncPaused
@@ -847,15 +620,6 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		syncIdleMu.Unlock()
 	}
 
-	// 网关直读兜底：挂载层（rclone VFS / fnOS 网关）的目录缓存可能长期不失效，
-	// 网盘侧新增的文件在挂载目录里看不到、常规扫描永远扫不出来。这里直接向本机
-	// WebDAV 网关要目录清单，把索引里没有的新文件经网关下载到目标，绕开挂载目录。
-	if len(pending) == 0 && len(idx) > 0 && !isAborted() {
-		if _, hint := davFillMissing(task, excludes, idx, newIdx, &st, gen); hint != "" {
-			st.RefreshHint = hint
-			setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = hint })
-		}
-	}
 	st.Total = len(pending)
 	var totalBytes int64
 	for _, f := range pending {
@@ -1287,20 +1051,6 @@ func (s *Server) handleSyncPause(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	ok(w, map[string]any{"id": id, "paused": !on})
-}
-
-// handleTrimToken GET/POST /api/sync/trimtoken —— 读写 fnOS 令牌
-func (s *Server) handleTrimToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "POST" {
-		tok := strings.TrimSpace(r.URL.Query().Get("token"))
-		if err := saveTrimToken(tok); err != nil {
-			fail(w, 500, "保存失败："+err.Error())
-			return
-		}
-		ok(w, map[string]any{"configured": tok != ""})
-		return
-	}
-	ok(w, map[string]any{"configured": loadTrimToken() != ""})
 }
 
 // handleSyncDirs 简单的目录候选（便于前端提示当前卷）
