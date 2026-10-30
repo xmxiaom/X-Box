@@ -325,7 +325,54 @@ func saveSyncIndex(id string, idx map[string]syncIdxEnt) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(syncIndexPath(id), b, 0o600)
+	// 先写临时文件再改名：中途失败不会留下半个索引文件被下次误读
+	p := syncIndexPath(id)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, p)
+}
+
+// 索引常驻内存：轮询只读内存，避免每轮都读盘。
+// 实时模式 1~2s 一轮，若每轮 loadSyncIndex 都读一次索引文件，虽然文件不大，
+// 但持续的小随机读同样会扰动磁盘（机械盘尤其明显），放内存后轮询期间零磁盘 IO。
+var (
+	syncIdxMu  sync.Mutex
+	syncIdxMem = map[string]map[string]syncIdxEnt{}
+)
+
+// cachedSyncIndex 取任务索引：命中内存直接返回，未加载过才读盘一次。
+// 返回的 map 只读使用（planSync 只读它，新索引写 newIdx），并发安全。
+func cachedSyncIndex(id string) map[string]syncIdxEnt {
+	syncIdxMu.Lock()
+	if m, ok := syncIdxMem[id]; ok {
+		syncIdxMu.Unlock()
+		return m
+	}
+	syncIdxMu.Unlock()
+	m := loadSyncIndex(id)
+	syncIdxMu.Lock()
+	syncIdxMem[id] = m
+	syncIdxMu.Unlock()
+	return m
+}
+
+// storeSyncIndex 更新内存索引，persist 为 true 时才落盘。
+func storeSyncIndex(id string, idx map[string]syncIdxEnt, persist bool) {
+	syncIdxMu.Lock()
+	syncIdxMem[id] = idx
+	syncIdxMu.Unlock()
+	if persist {
+		saveSyncIndex(id, idx)
+	}
+}
+
+// dropSyncIndexCache 任务被删除时清掉内存索引，避免残留占用
+func dropSyncIndexCache(id string) {
+	syncIdxMu.Lock()
+	delete(syncIdxMem, id)
+	syncIdxMu.Unlock()
 }
 
 // indexUnchanged 判断相对上次索引是否未变（2 秒容差，与目标端比对一致）。
@@ -344,15 +391,20 @@ func indexUnchanged(e syncIdxEnt, f srcEntry) bool {
 }
 
 // planSync 依据源清单与上次索引，算出本轮待复制项、新索引与源文件集合。
-// 抽成独立函数是为了支持「挂载缓存未过期时重扫一次」时复用同一套比对逻辑。
-func planSync(task SyncTask, idx map[string]syncIdxEnt, files []srcEntry) (pending []srcEntry, newIdx map[string]syncIdxEnt, srcSet map[string]bool) {
+// verifyTarget 为 false 时跳过「索引命中项在目标端是否存在」的校验：
+// 该校验要对每个文件做一次 stat，实时模式高频轮询下会把 dentry 缓存挤出去、
+// 退化成真实随机读，长期对磁盘不友好。跳过不影响正确性——目标端被删的文件
+// 会在下一次校验轮（由 shouldVerifyTarget 控制）重新复制恢复。
+func planSync(task SyncTask, idx map[string]syncIdxEnt, files []srcEntry, verifyTarget bool) (pending []srcEntry, newIdx map[string]syncIdxEnt, srcSet map[string]bool) {
 	newIdx = make(map[string]syncIdxEnt, len(files))
 	srcSet = make(map[string]bool, len(files))
 	for _, f := range files {
 		srcSet[f.rel] = true
 		newIdx[f.rel] = syncIdxEnt{Size: f.size, Mtime: f.mtime.UnixNano()}
-		// 索引命中且未变：仍确认目标文件存在（被删/丢失则进入复制阶段恢复）
 		if e, ok := idx[f.rel]; ok && indexUnchanged(e, f) {
+			if !verifyTarget {
+				continue
+			}
 			if _, serr := os.Stat(filepath.Join(task.Target, f.rel)); serr == nil {
 				continue
 			}
@@ -361,6 +413,18 @@ func planSync(task SyncTask, idx map[string]syncIdxEnt, files []srcEntry) (pendi
 		pending = append(pending, f)
 	}
 	return pending, newIdx, srcSet
+}
+
+// shouldVerifyTarget 决定本轮是否做目标端存在性校验。
+// 普通间隔模式每轮都校验；实时模式每 12 轮（约 24s）校验一次，兼顾正确性与磁盘压力。
+func shouldVerifyTarget(task SyncTask) bool {
+	if !task.Realtime {
+		return true
+	}
+	syncVerifyMu.Lock()
+	defer syncVerifyMu.Unlock()
+	syncVerifyCnt[task.ID]++
+	return syncVerifyCnt[task.ID]%12 == 1 // 首轮也校验
 }
 
 // mountInfoOf 找到包含 p 的最具体挂载点，返回挂载点、文件系统类型、设备名。
@@ -406,6 +470,12 @@ var (
 var (
 	syncIdleMu sync.Mutex
 	syncIdle   = map[string]int{}
+)
+
+// syncVerifyMu / syncVerifyCnt 实时模式目标端校验轮次计数（每 12 轮校验一次）
+var (
+	syncVerifyMu  sync.Mutex
+	syncVerifyCnt = map[string]int{}
 )
 
 // refreshRemoteMount 让远程挂载 daemon 丢弃目录项缓存。
@@ -514,8 +584,9 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	st.Scanned = len(files)
 
 	// 阶段一：确定待处理清单（索引未命中或内容有变的文件）
-	idx := loadSyncIndex(task.ID)
-	pending, newIdx, srcSet := planSync(task, idx, files)
+	idx := cachedSyncIndex(task.ID) // 只读内存，轮询期间不读盘
+	verify := shouldVerifyTarget(task)
+	pending, newIdx, srcSet := planSync(task, idx, files, verify)
 
 	// 挂载缓存兜底：本轮判定「无变化」时，可能只是远程挂载的目录项缓存还没过期
 	// （网盘侧已新增/修改，readdir 仍返回旧结果）。刷新挂载目录后重扫：
@@ -543,7 +614,7 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			if err2 != nil || len(files2) == 0 {
 				continue
 			}
-			p2, n2, s2 := planSync(task, idx, files2)
+			p2, n2, s2 := planSync(task, idx, files2, false)
 			if len(p2) == 0 {
 				continue
 			}
@@ -673,12 +744,12 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		}
 	}
 
-	// 索引只在真正变化时落盘。实时模式 1~2s 一轮，若每轮无条件重写索引文件，
+	// 索引只在真正变化时落盘：实时模式 1~2s 一轮，若每轮无条件重写索引文件，
 	// 等于每秒刷盘一次（索引大小随文件数增长，可达数百 KB~数 MB），长期是明显的
 	// 写放大、影响 SSD 寿命。无待复制项且文件数未变时索引必然等价——
-	// indexUnchanged 已逐个校验过 size+mtime，此时跳过写入是安全无损的。
+	// indexUnchanged 已逐个校验过 size+mtime，此时只更新内存、跳过写盘是安全无损的。
 	if len(pending) > 0 || len(newIdx) != len(idx) {
-		saveSyncIndex(task.ID, newIdx)
+		storeSyncIndex(task.ID, newIdx, true)
 	}
 
 	st.Running = false
@@ -714,7 +785,6 @@ func runSyncTask(task SyncTask) {
 	}()
 
 	setSyncState(task.ID, func(s *SyncState) { s.Running = true; s.LastErr = "" })
-	log.Printf("[同步] 任务 %s（%s）开始", task.ID, task.Name)
 	st, err := syncOnce(task)
 	if err != nil {
 		st.LastErr = err.Error()
@@ -722,8 +792,12 @@ func runSyncTask(task SyncTask) {
 		st.LastAt = time.Now()
 	}
 	setSyncState(task.ID, func(s *SyncState) { *s = st })
-	log.Printf("[同步] 任务 %s 结束：复制 %d · 删除 %d · 扫描 %d · %s",
-		task.ID, st.Files, st.Deleted, st.Scanned, st.Duration)
+	// 仅在有实际动作或出错时记日志：实时模式 1~2s 一轮，若每轮都写「开始/结束」
+	// 两条日志，等于持续向日志文件写入（fnOS 会落盘），属于无谓的写放大。
+	if st.Files > 0 || st.Deleted > 0 || st.LastErr != "" {
+		log.Printf("[同步] 任务 %s 结束：复制 %d · 删除 %d · 扫描 %d · %s",
+			task.ID, st.Files, st.Deleted, st.Scanned, st.Duration)
+	}
 }
 
 // startSyncScheduler 每秒检查一次有没有到期的任务。
@@ -842,6 +916,8 @@ func (s *Server) handleSyncSave(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "保存失败："+err.Error())
 		return
 	}
+	// 源/目标可能被改过，丢掉内存索引让下一轮从磁盘重新加载，避免用旧缓存比对
+	dropSyncIndexCache(t.ID)
 	ok(w, map[string]any{"saved": t})
 }
 
@@ -868,6 +944,7 @@ func (s *Server) handleSyncDelete(w http.ResponseWriter, r *http.Request) {
 	syncStore.mu.Lock()
 	delete(syncStore.state, id)
 	syncStore.mu.Unlock()
+	dropSyncIndexCache(id) // 同时清掉内存索引，避免残留
 	_ = os.Remove(syncIndexPath(id))
 	ok(w, map[string]any{"deleted": id})
 }
