@@ -109,7 +109,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .stat .s-v{font-size:19px;font-weight:700;line-height:1.2}
 .stat .s-k{font-size:12px;color:var(--text3);margin-top:3px}
 .bar{height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:8px}
-.bar i{display:block;height:100%;border-radius:4px;transition:width .4s}
+.bar i{display:block;height:100%;border-radius:4px;transition:width .4s;background:var(--primary)}
 .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:start}
 /* 等高网格：两卡同高，卡内容纵向填充填满 */
 .grid2-equal{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch}
@@ -1111,12 +1111,19 @@ async function loadSyncTasks(){
       let detail;
       if(st.running && st.phase === 'scan'){
         detail = '<span style="font-size:12px;color:var(--text2)">正在扫描源目录（已枚举 ' + (st.scanning||0) + ' 项，大网盘可能需要几分钟）…</span>';
-      } else if(st.running && (st.totalBytes||0) > 0){
-        const done = st.doneBytes||0, total = st.totalBytes;
-        const pct = Math.min(100, Math.round(done * 100 / total));
-        detail = '<div class="bar" style="margin-top:6px"><i style="width:' + pct + '%"></i></div>' +
-          '<span style="font-size:12px;color:var(--text2)">正在复制 ' + fmtB(done) + ' / ' + fmtB(total) + '（' + pct + '%）' +
-          (st.speed ? ' · ' + esc(st.speed) : '') + '</span>';
+      } else if(st.running){
+        // 只要在跑就渲染进度条（totalBytes 尚未就绪时也显示空轨道 + 准备中），
+        // 避免旧版「running 但 totalBytes 为 0」落到下面的历史结果分支，看起来像没在同步
+        const done = st.doneBytes||0, total = st.totalBytes||0;
+        const pct = total > 0 ? Math.min(100, Math.round(done * 100 / total)) : 0;
+        // done>0 但取整成 0% 时给 1% 可见宽度，避免大文件前期看起来毫无进展
+        // 填充色统一由 .bar i 的 var(--primary) 提供，不按占用比例变色
+        const w = total > 0 ? Math.max(pct, done > 0 ? 1 : 0) : 0;
+        detail = '<div class="bar" style="margin-top:6px"><i style="width:' + w + '%"></i></div>' +
+          (total > 0
+            ? '<span style="font-size:12px;color:var(--text2)">正在复制 ' + fmtB(done) + ' / ' + fmtB(total) + '（' + pct + '%）' +
+              (st.speed ? ' · ' + esc(st.speed) : '') + '</span>'
+            : '<span style="font-size:12px;color:var(--text2)">正在准备待复制文件…</span>');
       } else if(st.lastAt){
         detail = '结果：复制 ' + (st.files||0) + ' 个 / ' + fmtB(st.bytes||0) +
           (st.deleted ? (' · 删除 ' + st.deleted + ' 个') : '') +

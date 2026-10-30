@@ -73,6 +73,9 @@ var syncStore struct {
 
 const syncMaxFiles = 800000 // 单次扫描上限：百度网盘等挂载常见几十万文件
 
+// syncRescanWait 本轮判定「无变化」后，等待多久再重扫一次以跨过远程挂载的目录缓存 TTL
+const syncRescanWait = 1200 * time.Millisecond
+
 func syncTasksPath() string {
 	dir := os.Getenv("XBOX_DATA")
 	if dir == "" {
@@ -338,26 +341,11 @@ func indexUnchanged(e syncIdxEnt, f srcEntry) bool {
 	return d <= int64(2*time.Second)
 }
 
-// syncOnce 执行一次单向同步（源 → 目标）。
-func syncOnce(task SyncTask) (SyncState, error) {
-	start := time.Now()
-	var st SyncState
-
-	excludes := strings.Split(task.Exclude, ",")
-	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
-	files, err := scanSource(task.Source, excludes, func(n int) {
-		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
-	})
-	if err != nil {
-		return st, err
-	}
-	st.Scanned = len(files)
-
-	// 阶段一：确定待处理清单（索引未命中或内容有变的文件）
-	idx := loadSyncIndex(task.ID)
-	newIdx := make(map[string]syncIdxEnt, len(files))
-	srcSet := make(map[string]bool, len(files))
-	var pending []srcEntry
+// planSync 依据源清单与上次索引，算出本轮待复制项、新索引与源文件集合。
+// 抽成独立函数是为了支持「挂载缓存未过期时重扫一次」时复用同一套比对逻辑。
+func planSync(task SyncTask, idx map[string]syncIdxEnt, files []srcEntry) (pending []srcEntry, newIdx map[string]syncIdxEnt, srcSet map[string]bool) {
+	newIdx = make(map[string]syncIdxEnt, len(files))
+	srcSet = make(map[string]bool, len(files))
 	for _, f := range files {
 		srcSet[f.rel] = true
 		newIdx[f.rel] = syncIdxEnt{Size: f.size, Mtime: f.mtime.UnixNano()}
@@ -369,6 +357,79 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			log.Printf("[同步] 目标端缺失 %s，将重新复制", f.rel)
 		}
 		pending = append(pending, f)
+	}
+	return pending, newIdx, srcSet
+}
+
+// warmupSource 预热远程挂载的目录项。
+// fnOS 的网盘经「文件管理 → 远程挂载」呈现为本地目录（FUSE/NFS/CIFS 等），
+// 目录项与属性带内核/客户端缓存 TTL：网盘侧刚新增或修改的文件，在 TTL 内
+// readdir/stat 可能仍返回旧结果，表现为「到了同步间隔点却扫不到变化、不复制」。
+// 反复 open + 全量 readdir + close 会促使文件系统重新拉取目录项，提高下一轮命中率。
+// 只预热根目录及一级子目录（扫描本身会全量遍历，此处只求打破缓存，控制开销）。
+func warmupSource(root string) {
+	const maxDirs = 32 // 只预热有限个一级子目录，避免超大网盘目录造成额外开销
+	dirs := []string{root}
+	if d, err := os.Open(root); err == nil {
+		names, _ := d.Readdirnames(512) // 限制读取条目数，取到前若干项即可
+		_ = d.Close()
+		for _, n := range names {
+			if len(dirs) > maxDirs {
+				break
+			}
+			p := filepath.Join(root, n)
+			if fi, serr := os.Stat(p); serr == nil && fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
+				dirs = append(dirs, p)
+			}
+		}
+	}
+	for i := 0; i < 2; i++ {
+		for _, d := range dirs {
+			if h, err := os.Open(d); err == nil {
+				_, _ = h.Readdirnames(64) // 走一遍 readdir 即可触发刷新
+				_ = h.Close()
+			}
+		}
+		if i == 0 && len(dirs) > 1 {
+			time.Sleep(150 * time.Millisecond) // 给网络文件系统一点刷新时间
+		}
+	}
+}
+
+// syncOnce 执行一次单向同步（源 → 目标）。
+func syncOnce(task SyncTask) (SyncState, error) {
+	start := time.Now()
+	var st SyncState
+
+	excludes := strings.Split(task.Exclude, ",")
+	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
+	warmupSource(task.Source) // 扫描前打破挂载目录缓存，避免网盘侧刚变更的文件读不到
+	files, err := scanSource(task.Source, excludes, func(n int) {
+		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
+	})
+	if err != nil {
+		return st, err
+	}
+	st.Scanned = len(files)
+
+	// 阶段一：确定待处理清单（索引未命中或内容有变的文件）
+	idx := loadSyncIndex(task.ID)
+	pending, newIdx, srcSet := planSync(task, idx, files)
+
+	// 挂载缓存兜底：本轮判定「无变化」时，可能只是远程挂载的目录项缓存还没过期
+	// （网盘侧已新增/修改，readdir 仍返回旧结果）。等待一个短窗口后预热重扫一次，
+	// 跨过常见的秒级 TTL。实时模式本身轮询间隔很短（1~2s），跳过以免反复空转。
+	if len(pending) == 0 && len(idx) > 0 && !task.Realtime {
+		time.Sleep(syncRescanWait)
+		warmupSource(task.Source)
+		if files2, err2 := scanSource(task.Source, excludes, nil); err2 == nil && len(files2) > 0 {
+			if p2, n2, s2 := planSync(task, idx, files2); len(p2) > 0 {
+				log.Printf("[同步] %s 挂载缓存刷新后重扫，取到 %d 项待复制", task.ID, len(p2))
+				files, pending, newIdx, srcSet = files2, p2, n2, s2
+				st.Scanned = len(files)
+				setSyncState(task.ID, func(x *SyncState) { x.Scanning = len(files) })
+			}
+		}
 	}
 	st.Total = len(pending)
 	var totalBytes int64
