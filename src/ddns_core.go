@@ -116,6 +116,7 @@ func (r *ddnsRuntime) scan() {
 		iv = 30 * time.Second
 	}
 	now := time.Now()
+	dirty := false // 只有本轮真的改过记录状态才落盘（原来每 15s 无条件写一次配置）
 	for i := range cfg.Records {
 		rec := &cfg.Records[i]
 		if !rec.Enabled {
@@ -129,6 +130,7 @@ func (r *ddnsRuntime) scan() {
 				rec.LastCheckAt = now
 				rec.LastStatus = "failed"
 				rec.LastMessage = "IP 解析失败: " + err.Error()
+				dirty = true
 			}
 			continue
 		}
@@ -139,10 +141,13 @@ func (r *ddnsRuntime) scan() {
 			continue
 		}
 		r.syncRecord(rec)
+		dirty = true
 	}
-	r.mu.Lock()
-	_ = r.saveLocked()
-	r.mu.Unlock()
+	if dirty {
+		r.mu.Lock()
+		_ = r.saveLocked()
+		r.mu.Unlock()
+	}
 }
 
 func (r *ddnsRuntime) syncRecord(rec *DDNSRecord) {

@@ -103,12 +103,47 @@ func loadSyncTasks() []SyncTask {
 
 func saveSyncTasks(tasks []SyncTask) error {
 	syncStore.mu.Lock()
-	defer syncStore.mu.Unlock()
 	b, err := json.MarshalIndent(tasks, "", "  ")
 	if err != nil {
+		syncStore.mu.Unlock()
 		return err
 	}
-	return os.WriteFile(syncTasksPath(), b, 0o600)
+	err = os.WriteFile(syncTasksPath(), b, 0o600)
+	syncStore.mu.Unlock()
+	if err == nil {
+		setSyncTasksCache(tasks) // 落盘成功才同步内存，保证两者一致
+	}
+	return err
+}
+
+// 任务列表常驻内存：调度器每秒、面板每 1.5s 轮询都要读任务列表，
+// 若每次都打开 cloud-sync.json 解析，等于持续的小文件随机读。只在保存时更新缓存。
+var (
+	syncTasksMu     sync.Mutex
+	syncTasksMem    []SyncTask
+	syncTasksLoaded bool
+)
+
+// cachedSyncTasks 取任务列表（优先内存；返回副本，调用方可自由修改）
+func cachedSyncTasks() []SyncTask {
+	syncTasksMu.Lock()
+	if !syncTasksLoaded {
+		syncTasksMem = loadSyncTasks()
+		syncTasksLoaded = true
+	}
+	out := make([]SyncTask, len(syncTasksMem))
+	copy(out, syncTasksMem)
+	syncTasksMu.Unlock()
+	return out
+}
+
+func setSyncTasksCache(tasks []SyncTask) {
+	cp := make([]SyncTask, len(tasks))
+	copy(cp, tasks)
+	syncTasksMu.Lock()
+	syncTasksMem = cp
+	syncTasksLoaded = true
+	syncTasksMu.Unlock()
 }
 
 func syncStateOf(id string) SyncState {
@@ -805,7 +840,7 @@ func (s *Server) startSyncScheduler() {
 	go func() {
 		last := map[string]time.Time{}
 		for {
-			for _, t := range loadSyncTasks() {
+			for _, t := range cachedSyncTasks() {
 				if !t.Enabled {
 					continue
 				}
@@ -841,22 +876,53 @@ func (s *Server) startSyncScheduler() {
 // ---------- HTTP 接口 ----------
 
 func (s *Server) handleSyncList(w http.ResponseWriter, r *http.Request) {
-	tasks := loadSyncTasks()
+	tasks := cachedSyncTasks()
 	out := make([]map[string]any, 0, len(tasks))
 	for _, t := range tasks {
 		st := syncStateOf(t.ID)
-		_, sErr := os.Stat(t.Source)
-		_, tErr := os.Stat(t.Target)
+		sOk, tOk := cachedPathReachable(t)
 		out = append(out, map[string]any{
 			"id": t.ID, "name": t.Name, "source": t.Source, "target": t.Target,
 			"mirror": t.Mirror, "interval": t.Interval, "exclude": t.Exclude,
 			"realtime": t.Realtime, "watchSec": t.WatchSec,
 			"enabled": t.Enabled,
 			"state":   st,
-			"sourceOk": sErr == nil, "targetOk": tErr == nil,
+			"sourceOk": sOk, "targetOk": tOk,
 		})
 	}
 	ok(w, map[string]any{"tasks": out})
+}
+
+// 源/目标可达性缓存：面板每 1.5s 轮询都会查一次，而源是网盘远程挂载时
+// 一次 stat 可能要几百毫秒甚至更久，每次都实时探测会把面板拖卡。
+// 缓存 20 秒，既能让用户及时发现挂载掉线，又不至于高频骚扰远程挂载。
+var (
+	syncReachMu  sync.Mutex
+	syncReachMem = map[string]syncReach{}
+)
+
+type syncReach struct {
+	at       time.Time
+	sourceOk bool
+	targetOk bool
+}
+
+func cachedPathReachable(t SyncTask) (sourceOk, targetOk bool) {
+	key := t.ID + "|" + t.Source + "|" + t.Target
+	syncReachMu.Lock()
+	if c, ok := syncReachMem[key]; ok && time.Since(c.at) < 20*time.Second {
+		syncReachMu.Unlock()
+		return c.sourceOk, c.targetOk
+	}
+	syncReachMu.Unlock()
+
+	_, sErr := os.Stat(t.Source)
+	_, tErr := os.Stat(t.Target)
+	sourceOk, targetOk = sErr == nil, tErr == nil
+	syncReachMu.Lock()
+	syncReachMem[key] = syncReach{at: time.Now(), sourceOk: sourceOk, targetOk: targetOk}
+	syncReachMu.Unlock()
+	return sourceOk, targetOk
 }
 
 func (s *Server) handleSyncSave(w http.ResponseWriter, r *http.Request) {
@@ -901,7 +967,7 @@ func (s *Server) handleSyncSave(w http.ResponseWriter, r *http.Request) {
 		t.WatchSec = 2
 	}
 
-	tasks := loadSyncTasks()
+	tasks := cachedSyncTasks()
 	found := false
 	for i := range tasks {
 		if tasks[i].ID == t.ID {
@@ -923,7 +989,7 @@ func (s *Server) handleSyncSave(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSyncDelete(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
-	tasks := loadSyncTasks()
+	tasks := cachedSyncTasks()
 	kept := make([]SyncTask, 0, len(tasks))
 	found := false
 	for _, t := range tasks {
@@ -958,7 +1024,7 @@ func (s *Server) handleSyncRun(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "上一轮同步仍在进行中（大网盘扫描可能需要几分钟），请等它完成后再试")
 		return
 	}
-	for _, t := range loadSyncTasks() {
+	for _, t := range cachedSyncTasks() {
 		if t.ID == id {
 			go runSyncTask(t)
 			ok(w, map[string]any{"started": id})
@@ -972,7 +1038,7 @@ func (s *Server) handleSyncRun(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSyncPause(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	on := r.URL.Query().Get("on") == "1"
-	tasks := loadSyncTasks()
+	tasks := cachedSyncTasks()
 	found := false
 	for i := range tasks {
 		if tasks[i].ID == id {
