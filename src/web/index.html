@@ -16,12 +16,15 @@
   --radius:8px;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text1);font-size:14px}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text1);font-size:14px;overflow-x:auto}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-thumb{background:#C9CDD4;border-radius:4px}
 
 /* ===== 布局骨架 ===== */
-.app{display:flex;flex-direction:column;height:100vh;height:100dvh} /* 无登录态：面板直接渲染（访问控制由 127.0.0.1 回环绑定 + fnOS 远程访问体系承担） */
+.app{display:flex;flex-direction:column;height:100vh;height:100dvh}
+/* 桌面端最小宽度：再窄会让「存储空间」的用量文本压到进度条上，
+   因此到此为止（整页横向滚动），保证任何拖动宽度下都不压字。手机端不受影响。 */
+@media(min-width:761px){.app{min-width:1100px}} /* 无登录态：面板直接渲染（访问控制由 127.0.0.1 回环绑定 + fnOS 远程访问体系承担） */
 .main{display:flex;flex:1;overflow:hidden}
 .sidebar{width:200px;background:var(--card);border-right:1px solid var(--border);padding:12px 8px;flex-shrink:0;display:flex;flex-direction:column;gap:2px;overflow-y:auto}
 .menu-item{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:6px;cursor:pointer;color:var(--text2);transition:.15s;user-select:none;font-size:14px}
@@ -115,7 +118,7 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .grid2-equal{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch}
 .grid2-equal>.card{display:flex;flex-direction:column}
 .grid2-equal>.card>.card-body{flex:1;display:flex;flex-direction:column}
-@media(max-width:1100px){.grid2-equal{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:1280px){.grid2-equal{grid-template-columns:minmax(0,1fr)}}
 /* 系统信息键值行纵向均匀分布填满卡高 */
 .kv-fill{display:flex;flex-direction:column;flex:1}
 .kv-fill .kv{margin:0}
@@ -142,17 +145,18 @@ body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;backgr
 .vdisk{display:inline-flex;align-items:center;gap:2px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:1px 6px;white-space:nowrap}
 /* 存储空间每卷区块：桌面=紧凑单行(挂载点+用量/进度条/元信息横排)；手机=三段式堆叠(见媒体查询覆盖) */
 /* 存储空间：容器统一列轨道，各行 subgrid 继承 → 所有进度条左右严格对齐 */
-#ov-disks{display:grid;grid-template-columns:minmax(0,1fr) 130px auto;column-gap:12px}
+#ov-disks{display:grid;grid-template-columns:minmax(0,1fr) minmax(56px,130px) max-content;column-gap:12px}
 #ov-disks>.empty{grid-column:1/-1}
 .dvol{display:grid;grid-column:1/-1;grid-template-columns:minmax(0,1fr) 130px auto;column-gap:12px;align-items:center;padding:8px 0;border-bottom:1px dashed var(--border)}
 /* 支持 subgrid 时改为继承父轨道，彻底消除逐行列宽差异 */
 @supports(grid-template-columns:subgrid){.dvol{grid-template-columns:subgrid}}
 .dvol:last-child{padding-bottom:8px;border-bottom:none}
-.dvol-h{display:flex;align-items:center;gap:8px;font-size:13px;justify-self:start;min-width:0;overflow:hidden}
+.dvol-h{display:flex;align-items:center;gap:8px;font-size:13px;justify-self:stretch;width:100%;min-width:0;overflow:hidden;flex-wrap:nowrap}
 .dvol-mount{color:var(--text2);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dvol-use{color:var(--text1);font-weight:500;white-space:nowrap;flex-shrink:0}
+/* 用量文本：空间不足时允许换行到下一行（绝不压到进度条上），极端窄时省略 */
+.dvol-use{color:var(--text1);font-weight:500;white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .dvol .bar{width:100%;min-width:0;max-width:100%}
-.dvol-meta{display:flex;justify-self:end;align-items:center;gap:0 6px;font-size:12px;color:var(--text3);white-space:nowrap;flex-wrap:nowrap;justify-content:flex-end}
+.dvol-meta{display:flex;justify-self:end;align-items:center;gap:0 6px;font-size:12px;color:var(--text3);white-space:nowrap;flex-wrap:nowrap;justify-content:flex-end;min-width:0}
 /* 网络信息：网卡纵向列表（替代横滑表格），排列在网关信息之上 */
 .net-list{margin-bottom:10px}
 .net-block{padding:9px 0;border-bottom:1px solid #F7F8FA}
