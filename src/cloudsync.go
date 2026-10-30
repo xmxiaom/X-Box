@@ -673,7 +673,13 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		}
 	}
 
-	saveSyncIndex(task.ID, newIdx)
+	// 索引只在真正变化时落盘。实时模式 1~2s 一轮，若每轮无条件重写索引文件，
+	// 等于每秒刷盘一次（索引大小随文件数增长，可达数百 KB~数 MB），长期是明显的
+	// 写放大、影响 SSD 寿命。无待复制项且文件数未变时索引必然等价——
+	// indexUnchanged 已逐个校验过 size+mtime，此时跳过写入是安全无损的。
+	if len(pending) > 0 || len(newIdx) != len(idx) {
+		saveSyncIndex(task.ID, newIdx)
+	}
 
 	st.Running = false
 	st.LastAt = time.Now()
