@@ -76,6 +76,37 @@ var syncStore struct {
 	busy  map[string]bool
 }
 
+// 暂停/取消控制：每个任务一个「代次」，运行中的一轮记住开跑时的代次，
+// 用户暂停（或删除任务）时代次 +1，运行中的循环发现代次变了就立即中止。
+// 旧实现只把 Enabled 置 false，只影响下一轮调度，正在跑的这一轮照样扫完、
+// 照样复制——表现为「点了暂停状态变了，但还在同步」。
+var (
+	syncCtlMu sync.Mutex
+	syncGen   = map[string]int{}
+)
+
+func syncGenOf(id string) int {
+	syncCtlMu.Lock()
+	defer syncCtlMu.Unlock()
+	return syncGen[id]
+}
+
+// syncBumpGen 让正在运行的那一轮失效（暂停/删除时调用）
+func syncBumpGen(id string) {
+	syncCtlMu.Lock()
+	syncGen[id]++
+	syncCtlMu.Unlock()
+}
+
+func syncGenAborted(id string, gen int) bool {
+	syncCtlMu.Lock()
+	defer syncCtlMu.Unlock()
+	return syncGen[id] != gen
+}
+
+// errSyncPaused 本轮被用户暂停而中止（不是错误，不写入 lastErr）
+var errSyncPaused = errors.New("本轮同步已暂停")
+
 const syncMaxFiles = 800000 // 单次扫描上限：百度网盘等挂载常见几十万文件
 
 // syncRescanWait 本轮判定「无变化」后，等待多久再重扫一次以跨过远程挂载的目录缓存 TTL
@@ -185,10 +216,14 @@ type srcEntry struct {
 }
 
 // scanSource 收集源端文件清单（相对路径）。onProg 每 500 项回调一次（可为 nil）。
-func scanSource(root string, excludes []string, onProg func(int)) ([]srcEntry, error) {
+// aborted 非 nil 时每个条目都检查一次：用户暂停后立即停止遍历（大网盘扫描可能很久）。
+func scanSource(root string, excludes []string, onProg func(int), aborted func() bool) ([]srcEntry, error) {
 	var out []srcEntry
 	root = filepath.Clean(root)
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if aborted != nil && aborted() {
+			return errSyncPaused // 暂停：中断遍历
+		}
 		if err != nil {
 			return nil // 单个文件不可读不致命
 		}
@@ -267,7 +302,9 @@ func sameFileInfo(src srcEntry, dstPath string) bool {
 	return diff <= 2*time.Second
 }
 
-func copyFileWithMtime(src, dst string, mtime time.Time, onProg func(int64)) (int64, error) {
+// copyFileWithMtime 复制单个文件并保留 mtime。
+// onProg 返回 false 表示调用方要求中止（用户暂停），此时立即停药并删除半成品。
+func copyFileWithMtime(src, dst string, mtime time.Time, onProg func(int64) bool) (int64, error) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return 0, err
 	}
@@ -292,7 +329,10 @@ func copyFileWithMtime(src, dst string, mtime time.Time, onProg func(int64)) (in
 			on, ew := out.Write(buf[:nn])
 			written += int64(on)
 			if onProg != nil {
-				onProg(written)
+				if !onProg(written) { // 暂停：中断复制
+					cerr = errSyncPaused
+					break
+				}
 			}
 			if ew != nil {
 				cerr = ew
@@ -724,6 +764,9 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	var st SyncState
 
 	excludes := strings.Split(task.Exclude, ",")
+	// 记录本轮代次：用户暂停/删除任务时 ++，本轮在扫描与复制的检查点会立即中止
+	gen := syncGenOf(task.ID)
+	isAborted := func() bool { return syncGenAborted(task.ID, gen) }
 	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
 	// 扫描前打破挂载目录缓存（网盘侧刚变更的文件否则读不到）；同时把刷新结论记进状态，
 	// 便于用户在面板上直接看到「为什么没刷到新文件」，不必翻系统日志。
@@ -732,9 +775,12 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = rh })
 	files, err := scanSource(task.Source, excludes, func(n int) {
 		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
-	})
+	}, isAborted)
 	if err != nil {
 		return st, err
+	}
+	if isAborted() {
+		return st, errSyncPaused
 	}
 	st.Scanned = len(files)
 
@@ -763,10 +809,16 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	}
 	if len(pending) == 0 && len(idx) > 0 && doRescan {
 		for _, wait := range waits {
+			if isAborted() {
+				return st, errSyncPaused
+			}
 			time.Sleep(wait)
 			rh2 := warmupSource(task.Source) // 再次刷新挂载目录
 			setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = rh2 })
-			files2, err2 := scanSource(task.Source, excludes, nil)
+			files2, err2 := scanSource(task.Source, excludes, nil, isAborted)
+			if errors.Is(err2, errSyncPaused) {
+				return st, errSyncPaused
+			}
 			if err2 != nil || len(files2) == 0 {
 				continue
 			}
@@ -800,6 +852,9 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	copyStart := time.Now()
 	var doneBytes int64
 	for i, f := range pending {
+		if isAborted() { // 暂停：不再开始新文件
+			return st, errSyncPaused
+		}
 		dst := filepath.Join(task.Target, f.rel)
 		if f.isDir {
 			// 目录：不存在则创建（含 mtime 不比对的语义，见 indexUnchanged）
@@ -819,7 +874,10 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			continue
 		}
 		localBase := doneBytes
-		n, cerr := copyFileWithMtime(filepath.Join(task.Source, f.rel), dst, f.mtime, func(w int64) {
+		n, cerr := copyFileWithMtime(filepath.Join(task.Source, f.rel), dst, f.mtime, func(w int64) bool {
+			if isAborted() { // 暂停：大文件中途也立即停药（半成品会被删除）
+				return false
+			}
 			syncYield() // 动态优先级：面板忙/系统负载高时让路
 			setSyncState(task.ID, func(x *SyncState) {
 				x.DoneBytes = localBase + w
@@ -828,7 +886,11 @@ func syncOnce(task SyncTask) (SyncState, error) {
 					x.Speed = fmtBytesRate(float64(x.DoneBytes) / el.Seconds())
 				}
 			})
+			return true
 		})
+		if errors.Is(cerr, errSyncPaused) {
+			return st, errSyncPaused
+		}
 		doneBytes += n
 		done := i + 1
 		if cerr != nil {
@@ -846,6 +908,9 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	//      的一小部分，此时镜像会把目标端文件误删光；
 	//   2. 删除项（文件+空目录）超过 max(100, 已复制数×2) 立即中止；
 	//   3. 目录按深度降序删除，只有空目录才会真正被移除。
+	if isAborted() {
+		return st, errSyncPaused // 暂停时绝不做删除
+	}
 	if task.Mirror && len(idx) > 0 {
 		delLimit := st.Files * 2
 		if delLimit < 100 {
@@ -940,8 +1005,21 @@ func runSyncTask(task SyncTask) {
 		syncStore.mu.Unlock()
 	}()
 
+	startedAt := time.Now()
 	setSyncState(task.ID, func(s *SyncState) { s.Running = true; s.LastErr = "" })
 	st, err := syncOnce(task)
+	if errors.Is(err, errSyncPaused) {
+		// 用户暂停导致本轮中止：不是错误，不留 lastErr，界面显示「已暂停」
+		st.Running = false
+		st.Phase = "paused"
+		st.Speed = ""
+		st.LastAt = time.Now()
+		st.LastOK = true
+		st.Duration = time.Since(startedAt).Round(time.Millisecond).String()
+		setSyncState(task.ID, func(s *SyncState) { *s = st })
+		log.Printf("[同步] 任务 %s 已暂停，本轮中止（已完成 %d 个文件）", task.ID, st.Files)
+		return
+	}
 	if err != nil {
 		st.LastErr = err.Error()
 		st.LastOK = false
@@ -1132,6 +1210,7 @@ func (s *Server) handleSyncDelete(w http.ResponseWriter, r *http.Request) {
 	delete(syncStore.state, id)
 	syncStore.mu.Unlock()
 	dropSyncIndexCache(id) // 同时清掉内存索引，避免残留
+	syncBumpGen(id)        // 若该任务正在跑，立即中止，避免继续往已删除的配置里复制
 	_ = os.Remove(syncIndexPath(id))
 	ok(w, map[string]any{"deleted": id})
 }
@@ -1175,6 +1254,18 @@ func (s *Server) handleSyncPause(w http.ResponseWriter, r *http.Request) {
 	if err := saveSyncTasks(tasks); err != nil {
 		fail(w, 500, "保存失败："+err.Error())
 		return
+	}
+	if !on {
+		// 暂停：让正在跑的这一轮立刻中止（只改 Enabled 只影响下一轮调度，
+		// 会产生「状态变了但还在同步」的错觉），并把状态切成已暂停
+		syncBumpGen(id)
+		setSyncState(id, func(s *SyncState) {
+			if s.Running {
+				s.Running = false
+				s.Phase = "paused"
+				s.Speed = ""
+			}
+		})
 	}
 	ok(w, map[string]any{"id": id, "paused": !on})
 }

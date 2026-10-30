@@ -1124,6 +1124,9 @@ async function loadSyncTasks(){
             ? '<span style="font-size:12px;color:var(--text2)">正在复制 ' + fmtB(done) + ' / ' + fmtB(total) + '（' + pct + '%）' +
               (st.speed ? ' · ' + esc(st.speed) : '') + '</span>'
             : '<span style="font-size:12px;color:var(--text2)">正在准备待复制文件…</span>');
+      } else if(st.phase === 'paused'){
+        // 本轮被用户暂停中止：明确告知已停下，避免误以为还在跑
+        detail = '<span style="font-size:12px;color:var(--text2)">已暂停，本轮同步已中止</span>';
       } else if(st.lastAt){
         detail = '结果：复制 ' + (st.files||0) + ' 个 / ' + fmtB(st.bytes||0) +
           (st.deleted ? (' · 删除 ' + st.deleted + ' 个') : '') +
