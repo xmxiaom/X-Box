@@ -2,11 +2,9 @@
 
 package main
 
-// 非 Linux 平台（开发/测试环境）无 /proc 与 syscall.SIGHUP 语义，直接返回不支持。
+// 非 Linux 平台（开发/测试环境）无 /proc 与 syscall.SIGHUP 语义。
 // 生产环境是 fnOS（Linux），实际刷新逻辑在 sync_mount_linux.go。
 
-import "errors"
-
-func flushRcloneVFS(mountPoint string) (int, error) {
-	return 0, errors.New("仅支持 Linux")
+func flushRcloneVFS(mountPoint, fstype string) (int, string, error) {
+	return 0, "非 Linux 平台不支持 SIGHUP 刷新", nil
 }

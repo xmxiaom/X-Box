@@ -5,11 +5,13 @@ package main
 // 网盘同步：刷新远程挂载的 VFS 目录缓存（Linux 实现）。
 //
 // fnOS「文件管理 → 远程挂载」底层是 rclone FUSE（二进制常被重命名为
-// /usr/trim/bin/webdav），其 VFS 层缓存目录列表（--dir-cache-time 默认 5 分钟）。
-// 网盘侧新增/修改的文件在缓存过期前对挂载目录不可见——这是「同步到点却扫不到
-// 新文件」的根因。rclone 官方解法：向进程发 SIGHUP 立即丢弃全部目录缓存
-// （https://rclone.org/commands/rclone_serve_nfs/ 的 VFS Directory Cache 一节），
-// 无需开启 rc 服务，也无需 root 之外的特殊权限（向自己用户的进程发信号即可）。
+// /usr/trim/bin/webdav），其 VFS 层缓存目录列表（--dir-cache-time）。网盘侧
+// 新增/修改的文件在缓存过期前对挂载目录不可见——这是「同步到点却扫不到新文件」
+// 的根因。rclone 官方解法：向进程发 SIGHUP 立即丢弃全部目录缓存
+// （rclone 文档 VFS Directory Cache 一节），无需开启 rc 服务。
+//
+// 判定逻辑在 cloudsync.go 的 decideFlushTargets（纯函数，跨平台单测覆盖），
+// 本文件只负责「读 /proc」和「发信号」两个系统动作。
 
 import (
 	"bytes"
@@ -22,17 +24,13 @@ import (
 	"syscall"
 )
 
-// flushRcloneVFS 找到服务 mountPoint 的 rclone 进程并发 SIGHUP。
-// 匹配规则：进程 cmdline 中同时出现 rclone/webdav 字样与挂载点路径
-// （mount 命令必然包含挂载点参数）。fnOS 可能有多个网盘挂载共用一个进程，
-// SIGHUP 会刷新该进程的全部缓存，副作用仅是多拉几次目录列表，可接受。
-func flushRcloneVFS(mountPoint string) (int, error) {
+// listProcs 采集当前所有进程的 pid / 命令行 / 可执行名。
+func listProcs() ([]syncProc, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	signalled := 0
-	var lastErr error
+	out := make([]syncProc, 0, 256)
 	for _, e := range entries {
 		pid, cerr := strconv.Atoi(e.Name())
 		if cerr != nil || pid <= 1 || pid == os.Getpid() {
@@ -40,26 +38,51 @@ func flushRcloneVFS(mountPoint string) (int, error) {
 		}
 		b, cerr := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
 		if cerr != nil {
-			continue // 权限不足或进程已退出，跳过
+			continue // 权限不足或进程已退出
 		}
 		args := strings.Split(string(bytes.TrimRight(b, "\x00")), "\x00")
-		if len(args) == 0 || !isRcloneCmdline(args, mountPoint) {
+		if len(args) == 0 || args[0] == "" {
 			continue
 		}
+		exe := ""
+		if link, lerr := os.Readlink(filepath.Join("/proc", e.Name(), "exe")); lerr == nil {
+			exe = strings.ToLower(filepath.Base(link))
+		}
+		out = append(out, syncProc{pid: pid, args: args, exe: exe})
+	}
+	return out, nil
+}
+
+// flushRcloneVFS 找到服务 mountPoint 的 rclone 进程并发 SIGHUP。
+// 返回 (命中进程数, 诊断说明, 错误)；诊断说明写进同步状态给面板显示。
+func flushRcloneVFS(mountPoint, fstype string) (int, string, error) {
+	procs, err := listProcs()
+	if err != nil {
+		return 0, "读 /proc 失败: " + err.Error(), err
+	}
+	pids, hint := decideFlushTargets(procs, mountPoint, fstype)
+	if len(pids) == 0 {
+		return 0, hint, nil
+	}
+	signalled := 0
+	var permErr, lastErr error
+	for _, pid := range pids {
 		if serr := syscall.Kill(pid, syscall.SIGHUP); serr != nil {
 			lastErr = fmt.Errorf("SIGHUP pid=%d: %v", pid, serr)
+			if serr == syscall.EPERM || serr == syscall.EACCES {
+				permErr = serr
+			}
 			continue
 		}
 		signalled++
 		log.Printf("[同步] 已向 rclone 进程 %d 发送 SIGHUP 刷新挂载缓存（%s）", pid, mountPoint)
 	}
-	if signalled > 0 {
-		return signalled, nil
+	switch {
+	case signalled > 0:
+		return signalled, fmt.Sprintf("已 SIGHUP 刷新 %d 个进程", signalled), nil
+	case permErr != nil:
+		return 0, "SIGHUP 权限不足（应用非 root，给挂载进程发信号被拒绝）", permErr
+	default:
+		return 0, "SIGHUP 失败: " + lastErr.Error(), lastErr
 	}
-	if lastErr != nil {
-		return 0, lastErr
-	}
-	return 0, fmt.Errorf("未找到服务 %s 的 rclone 进程", mountPoint)
 }
-
-// isRcloneCmdline 的实现见 cloudsync.go（纯函数跨平台共用，便于单测）。

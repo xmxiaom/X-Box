@@ -64,6 +64,9 @@ type SyncState struct {
 	TotalBytes int64     `json:"totalBytes"` // 本轮待复制总字节
 	DoneBytes  int64     `json:"doneBytes"`  // 已复制字节（运行中实时更新）
 	Duration string    `json:"duration"` // 上次耗时
+	// RefreshHint 挂载目录刷新的诊断结果（如「已 SIGHUP pid=123」/「未找到 rclone 进程」/
+	// 「SIGHUP 权限不足」）。挂在状态里是为了让用户不用看系统日志就能在面板上看到原因。
+	RefreshHint string `json:"refreshHint"`
 }
 
 var syncStore struct {
@@ -425,6 +428,69 @@ func indexUnchanged(e syncIdxEnt, f srcEntry) bool {
 	return d <= int64(2*time.Second)
 }
 
+// syncProc 一条进程信息（从 /proc 采集，或测试里伪造）
+type syncProc struct {
+	pid  int
+	args []string
+	exe  string // 可执行文件名（小写，取 /proc/<pid>/exe 的 basename）
+}
+
+// decideFlushTargets 从进程表里挑出「可以安全 SIGHUP」的 rclone 挂载进程。
+// 纯函数：开发机（Windows）也能单测，覆盖 fnOS 的真实命令行形态。
+//
+// 判定必须严格——SIGHUP 对非 rclone 进程是终止信号，误判会让网盘挂载掉线。
+// 规则：命令行必须精确含该挂载点，且满足其一：
+//   - 出现 rclone 专属参数（--dir-cache-time / --vfs-cache-mode / --poll-interval / --vfs-cache-max-age）
+//   - 可执行名含 rclone
+//   - 挂载类型本身是 fuse.rclone 且可执行名含 webdav（fnOS 把 rclone 改名成 webdav）
+//
+// 返回待发信号的 pid 列表与诊断说明（诊断会显示在面板上）。
+func decideFlushTargets(procs []syncProc, mountPoint, fstype string) (pids []int, hint string) {
+	isFuseRclone := strings.Contains(strings.ToLower(fstype), "rclone")
+	matched := 0
+	var seen []string
+	for _, p := range procs {
+		if p.pid <= 1 || !hasArg(p.args, mountPoint) {
+			continue
+		}
+		matched++
+		if len(seen) < 3 {
+			seen = append(seen, fmt.Sprintf("pid%d(%s): %s", p.pid, p.exe, strings.Join(p.args, " ")))
+		}
+		if !isRcloneCmdline(p.args, mountPoint) {
+			nameOK := strings.Contains(p.exe, "rclone") ||
+				(isFuseRclone && strings.Contains(p.exe, "webdav"))
+			if !nameOK {
+				continue
+			}
+		}
+		pids = append(pids, p.pid)
+	}
+	switch {
+	case len(pids) > 0:
+		return pids, ""
+	case !isFuseRclone:
+		// 不是 fuse.rclone（本地盘/其他文件系统）：本来就没有 VFS 目录缓存问题
+		return nil, "非 rclone 挂载（fstype=" + fstype + "），无 SIGHUP 可用"
+	case matched > 0:
+		return nil, "找到服务该挂载点的进程但无法确认是 rclone，已跳过（" + strings.Join(seen, " | ") + "）"
+	default:
+		return nil, "未找到服务 " + mountPoint + " 的挂载进程"
+	}
+}
+
+func hasArg(args []string, want string) bool {
+	if want == "" {
+		return false
+	}
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
 // isRcloneCmdline 判断一组命令行参数是否为服务 mountPoint 的 rclone 挂载进程。
 // 纯函数（跨平台共用，便于单测）。
 //
@@ -603,17 +669,23 @@ func refreshRemoteMount(p string) bool {
 //  2. rclone rc vfs/refresh（需挂载进程带 --rc，部分场景可用）
 //  3. open + readdir 预热兜底（对内核 dentry 缓存有效，对 daemon 自身缓存无效）
 // 只预热根目录及有限个一级子目录（扫描本身会全量遍历，此处只求打破缓存、控制开销）。
-func warmupSource(root string) {
-	mp, _, _ := mountInfoOf(root)
+func warmupSource(root string) string {
+	mp, fstype, dev := mountInfoOf(root)
+	failHint := ""
 	if mp != "" {
-		if n, err := flushRcloneVFS(mp); err == nil && n > 0 {
+		if n, hint, err := flushRcloneVFS(mp, fstype); err == nil && n > 0 {
 			time.Sleep(300 * time.Millisecond) // 给 rclone 重新拉取目录列表的时间
-			return
+			return hint
+		} else if hint != "" {
+			failHint = hint
 		}
+	} else {
+		failHint = "路径不在任何挂载点内"
 	}
 	if refreshRemoteMount(root) {
-		return // rc vfs/refresh 已真正刷新缓存
+		return "rc vfs/refresh 已刷新" // rc vfs/refresh 已真正刷新缓存
 	}
+	_ = dev
 	const maxDirs = 32
 	dirs := []string{root}
 	if d, err := os.Open(root); err == nil {
@@ -640,6 +712,10 @@ func warmupSource(root string) {
 			time.Sleep(150 * time.Millisecond) // 给网络文件系统一点刷新时间
 		}
 	}
+	if failHint != "" {
+		return "readdir 兜底（" + failHint + "）"
+	}
+	return "readdir 兜底"
 }
 
 // syncOnce 执行一次单向同步（源 → 目标）。
@@ -649,7 +725,11 @@ func syncOnce(task SyncTask) (SyncState, error) {
 
 	excludes := strings.Split(task.Exclude, ",")
 	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
-	warmupSource(task.Source) // 扫描前打破挂载目录缓存，避免网盘侧刚变更的文件读不到
+	// 扫描前打破挂载目录缓存（网盘侧刚变更的文件否则读不到）；同时把刷新结论记进状态，
+	// 便于用户在面板上直接看到「为什么没刷到新文件」，不必翻系统日志。
+	rh := warmupSource(task.Source)
+	st.RefreshHint = rh // 同时写进本地副本：runSyncTask 最后会用 st 整体覆盖共享状态
+	setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = rh })
 	files, err := scanSource(task.Source, excludes, func(n int) {
 		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
 	})
@@ -684,7 +764,8 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	if len(pending) == 0 && len(idx) > 0 && doRescan {
 		for _, wait := range waits {
 			time.Sleep(wait)
-			warmupSource(task.Source) // 再次刷新挂载目录
+			rh2 := warmupSource(task.Source) // 再次刷新挂载目录
+			setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = rh2 })
 			files2, err2 := scanSource(task.Source, excludes, nil)
 			if err2 != nil || len(files2) == 0 {
 				continue
