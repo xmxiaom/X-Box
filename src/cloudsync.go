@@ -838,6 +838,16 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		syncIdle[task.ID] = 0
 		syncIdleMu.Unlock()
 	}
+
+	// 网关直读兜底：挂载层（rclone VFS / fnOS 网关）的目录缓存可能长期不失效，
+	// 网盘侧新增的文件在挂载目录里看不到、常规扫描永远扫不出来。这里直接向本机
+	// WebDAV 网关要目录清单，把索引里没有的新文件经网关下载到目标，绕开挂载目录。
+	if len(pending) == 0 && len(idx) > 0 && !isAborted() {
+		if _, hint := davFillMissing(task, excludes, idx, newIdx, &st, gen); hint != "" {
+			st.RefreshHint = hint
+			setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = hint })
+		}
+	}
 	st.Total = len(pending)
 	var totalBytes int64
 	for _, f := range pending {
