@@ -53,10 +53,37 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) {
 		return json.RawMessage(b)
 	}
 	doc.Configs["ddns"] = raw("ddns.json")
-	doc.Configs["cloudSync"] = raw("cloud-sync.json")
+	doc.Configs["cloudSync"] = normalizeSyncConfigRaw(raw("cloud-sync.json"))
 	doc.Configs["speedtestNodes"] = raw("speedtest_nodes.json")
 	doc.Configs["media"] = raw("media.json")
 	ok(w, map[string]any{"app": doc.App, "version": doc.Version, "exportedAt": doc.ExportedAt, "configs": doc.Configs})
+}
+
+// normalizeSyncConfigRaw 导出的同步任务统一成「单一检测间隔」：
+// 旧配置里勾了实时的按原实时间隔折算，避免导出文件里同时存在实时开关与间隔。
+func normalizeSyncConfigRaw(rawIn json.RawMessage) json.RawMessage {
+	if len(rawIn) == 0 {
+		return rawIn
+	}
+	var tasks []SyncTask
+	if json.Unmarshal(rawIn, &tasks) != nil {
+		return rawIn
+	}
+	for i := range tasks {
+		if tasks[i].Interval <= 0 && tasks[i].Realtime {
+			iv := tasks[i].WatchSec
+			if iv < 1 {
+				iv = 2
+			}
+			tasks[i].Interval = iv
+		}
+		tasks[i].Realtime = false
+		tasks[i].WatchSec = 0
+	}
+	if b, err := json.MarshalIndent(tasks, "", "  "); err == nil {
+		return json.RawMessage(b)
+	}
+	return rawIn
 }
 
 // handleConfigImport POST /api/config/import — 校验后逐项落盘并热更新内存状态。

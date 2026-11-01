@@ -38,8 +38,10 @@ type SyncTask struct {
 	Target   string `json:"target"`  // 本地目标目录（绝对路径）
 	Mirror   bool   `json:"mirror"`  // 源删除时同步删除目标
 	Interval int    `json:"interval"`  // 秒；0 = 仅手动
-	Realtime bool   `json:"realtime"`  // 实时变化同步（轮询检测，间隔 WatchSec 秒）
-	WatchSec int    `json:"watchSec"`  // 实时检测间隔秒数（默认 2）
+	// 旧版「实时开关 + 实时间隔」已合并为单一 Interval（检测间隔秒）。
+	// 这两个字段只用于读取旧配置时折算，保存后不再写回。
+	Realtime bool   `json:"realtime,omitempty"`
+	WatchSec int    `json:"watchSec,omitempty"`
 	Exclude  string `json:"exclude"`   // 逗号分隔通配，如 *.tmp,.DS_Store
 	Enabled  bool   `json:"enabled"`
 }
@@ -175,6 +177,18 @@ func cachedSyncTasks() []SyncTask {
 	}
 	out := make([]SyncTask, len(syncTasksMem))
 	copy(out, syncTasksMem)
+	for i := range out {
+		// 旧配置迁移：勾了「实时」的按原实时间隔折成统一间隔
+		if out[i].Realtime && out[i].Interval <= 0 {
+			iv := out[i].WatchSec
+			if iv < 1 {
+				iv = 2
+			}
+			out[i].Interval = iv
+		}
+		out[i].Realtime = false
+		out[i].WatchSec = 0
+	}
 	syncTasksMu.Unlock()
 	return out
 }
@@ -504,8 +518,8 @@ func planSync(task SyncTask, idx map[string]syncIdxEnt, files []srcEntry, verify
 // shouldVerifyTarget 决定本轮是否做目标端存在性校验。
 // 普通间隔模式每轮都校验；实时模式每 12 轮（约 24s）校验一次，兼顾正确性与磁盘压力。
 func shouldVerifyTarget(task SyncTask) bool {
-	if !task.Realtime {
-		return true
+	if task.Interval <= 0 || task.Interval > 5 {
+		return true // 低频任务每轮都校验
 	}
 	syncVerifyMu.Lock()
 	defer syncVerifyMu.Unlock()
@@ -547,7 +561,7 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	//   - 实时模式：本身 1~2s 一轮，若每轮都重扫会让网盘扫描翻倍、明显拖慢；
 	//     改为每 30 轮（约 60s）做一次深度刷新重扫，覆盖挂载 daemon 的缓存/poll 周期
 	doRescan, waits := false, []time.Duration{syncRescanWait, 3 * time.Second}
-	if task.Realtime {
+	if task.Interval > 0 && task.Interval <= 5 {
 		syncIdleMu.Lock()
 		syncIdle[task.ID]++
 		doRescan = syncIdle[task.ID]%30 == 0
@@ -803,15 +817,10 @@ func (s *Server) startSyncScheduler() {
 				if !t.Enabled {
 					continue
 				}
-				iv := 2 * time.Second
-				if !t.Realtime {
-					if t.Interval <= 0 {
-						continue
-					}
-					iv = time.Duration(t.Interval) * time.Second
-				} else if t.WatchSec >= 1 {
-					iv = time.Duration(t.WatchSec) * time.Second
+				if t.Interval <= 0 {
+					continue // 0 = 仅手动
 				}
+				iv := time.Duration(t.Interval) * time.Second
 				if d := time.Since(last[t.ID]); d >= iv {
 					// 上一轮还在跑（远程挂载扫描慢，常见）时**不推进触发时间**，
 					// 否则每轮都撞上忙碌、每轮都被跳过，任务就永远不再同步。
@@ -843,7 +852,6 @@ func (s *Server) handleSyncList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id": t.ID, "name": t.Name, "source": t.Source, "target": t.Target,
 			"mirror": t.Mirror, "interval": t.Interval, "exclude": t.Exclude,
-			"realtime": t.Realtime, "watchSec": t.WatchSec,
 			"enabled": t.Enabled,
 			"state":   st,
 			"sourceOk": sOk, "targetOk": tOk,
@@ -919,12 +927,23 @@ func (s *Server) handleSyncSave(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "源目录不存在或不是目录："+t.Source)
 		return
 	}
+	// 旧配置（实时开关 + 实时间隔）折算成统一检测间隔后再保存
+	if t.Interval <= 0 && t.Realtime {
+		iv := t.WatchSec
+		if iv < 1 {
+			iv = 2
+		}
+		t.Interval = iv
+	}
 	if t.Interval < 0 {
 		t.Interval = 0
 	}
-	if t.WatchSec < 1 || t.WatchSec > 3600 {
-		t.WatchSec = 2
+	if t.Interval > 3600 {
+		t.Interval = 3600
 	}
+	// 旧字段不再使用，清空避免继续传播
+	t.Realtime = false
+	t.WatchSec = 0
 
 	tasks := cachedSyncTasks()
 	found := false
