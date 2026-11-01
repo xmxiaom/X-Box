@@ -513,36 +513,11 @@ func shouldVerifyTarget(task SyncTask) bool {
 	return syncVerifyCnt[task.ID]%12 == 1 // 首轮也校验
 }
 
-// warmupSource 预热远程挂载的目录项（open + readdir + close）。
-// 对内核 dentry 缓存的秒级 TTL 有效；挂载层自身的长缓存无法从用户态打破，
-// 这是已知限制，不再做额外尝试。只预热根目录及有限个一级子目录，控制开销。
+// warmupSource 在扫描前让挂载层丢弃源目录的目录缓存，
+// 使网盘侧刚新增/修改的文件立刻可见（实现见 refreshMountCache）。
 func warmupSource(root string) {
-	const maxDirs = 32
-	dirs := []string{root}
-	if d, err := os.Open(root); err == nil {
-		names, _ := d.Readdirnames(512)
-		_ = d.Close()
-		for _, n := range names {
-			if len(dirs) > maxDirs {
-				break
-			}
-			p := filepath.Join(root, n)
-			if fi, serr := os.Stat(p); serr == nil && fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
-				dirs = append(dirs, p)
-			}
-		}
-	}
-	for i := 0; i < 2; i++ {
-		for _, d := range dirs {
-			if h, err := os.Open(d); err == nil {
-				_, _ = h.Readdirnames(64)
-				_ = h.Close()
-			}
-		}
-		if i == 0 && len(dirs) > 1 {
-			time.Sleep(150 * time.Millisecond)
-		}
-	}
+	_ = root
+	refreshMountCache()
 }
 
 // syncOnce 执行一次单向同步（源 → 目标）。
