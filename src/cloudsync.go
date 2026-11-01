@@ -64,6 +64,9 @@ type SyncState struct {
 	TotalBytes int64     `json:"totalBytes"` // 本轮待复制总字节
 	DoneBytes  int64     `json:"doneBytes"`  // 已复制字节（运行中实时更新）
 	Duration string    `json:"duration"` // 上次耗时
+	// RefreshHint 本轮挂载目录刷新的结果（一句话）：面板直接显示这句，
+	// 用户不必翻系统日志就能看出刷新有没有真的执行、卡在哪一步。
+	RefreshHint string `json:"refreshHint,omitempty"`
 }
 
 var syncStore struct {
@@ -537,8 +540,13 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	gen := syncGenOf(task.ID)
 	isAborted := func() bool { return syncGenAborted(task.ID, gen) }
 	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
-	// 扫描前让 rclone 丢弃该目录的缓存，否则网盘侧刚转存的文件在挂载目录里看不到
-	refreshMountCache(task.Source)
+	// 扫描前让挂载服务重新列一次源目录（含子目录）：网盘侧刚转存的文件在
+	// 目录缓存过期前对挂载目录不可见，不先刷新这一轮扫描必然看不到。
+	// 刷新是同步等待的（只更新内存目录缓存、不写磁盘），完成后再扫描。
+	if _, hint := refreshMountCache(task.Source); hint != "" {
+		st.RefreshHint = hint // 同时写进本地副本：结束时会用 st 整体覆盖共享状态
+		setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = hint })
+	}
 	files, err := scanSource(task.Source, excludes, func(n int) {
 		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
 	}, isAborted)

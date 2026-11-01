@@ -35,6 +35,7 @@ var (
 	rcloneLastAt time.Time
 	rcloneLastOK bool
 	rcloneNote   string
+	rclonePrevNote string
 )
 
 // rcloneSockets 列出所有 rclone rc socket（不同用户各有一个）
@@ -45,6 +46,11 @@ func rcloneSockets() []string {
 }
 
 func rcloneRC(sock, endpoint string, payload map[string]any) (map[string]any, error) {
+	return rcloneRCTimeout(sock, endpoint, payload, 10*time.Second)
+}
+
+// rcloneRCTimeout 同 rcloneRC，但可指定超时（整树刷新可能要几十秒）
+func rcloneRCTimeout(sock, endpoint string, payload map[string]any, timeout time.Duration) (map[string]any, error) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
@@ -58,7 +64,7 @@ func rcloneRC(sock, endpoint string, payload map[string]any) (map[string]any, er
 			return d.DialContext(ctx, "unix", sock)
 		},
 	}
-	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr}
+	cl := &http.Client{Timeout: timeout, Transport: tr}
 	req, err := http.NewRequest("POST", "http://unix/"+endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -109,21 +115,36 @@ func pickMount(mounts []rcMount, srcPath string) (rcMount, string, bool) {
 	return best, rel, true
 }
 
-// refreshMountCache 丢弃源目录在挂载内的目录缓存。
-// 3 秒节流：实时模式 1~2 秒一轮，不必每轮都让远端重新列目录。
-func refreshMountCache(srcPath string) bool {
+// refreshMountCache 让挂载服务重新列一次同步源目录（含子目录），返回是否成功与一句诊断。
+//
+// 为什么必须同步等待：vfs/refresh 是「现在去列一遍目录并更新缓存」。若带 _async，
+// 它只是排个后台任务就返回，紧接着的扫描读到的仍是旧缓存——表面刷新成功、实际没生效。
+// 所以这里不传 _async，等它列完再让调用方扫描（纯网络+内存操作，不写磁盘）。
+func refreshMountCache(srcPath string) (bool, string) {
 	rcloneMu.Lock()
 	defer rcloneMu.Unlock()
 	if time.Since(rcloneLastAt) < 10*time.Second {
-		return rcloneLastOK
+		return rcloneLastOK, rcloneNote // 节流窗口内复用上次结论
 	}
 	rcloneLastAt = time.Now()
 
+	// 缓存有两层：平台接入服务一层、挂载服务(VFS)一层。两层都要破，
+	// 只破其中一层，扫描看到的仍是旧目录列表。
+	platOK, platNote := refreshViaPlatform()
+	plat := ""
+	if platOK {
+		plat = "平台已刷新 · "
+	}
+
 	socks := rcloneSockets()
 	if len(socks) == 0 {
-		noteOnce("sock", "[同步] 未找到 rclone 控制 socket（/var/run/rclone/rcd_*.sock），跳过挂载缓存刷新")
-		rcloneLastOK = false
-		return false
+		rcloneNote = plat + "未找到挂载服务控制接口"
+		if !platOK {
+			rcloneNote += "（" + platNote + "）"
+		}
+		rcloneLastOK = platOK
+		noteOnce("sock", "[同步] %s", rcloneNote)
+		return platOK, rcloneNote
 	}
 
 	var lastErr error
@@ -148,38 +169,65 @@ func refreshMountCache(srcPath string) bool {
 		if !ok {
 			continue
 		}
-		// 实测：vfs/refresh 带 fs+dir 会重新列该目录（返回 {"result":{"/xxx":"OK"}}），
-		// 之后新转存的文件/目录立刻可见；不带 dir 或只传 fs 都无效。
-		// 只刷同步源目录这一层，不做 recursive，避免大目录反复扫描费硬盘。
-		// 每次都对「同步目录及其以下」做整树刷新：rclone 只是重新列目录、
-		// 更新内存里的目录缓存，不写磁盘；子目录里的新增文件也能被同步到。
-		// _async 让 rclone 在后台刷新，避免大目录树阻塞本轮扫描；
-		// 每轮都发，缓存持续保持新鲜，下一轮扫描即能看到变化。
-		params := map[string]any{"fs": m.Fs, "recursive": "true", "_async": "true"}
-		// 实测：dir 为空/"/" 会被当成不存在的路径（"file does not exist"），
+		// 实测语义：vfs/refresh 带 fs 会重新列该目录（返回 {"result":{"/xx":"OK"}}），
+		// 之后新转存的文件/目录立刻可见；不带 dir 或只传 fs 都不生效。
+		// recursive 让子目录一并重列（子目录里的新文件也要能同步到）。
+		params := map[string]any{"fs": m.Fs, "recursive": "true"}
+		// 实测：dir 传空串或 "/" 会被当成不存在的路径（file does not exist），
 		// 源目录正好是挂载根时必须整个省略 dir。
 		if rel != "/" {
 			params["dir"] = rel
 		}
-		if _, err := rcloneRC(sock, "vfs/refresh", params); err != nil {
+		if _, err := rcloneRCTimeout(sock, "vfs/refresh", params, 120*time.Second); err != nil {
 			lastErr = err
 			continue
 		}
-		log.Printf("[同步] 已刷新挂载目录树（%s，dir=%s）", m.MountPoint, rel)
-		rcloneNote = ""
+		rcloneNote = plat + "已重列 " + m.MountPoint + rel
 		rcloneLastOK = true
-		return true
+		log.Printf("[同步] %s", rcloneNote)
+		return true, rcloneNote
 	}
 	if lastErr != nil {
-		if rcloneNote != lastErr.Error() {
-			log.Printf("[同步] 挂载缓存刷新失败：%v", lastErr)
-			rcloneNote = lastErr.Error()
-		}
+		rcloneNote = plat + "重列失败：" + lastErr.Error()
 	} else {
-		noteOnce("nomatch", "[同步] 源目录 %s 不在任何 rclone 挂载内，跳过缓存刷新", srcPath)
+		// 一个挂载都没匹配上：把现有挂载点列出来，便于一眼看出路径对不对
+		rcloneNote = plat + "源目录不在网盘挂载内（现有：" + mountListHint() + "）"
+	}
+	if !platOK {
+		rcloneNote += "（" + platNote + "）"
 	}
 	rcloneLastOK = false
-	return false
+	if rcloneNote != rclonePrevNote {
+		log.Printf("[同步] %s", rcloneNote)
+		rclonePrevNote = rcloneNote
+	}
+	return false, rcloneNote
+}
+
+// mountListHint 汇总所有 socket 上的挂载点，供诊断文案使用
+func mountListHint() string {
+	var out []string
+	for _, sock := range rcloneSockets() {
+		res, err := rcloneRC(sock, "mount/listmounts", nil)
+		if err != nil {
+			continue
+		}
+		raw, _ := res["mountPoints"].([]any)
+		for _, it := range raw {
+			if m, ok := it.(map[string]any); ok {
+				if mp, _ := m["MountPoint"].(string); mp != "" {
+					out = append(out, mp)
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return "无"
+	}
+	if len(out) > 3 {
+		out = append(out[:3], "…")
+	}
+	return strings.Join(out, "，")
 }
 
 var (
