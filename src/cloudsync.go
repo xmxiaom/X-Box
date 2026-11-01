@@ -523,6 +523,8 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	gen := syncGenOf(task.ID)
 	isAborted := func() bool { return syncGenAborted(task.ID, gen) }
 	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
+	// 扫描前让 rclone 丢弃该目录的缓存，否则网盘侧刚转存的文件在挂载目录里看不到
+	refreshMountCache(task.Source)
 	files, err := scanSource(task.Source, excludes, func(n int) {
 		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
 	}, isAborted)
@@ -584,13 +586,6 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		syncIdleMu.Lock()
 		syncIdle[task.ID] = 0
 		syncIdleMu.Unlock()
-	}
-
-	// 网关直读兜底：挂载目录可能因缓存看不到网盘侧新文件。这里用官方网关
-	// （WebDAV）直接列目录，发现索引里没有的文件就经网关下载到目标，
-	// 全程不经过挂载目录，因此不受缓存影响，也不需要登录飞牛。
-	if len(pending) == 0 && len(idx) > 0 && !isAborted() {
-		gatewaySync(task, excludes, idx, newIdx, &st, gen)
 	}
 
 	st.Total = len(pending)
