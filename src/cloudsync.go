@@ -513,12 +513,6 @@ func shouldVerifyTarget(task SyncTask) bool {
 	return syncVerifyCnt[task.ID]%12 == 1 // 首轮也校验
 }
 
-// warmupSource 在扫描前让挂载层丢弃源目录的目录缓存，
-// 使网盘侧刚新增/修改的文件立刻可见（实现见 refreshMountCache）。
-func warmupSource(root string) {
-	refreshMountCache(root)
-}
-
 // syncOnce 执行一次单向同步（源 → 目标）。
 func syncOnce(task SyncTask) (SyncState, error) {
 	start := time.Now()
@@ -529,7 +523,6 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	gen := syncGenOf(task.ID)
 	isAborted := func() bool { return syncGenAborted(task.ID, gen) }
 	setSyncState(task.ID, func(x *SyncState) { x.Running = true; x.Phase = "scan"; x.Scanning = 0 })
-	warmupSource(task.Source) // 扫描前预热挂载目录（对秒级目录缓存有效）
 	files, err := scanSource(task.Source, excludes, func(n int) {
 		setSyncState(task.ID, func(x *SyncState) { x.Scanning = n })
 	}, isAborted)
@@ -570,7 +563,6 @@ func syncOnce(task SyncTask) (SyncState, error) {
 				return st, errSyncPaused
 			}
 			time.Sleep(wait)
-			warmupSource(task.Source) // 再次预热挂载目录
 			files2, err2 := scanSource(task.Source, excludes, nil, isAborted)
 			if errors.Is(err2, errSyncPaused) {
 				return st, errSyncPaused
@@ -592,6 +584,13 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		syncIdleMu.Lock()
 		syncIdle[task.ID] = 0
 		syncIdleMu.Unlock()
+	}
+
+	// 网关直读兜底：挂载目录可能因缓存看不到网盘侧新文件。这里用官方网关
+	// （WebDAV）直接列目录，发现索引里没有的文件就经网关下载到目标，
+	// 全程不经过挂载目录，因此不受缓存影响，也不需要登录飞牛。
+	if len(pending) == 0 && len(idx) > 0 && !isAborted() {
+		gatewaySync(task, excludes, idx, newIdx, &st, gen)
 	}
 
 	st.Total = len(pending)
@@ -1034,57 +1033,6 @@ func (s *Server) handleSyncPause(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	ok(w, map[string]any{"id": id, "paused": !on})
-}
-
-// handleFnosAccount GET/POST /api/sync/fnosaccount —— 保存/查询用于刷新挂载的 fnOS 账号
-func (s *Server) handleFnosAccount(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "POST" {
-		c := trimCred{
-			User: strings.TrimSpace(r.URL.Query().Get("user")),
-			Pass: r.URL.Query().Get("pass"),
-		}
-		if err := saveTrimCred(c); err != nil {
-			fail(w, 500, "保存失败："+err.Error())
-			return
-		}
-		if c.User == "" {
-			ok(w, map[string]any{"configured": false})
-			return
-		}
-		// 保存后立刻验证一次：能否登录 + 刷新接口是否通
-		if _, _, err := trimToken(true); err != nil {
-			ok(w, map[string]any{"configured": true, "ok": false, "message": err.Error()})
-			return
-		}
-		err := trimCGI(mustToken(), "appcgi.mountmgr.cache.refresh", map[string]any{})
-		msg := "账号已保存，刷新接口可用"
-		if err != nil {
-			msg = "账号已保存，但刷新接口调用失败：" + err.Error()
-		}
-		ok(w, map[string]any{"configured": true, "ok": err == nil, "message": msg})
-		return
-	}
-	c, has := loadTrimCred()
-	name := ""
-	if has && len(c.User) > 1 {
-		name = c.User[:1] + "***"
-	}
-	ok(w, map[string]any{"configured": has, "user": name})
-}
-
-// handleFnosDebug GET /api/sync/fnosdebug —— 返回挂载列表原始响应，便于核对刷新参数
-func (s *Server) handleFnosDebug(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := trimToken(false); err != nil {
-		fail(w, 400, err.Error())
-		return
-	}
-	raw, err := trimCGIRaw(mustToken(), "appcgi.mountmgr.list", nil)
-	if err != nil {
-		fail(w, 500, err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write([]byte(`{"raw":` + strconv.Quote(raw) + `}`))
 }
 
 // handleSyncDirs 简单的目录候选（便于前端提示当前卷）
