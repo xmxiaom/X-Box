@@ -610,6 +610,23 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		syncIdleMu.Unlock()
 	}
 
+	// 最终手段：上面刷新+重扫仍拿不到待复制项时，改用挂载服务的文件层
+	// 直接列远端、直接复制。这条路径完全不经过挂载目录的目录缓存，
+	// 因此远端刚转存的文件即使挂载目录看不到，也能同步过来。
+	if len(pending) == 0 && !isAborted() {
+		have := make(map[string]struct{}, len(files))
+		for _, f := range files {
+			have[f.rel] = struct{}{}
+		}
+		if n, _, note := fillMissingFromRemote(task, excludes, have, idx, newIdx, &st, isAborted); n > 0 {
+			if st.RefreshHint == "" {
+				st.RefreshHint = note
+			} else {
+				st.RefreshHint += " · " + note
+			}
+		}
+	}
+
 	st.Total = len(pending)
 	var totalBytes int64
 	for _, f := range pending {

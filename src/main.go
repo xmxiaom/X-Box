@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.97"
+	version = "1.3.98"
 	// 面板监听策略：生产形态只监听 fnOS 统一网关 unix socket（XBOX_SOCKET），
 	// 登录态由网关注入；不监听任何 TCP 端口。仅 XBOX_DEV=1 时开 127.0.0.1 回环
 	// 端口供本地开发/自动化测试。请勿改为 ":8899" 通配绑定。
@@ -177,7 +177,7 @@ func main() {
 	startPTYIdleReaper()     // 终端 PTY 空闲会话回收
 	srv.startSyncScheduler() // 网盘同步定时任务
 	cleanupLegacyReverseProxy() // 反向代理功能已移除，清掉早期版本留下的实例
-	handler := formBridge(tunnelBridge(panelActivity(mux)))
+	handler := captureGatewayAuth(formBridge(tunnelBridge(panelActivity(mux))))
 	if appBase != "" {
 		// 网关入口：先剥前缀，再交给正常路由
 		inner := handler

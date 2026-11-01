@@ -40,6 +40,9 @@ var (
 
 // rcloneSockets 列出所有 rclone rc socket（不同用户各有一个）
 func rcloneSockets() []string {
+	if v := strings.TrimSpace(os.Getenv("XBOX_RCLONE_RC")); v != "" {
+		return []string{v} // 测试或特殊部署可直接指定地址
+	}
 	paths, _ := filepath.Glob("/var/run/rclone/rcd_*.sock")
 	sort.Strings(paths)
 	return paths
@@ -58,14 +61,24 @@ func rcloneRCTimeout(sock, endpoint string, payload map[string]any, timeout time
 	if err != nil {
 		return nil, err
 	}
-	tr := &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 3 * time.Second}
-			return d.DialContext(ctx, "unix", sock)
-		},
+	var (
+		cl  *http.Client
+		url string
+	)
+	if strings.HasPrefix(sock, "http://") || strings.HasPrefix(sock, "https://") {
+		cl = &http.Client{Timeout: timeout}
+		url = strings.TrimRight(sock, "/") + "/" + endpoint
+	} else {
+		tr := &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 3 * time.Second}
+				return d.DialContext(ctx, "unix", sock)
+			},
+		}
+		cl = &http.Client{Timeout: timeout, Transport: tr}
+		url = "http://unix/" + endpoint
 	}
-	cl := &http.Client{Timeout: timeout, Transport: tr}
-	req, err := http.NewRequest("POST", "http://unix/"+endpoint, bytes.NewReader(body))
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
