@@ -157,18 +157,11 @@ func refreshMountCache(srcPath string) (bool, string) {
 	// 缓存有两层：平台接入服务一层、挂载服务(VFS)一层。两层都要破，
 	// 只破其中一层，扫描看到的仍是旧目录列表。
 	platOK, platNote := refreshViaPlatform()
-	plat, platSuffix := "", ""
-	if platOK {
-		plat = "平台已刷新 · "
-	} else if platNote != "" {
-		// 平台刷新失败的原因必须一并显示：缓存很可能就压在平台那层，
-		// 只写「已重列」会让人误以为刷新已经做到位。
-		platSuffix = "（" + platNote + "）"
-	}
+	_ = platNote
 
 	socks := rcloneSockets()
 	if len(socks) == 0 {
-		st.note = plat + "未找到挂载服务控制接口"
+		st.note = "✗无控制接口"
 		if !platOK {
 			st.note += "（" + platNote + "）"
 		}
@@ -212,16 +205,16 @@ func refreshMountCache(srcPath string) (bool, string) {
 			lastErr = err
 			continue
 		}
-		st.note = plat + "已重列 " + m.MountPoint + rel + platSuffix
+		st.note = "✓"
 		st.ok = true
 		log.Printf("[同步] %s", st.note)
 		return true, st.note
 	}
 	if lastErr != nil {
-		st.note = plat + "重列失败：" + lastErr.Error()
+		st.note = "✗" + shortErr(lastErr)
 	} else {
 		// 一个挂载都没匹配上：把现有挂载点列出来，便于一眼看出路径对不对
-		st.note = plat + "源目录不在网盘挂载内（现有：" + mountListHint() + "）"
+		st.note = "✗未匹配挂载"
 	}
 	if !platOK {
 		st.note += "（" + platNote + "）"
@@ -277,3 +270,15 @@ func noteOnce(key, format string, args ...any) {
 
 // 保持 os 导入被使用（socket 存在性判断用）
 var _ = os.Stat
+
+// shortErr 把错误压成很短的一截，够定位即可（避免把整行提示撑长）
+func shortErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	t := strings.TrimSpace(err.Error())
+	if i := strings.Index(t, ":"); i > 0 && i < 14 {
+		t = strings.TrimSpace(t[i+1:])
+	}
+	return " " + firstN(t, 14)
+}

@@ -331,7 +331,7 @@ func davFill(task SyncTask, excludes []string, have map[string]struct{},
 
 	ep, rel, ok := davEndpointFor(task.Source)
 	if !ok {
-		return 0, 0, "未取到接入服务地址（挂载源或平台配置不可读）", false
+		return 0, 0, "✗无地址", false
 	}
 	return davFillWith(task, ep, rel, excludes, have, idx, newIdx, st, isAborted)
 }
@@ -346,7 +346,7 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 	var files []davItem
 	davWalk(clProbe, ep, rel, "", 0, &files, 5000)
 	if len(files) == 0 {
-		return 0, 0, "直连接入服务看不到文件", true
+		return 0, 0, "✗空目录", true
 	}
 
 	var missing []davItem
@@ -363,7 +363,7 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 		}
 	}
 	if len(missing) == 0 {
-		return 0, 0, fmt.Sprintf("挂载 %d 项 / 直连 %d 项，一致", len(have), len(files)), true
+		return 0, 0, fmt.Sprintf("一致%d", len(files)), true
 	}
 
 	var n int
@@ -387,5 +387,5 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 		}
 	}
 	log.Printf("[同步] %s 直连接入服务：挂载看到 %d 项，远端 %d 项，补收 %d 个", task.ID, len(have), len(files), n)
-	return n, bytes, fmt.Sprintf("挂载 %d 项 / 直连远端 %d 项，补收 %d 个", len(have), len(files), n), true
+	return n, bytes, fmt.Sprintf("补收%d", n), true
 }

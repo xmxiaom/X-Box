@@ -628,7 +628,11 @@ func syncOnce(task SyncTask) (SyncState, error) {
 			// 至少把「为什么没用直连」写出来，避免又变成静默失败。
 			n2, _, note2 := fillMissingFromRemote(task, excludes, have, idx, newIdx, &st, isAborted)
 			if note2 != "" {
-				note = note2
+				if note != "" {
+					note += " · " + note2
+				} else {
+					note = note2
+				}
 			}
 			n = n2
 		}

@@ -165,15 +165,15 @@ func fillMissingFromRemote(task SyncTask, excludes []string, have map[string]str
 
 	sock, fs, rel, ok := remoteMountOf(task.Source)
 	if !ok {
-		return 0, 0, "未匹配到网盘挂载"
+		return 0, 0, "✗未匹配"
 	}
 	files, err := listRemote(sock, fs, rel)
 	if err != nil {
 		// 精简版挂载服务可能没有这个接口，错误原文直接给出便于判断
-		return 0, 0, "列远端失败：" + firstN(err.Error(), 80)
+		return 0, 0, "✗" + shortErr(err)
 	}
 	if len(files) == 0 {
-		return 0, 0, fmt.Sprintf("远端列表为空（挂载内 %d 项）", len(have))
+		return 0, 0, "✗空目录"
 	}
 
 	var missing []rcFile
@@ -191,7 +191,7 @@ func fillMissingFromRemote(task SyncTask, excludes []string, have map[string]str
 	}
 	if len(missing) == 0 {
 		// 挂载目录与远端一致：说明这一轮不是缓存挡着
-		return 0, 0, fmt.Sprintf("挂载 %d 项 / 远端 %d 项，一致", len(have), len(files))
+		return 0, 0, fmt.Sprintf("一致%d", len(files))
 	}
 
 	var n int
@@ -214,5 +214,5 @@ func fillMissingFromRemote(task SyncTask, excludes []string, have map[string]str
 	if n > 0 {
 		log.Printf("[同步] %s 挂载目录看不到的 %d 个文件已直接复制（%d 字节）", task.ID, n, bytes)
 	}
-	return n, bytes, fmt.Sprintf("远端 %d 项，挂载只看得到 %d 项，直连补收 %d 个", len(files), len(have), n)
+	return n, bytes, fmt.Sprintf("补收%d", n)
 }
