@@ -19,11 +19,13 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +49,10 @@ func davEndpointFor(srcPath string) (ep davEP, rel string, ok bool) {
 	if mp == "" || remote == "" || root == "" {
 		return davEP{}, "", false
 	}
+	if !strings.HasPrefix(root, "/") {
+		root = "/" + root
+	}
+
 	davEpMu.Lock()
 	cached, has := davEpCache[remote]
 	davEpMu.Unlock()
@@ -58,19 +64,85 @@ func davEndpointFor(srcPath string) (ep davEP, rel string, ok bool) {
 	if cfg == nil {
 		return davEP{}, "", false
 	}
-	base := strings.TrimRight(cfg["url"], "/")
-	if base == "" {
-		return davEP{}, "", false
-	}
-	if !strings.HasPrefix(root, "/") {
-		root = "/" + root
-	}
-	ep = davEP{base: base, root: root, user: cfg["user"], pass: revealPass(cfg["pass"])}
+	ep = davEP{root: root, user: cfg["user"], pass: revealPass(cfg["pass"])}
 
-	davEpMu.Lock()
-	davEpCache[remote] = ep
-	davEpMu.Unlock()
-	return ep, davRel(mp, srcPath), true
+	// 配置里写的地址未必是应用能直接连的那个（可能只给挂载进程内部用、
+	// 也可能实际走的是本机 socket）。这里按候选顺序逐个探一次，用能通的。
+	for _, base := range davCandidateBases(cfg, ep) {
+		if davReachable(base, ep) {
+			ep.base = base
+			davEpMu.Lock()
+			davEpCache[remote] = ep
+			davEpMu.Unlock()
+			return ep, davRel(mp, srcPath), true
+		}
+	}
+	return davEP{}, "", false
+}
+
+// davCandidateBases 生成要尝试的接入地址：配置里写的优先，其次本机监听端口 / socket
+func davCandidateBases(cfg map[string]string, ep davEP) []string {
+	var out []string
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		v = strings.TrimRight(v, "/")
+		for _, e := range out {
+			if e == v {
+				return
+			}
+		}
+		out = append(out, v)
+	}
+
+	if u := cfg["url"]; u != "" {
+		add(u)
+	}
+	for _, k := range []string{"unix_socket", "unix-socket", "socket", "addr"} {
+		if v := cfg[k]; v != "" {
+			if strings.HasPrefix(v, "/") {
+				add("unix://" + v)
+			} else {
+				add(v)
+			}
+		}
+	}
+	// 配置里的地址连不上（例如写的是挂载进程内部用的地址）时，
+	// 退而扫描本机正在监听的端口与 socket，找出真正提供接入服务的那个。
+	ports := localListenPorts()
+	if len(ports) > 25 { // 逐个探测有成本
+		ports = ports[:25]
+	}
+	for _, p := range ports {
+		add(fmt.Sprintf("http://127.0.0.1:%d", p))
+	}
+	for _, sp := range localDavSockets() {
+		add("unix://" + sp)
+	}
+	return out
+}
+
+// davReachable 探一下某个地址能不能提供接入服务（207/401/403 都算能连上）
+func davReachable(base string, ep davEP) bool {
+	probe := davEP{base: base, root: ep.root, user: ep.user, pass: ep.pass}
+	cl := davHTTPClient(probe, 1200*time.Millisecond)
+	req, err := http.NewRequest("PROPFIND", davURL(probe, ""), strings.NewReader(davPropfindBody))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Depth", "0")
+	if probe.user != "" {
+		req.SetBasicAuth(probe.user, probe.pass)
+	}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	return resp.StatusCode == 207 || resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 405
 }
 
 // davRel 源目录相对挂载根的路径（"" 表示挂载根）
@@ -172,10 +244,28 @@ type davMultistatus struct {
 	} `xml:"response"`
 }
 
+// davHTTPClient 按接入地址类型返回客户端：要么普通 HTTP，要么走本机 socket
+func davHTTPClient(ep davEP, timeout time.Duration) *http.Client {
+	if strings.HasPrefix(ep.base, "unix://") {
+		sock := strings.TrimPrefix(ep.base, "unix://")
+		tr := &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 3 * time.Second}
+				return d.DialContext(ctx, "unix", sock)
+			},
+		}
+		return &http.Client{Timeout: timeout, Transport: tr}
+	}
+	return &http.Client{Timeout: timeout}
+}
+
 // davURL 拼接入服务上的请求地址。
 // 平台配置里的 url 有时已经把根路径写进去了，这里避免重复拼接。
 func davURL(ep davEP, rel string) string {
 	base := strings.TrimRight(ep.base, "/")
+	if strings.HasPrefix(base, "unix://") {
+		base = "http://unix" // 走 socket 时只用作 HTTP 主机名
+	}
 	root := "/" + strings.Trim(strings.TrimSpace(ep.root), "/")
 	if root != "/" && !strings.HasSuffix(base, root) {
 		base += root
@@ -357,8 +447,8 @@ func davFill(task SyncTask, excludes []string, have map[string]struct{},
 func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have map[string]struct{},
 	idx, newIdx map[string]syncIdxEnt, st *SyncState, isAborted func() bool) (int, int64, string, bool) {
 
-	clProbe := &http.Client{Timeout: 20 * time.Second}
-	clGet := &http.Client{Timeout: 30 * time.Minute}
+	clProbe := davHTTPClient(ep, 20*time.Second)
+	clGet := davHTTPClient(ep, 30*time.Minute)
 
 	// 先探一次：拿到状态码与首层条目，空目录时能说清是「返回 207 但没内容」
 	// 还是「路径不对被拒」，避免只给一句没信息量的「空目录」。
@@ -420,4 +510,36 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 	}
 	log.Printf("[同步] %s 直连接入服务：挂载看到 %d 项，远端 %d 项，补收 %d 个", task.ID, len(have), len(files), n)
 	return n, bytes, fmt.Sprintf("补收%d", n), true
+}
+
+// localDavSockets 本机可能提供接入服务的 socket（名字里带 dav/cloud/trim 的）
+func localDavSockets() []string {
+	var out []string
+	seen := map[string]bool{}
+	dirs := []string{"/run", "/var/run", "/run/trim", "/var/run/trim", "/run/fnos", "/tmp"}
+	for _, d := range dirs {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			n := strings.ToLower(e.Name())
+			if !strings.Contains(n, "dav") && !strings.Contains(n, "cloud") && !strings.Contains(n, "trim") {
+				continue
+			}
+			p := filepath.Join(d, e.Name())
+			if seen[p] {
+				continue
+			}
+			if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSocket != 0 {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

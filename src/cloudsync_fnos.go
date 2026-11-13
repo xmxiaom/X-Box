@@ -12,6 +12,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -83,16 +84,22 @@ func hasStr(list []string, s string) bool {
 	return false
 }
 
-// fnosLocalAddrs 平台服务的候选地址（端口随版本/配置不同），可用 XBOX_FNOS_ADDR 覆盖。
+// fnosLocalAddrs 平台服务的候选地址：从本机实际监听的端口里取，不预设固定端口。
+// 端口会随版本/部署方式变化，写死某个端口在换环境后必然失效。
+// 可用 XBOX_FNOS_ADDR 直接指定（跳过探测）。
 func fnosLocalAddrs() []string {
 	if v := strings.TrimSpace(os.Getenv("XBOX_FNOS_ADDR")); v != "" {
 		return []string{strings.TrimRight(v, "/")}
 	}
-	return []string{
-		"http://127.0.0.1:8000",
-		"http://127.0.0.1:5666",
-		"http://127.0.0.1",
+	ports := localListenPorts()
+	if len(ports) > 25 { // 逐个探测有成本
+		ports = ports[:25]
 	}
+	out := make([]string, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, fmt.Sprintf("http://127.0.0.1:%d", p))
+	}
+	return out
 }
 
 // fnosLocalCall 在本机调平台接口，返回原始响应体。
