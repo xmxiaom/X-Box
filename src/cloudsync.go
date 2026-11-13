@@ -610,21 +610,26 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		syncIdleMu.Unlock()
 	}
 
-	// 最终手段：上面刷新+重扫仍拿不到待复制项时，改用挂载服务的文件层
-	// 直接列远端、直接复制。这条路径完全不经过挂载目录的目录缓存，
-	// 因此远端刚转存的文件即使挂载目录看不到，也能同步过来。
-	if len(pending) == 0 && !isAborted() {
+	// 关键一步：挂载目录的内容受挂载服务缓存支配，网盘侧刚转存的文件可能压根
+	// 不在目录里。这里改用挂载服务的文件层直接列远端，与本次扫描结果对照：
+	//   - 远端多出来的文件 → 直接让服务复制到目标（不经过挂载目录）
+	//   - 两边一致 → 说明本轮不是缓存挡着，顺带把结论写进状态
+	// 无论本轮有没有待复制项都执行；内部按任务 60 秒节流，不会反复遍历远端。
+	if !isAborted() {
 		have := make(map[string]struct{}, len(files))
 		for _, f := range files {
 			have[f.rel] = struct{}{}
 		}
-		if n, _, note := fillMissingFromRemote(task, excludes, have, idx, newIdx, &st, isAborted); n > 0 {
+		n, _, note := fillMissingFromRemote(task, excludes, have, idx, newIdx, &st, isAborted)
+		if note != "" {
 			if st.RefreshHint == "" {
 				st.RefreshHint = note
 			} else {
 				st.RefreshHint += " · " + note
 			}
+			setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = st.RefreshHint })
 		}
+		_ = n
 	}
 
 	st.Total = len(pending)

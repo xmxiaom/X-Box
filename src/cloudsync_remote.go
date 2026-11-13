@@ -20,6 +20,41 @@ import (
 	"time"
 )
 
+// 挂载服务是精简版，未必保留全部控制接口。这里探测一次并缓存结果，
+// 避免把「不支持」误判成「没变化」。
+var (
+	rcCapMu sync.Mutex
+	rcCap   = map[string]bool{} // "sock|endpoint" -> 是否支持
+	rcCapAt time.Time
+)
+
+func rcloneSupports(sock, endpoint string) bool {
+	rcCapMu.Lock()
+	defer rcCapMu.Unlock()
+	key := sock + "|" + endpoint
+	if v, ok := rcCap[key]; ok && time.Since(rcCapAt) < 10*time.Minute {
+		return v
+	}
+	out, err := rcloneRCTimeout(sock, "rc/list", nil, 8*time.Second)
+	if err != nil {
+		return false // 探测失败不缓存，下次再试
+	}
+	cmds, _ := out["cmds"].([]any)
+	if len(cmds) == 0 {
+		return false
+	}
+	rcCap = map[string]bool{}
+	for _, it := range cmds {
+		if m, ok := it.(map[string]any); ok {
+			if p, _ := m["Path"].(string); p != "" {
+				rcCap[sock+"|"+p] = true
+			}
+		}
+	}
+	rcCapAt = time.Now()
+	return rcCap[key]
+}
+
 // 远端补收的节流（每任务 60 秒最多列一次远端目录）
 var (
 	syncRemoteMu sync.Mutex
@@ -132,8 +167,14 @@ func fillMissingFromRemote(task SyncTask, excludes []string, have map[string]str
 	if !ok {
 		return 0, 0, ""
 	}
+	if !rcloneSupports(sock, "operations/list") {
+		return 0, 0, "挂载服务未提供直连远端接口"
+	}
 	files, err := listRemote(sock, fs, rel)
-	if err != nil || len(files) == 0 {
+	if err != nil {
+		return 0, 0, "列远端失败：" + firstN(err.Error(), 60)
+	}
+	if len(files) == 0 {
 		return 0, 0, ""
 	}
 
@@ -151,7 +192,8 @@ func fillMissingFromRemote(task SyncTask, excludes []string, have map[string]str
 		}
 	}
 	if len(missing) == 0 {
-		return 0, 0, ""
+		// 挂载目录与远端一致：说明这一轮不是缓存挡着
+		return 0, 0, fmt.Sprintf("挂载与远端一致（%d 项）", len(files))
 	}
 
 	var n int
