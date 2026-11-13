@@ -172,15 +172,46 @@ type davMultistatus struct {
 	} `xml:"response"`
 }
 
-// davListOnce 列一个目录的直接子项（Depth: 1）
-func davListOnce(cl *http.Client, ep davEP, rel string) ([]davItem, error) {
-	target := ep.base + ep.root
-	if rel != "" {
-		target += "/" + davEscape(rel)
+// davURL 拼接入服务上的请求地址。
+// 平台配置里的 url 有时已经把根路径写进去了，这里避免重复拼接。
+func davURL(ep davEP, rel string) string {
+	base := strings.TrimRight(ep.base, "/")
+	root := "/" + strings.Trim(strings.TrimSpace(ep.root), "/")
+	if root != "/" && !strings.HasSuffix(base, root) {
+		base += root
 	}
+	if rel == "" {
+		return base + "/" // 目录请求带尾斜杠，避免被重定向
+	}
+	return base + "/" + davEscape(rel)
+}
+
+// davRelOf 把响应里的 href 规整成「相对接入根」的路径。
+// 不同实现对 href 的写法不一致（有的带根路径前缀、有的只给服务器绝对路径），
+// 这里统一去掉可能的根前缀，只保留可比较的部分。
+func davRelOf(href, root string) string {
+	p := href
+	if u, err := url.Parse(href); err == nil && u.Path != "" {
+		p = u.Path
+	}
+	if d, err := url.PathUnescape(p); err == nil {
+		p = d
+	}
+	p = strings.TrimSuffix(p, "/")
+	if r := "/" + strings.Trim(strings.TrimSpace(root), "/"); r != "/" && strings.HasPrefix(p, r) {
+		p = strings.TrimPrefix(p, r)
+	}
+	return strings.Trim(p, "/")
+}
+
+// davListOnce 列一个目录的直接子项（Depth: 1）。
+// 按协议，Depth 1 的响应是「自身 + 直接子项」，所以只按名字取子项即可，
+// 不依赖各实现对 href 前缀的不同写法。
+func davListOnce(cl *http.Client, ep davEP, rel string) ([]davItem, int, error) {
+	target := davURL(ep, rel)
 	req, err := http.NewRequest("PROPFIND", target, strings.NewReader(davPropfindBody))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Depth", "1")
 	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
@@ -192,28 +223,29 @@ func davListOnce(cl *http.Client, ep davEP, rel string) ([]davItem, error) {
 	}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if resp.StatusCode != 207 {
-		return nil, fmt.Errorf("HTTP %d %s", resp.StatusCode, firstN(strings.TrimSpace(string(body)), 60))
+		return nil, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	var ms davMultistatus
 	if err := xml.Unmarshal(body, &ms); err != nil {
-		return nil, fmt.Errorf("响应解析失败：%v", err)
+		return nil, resp.StatusCode, fmt.Errorf("响应无法解析")
 	}
-	prefix := ep.root + "/"
+	self := strings.Trim(strings.TrimSpace(rel), "/")
 	var out []davItem
 	for _, r := range ms.Responses {
-		href, err := url.PathUnescape(r.Href)
-		if err != nil {
-			href = r.Href
+		p := davRelOf(r.Href, ep.root)
+		if p == self {
+			continue // 自身
 		}
-		if u, perr := url.Parse(href); perr == nil {
-			href = u.Path
+		name := path.Base(p)
+		if name == "" || name == "." || name == "/" {
+			continue
 		}
-		it := davItem{}
+		it := davItem{rel: name}
 		for _, ps := range r.Propstat {
 			if ps.Prop.ResourceType.Collection != nil {
 				it.isDir = true
@@ -225,24 +257,9 @@ func davListOnce(cl *http.Client, ep davEP, rel string) ([]davItem, error) {
 				it.mod = t
 			}
 		}
-		clean := strings.TrimSuffix(href, "/")
-		if !strings.HasPrefix(clean, strings.TrimSuffix(prefix, "/")) {
-			continue
-		}
-		name := strings.TrimPrefix(strings.TrimPrefix(clean, strings.TrimSuffix(prefix, "/")), "/")
-		if name == "" {
-			continue // 自身
-		}
-		if rel != "" {
-			name = strings.TrimPrefix(name, rel+"/")
-		}
-		if name == "" || strings.Contains(name, "/") {
-			continue // 只要直接子项
-		}
-		it.rel = name
 		out = append(out, it)
 	}
-	return out, nil
+	return out, resp.StatusCode, nil
 }
 
 // davEscape 逐段转义路径（保留分隔符）
@@ -259,7 +276,7 @@ func davWalk(cl *http.Client, ep davEP, base, prefix string, depth int, out *[]d
 	if depth > 8 || len(*out) >= limit {
 		return
 	}
-	items, err := davListOnce(cl, ep, base)
+	items, _, err := davListOnce(cl, ep, base)
 	if err != nil {
 		return
 	}
@@ -343,10 +360,25 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 	clProbe := &http.Client{Timeout: 20 * time.Second}
 	clGet := &http.Client{Timeout: 30 * time.Minute}
 
+	// 先探一次：拿到状态码与首层条目，空目录时能说清是「返回 207 但没内容」
+	// 还是「路径不对被拒」，避免只给一句没信息量的「空目录」。
+	first, status, ferr := davListOnce(clProbe, ep, rel)
+	if ferr != nil {
+		log.Printf("[同步] %s 直连接入服务失败（%s）：%v", task.ID, davURL(ep, rel), ferr)
+		return 0, 0, "✗" + shortErr(ferr), true
+	}
+	if len(first) == 0 {
+		log.Printf("[同步] %s 直连返回空目录（HTTP %d，%s）", task.ID, status, davURL(ep, rel))
+		return 0, 0, fmt.Sprintf("✗空(%d)", status), true
+	}
+
 	var files []davItem
-	davWalk(clProbe, ep, rel, "", 0, &files, 5000)
-	if len(files) == 0 {
-		return 0, 0, "✗空目录", true
+	for _, it := range first {
+		if it.isDir {
+			davWalk(clProbe, ep, path.Join(rel, it.rel), it.rel, 1, &files, 5000)
+			continue
+		}
+		files = append(files, it)
 	}
 
 	var missing []davItem
