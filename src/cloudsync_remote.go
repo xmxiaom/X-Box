@@ -191,7 +191,7 @@ func fillMissingFromRemote(task SyncTask, excludes []string, have map[string]str
 	}
 	if len(missing) == 0 {
 		// 挂载目录与远端一致：说明这一轮不是缓存挡着
-		return 0, 0, fmt.Sprintf("一致%d", len(files))
+		return 0, 0, fmt.Sprintf("%d/%d", len(have), len(files))
 	}
 
 	var n int
@@ -214,5 +214,5 @@ func fillMissingFromRemote(task SyncTask, excludes []string, have map[string]str
 	if n > 0 {
 		log.Printf("[同步] %s 挂载目录看不到的 %d 个文件已直接复制（%d 字节）", task.ID, n, bytes)
 	}
-	return n, bytes, fmt.Sprintf("补收%d", n)
+	return n, bytes, fmt.Sprintf("+%d", n)
 }

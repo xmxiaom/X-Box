@@ -336,6 +336,9 @@ func davListOnce(cl *http.Client, ep davEP, rel string) ([]davItem, int, error) 
 			continue
 		}
 		it := davItem{rel: name}
+		if strings.HasSuffix(r.Href, "/") {
+			it.isDir = true // 有些实现靠尾斜杠表示目录
+		}
 		for _, ps := range r.Propstat {
 			if ps.Prop.ResourceType.Collection != nil {
 				it.isDir = true
@@ -361,30 +364,33 @@ func davEscape(p string) string {
 	return strings.Join(segs, "/")
 }
 
-// davWalk 递归收集文件（限制条数与深度，避免异常时无限遍历）
-func davWalk(cl *http.Client, ep davEP, base, prefix string, depth int, out *[]davItem, limit int) {
+// davWalk 递归收集文件（限制条数与深度，避免异常时无限遍历）。
+// 返回失败的子目录数，便于判断「列出得比本地少」是漏读还是确实没有。
+func davWalk(cl *http.Client, ep davEP, base, prefix string, depth int, out *[]davItem, limit int) int {
 	if depth > 8 || len(*out) >= limit {
-		return
+		return 0
 	}
 	items, _, err := davListOnce(cl, ep, base)
 	if err != nil {
-		return
+		return 1
 	}
+	fails := 0
 	for _, it := range items {
 		rel := it.rel
 		if prefix != "" {
 			rel = prefix + "/" + it.rel
 		}
 		if it.isDir {
-			davWalk(cl, ep, path.Join(base, it.rel), rel, depth+1, out, limit)
+			fails += davWalk(cl, ep, path.Join(base, it.rel), rel, depth+1, out, limit)
 			continue
 		}
 		it.rel = rel
 		*out = append(*out, it)
 		if len(*out) >= limit {
-			return
+			break
 		}
 	}
+	return fails
 }
 
 // davDownload 经接入服务下载到本地（先写临时文件再改名，避免半截文件）
@@ -463,9 +469,10 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 	}
 
 	var files []davItem
+	davFails := 0
 	for _, it := range first {
 		if it.isDir {
-			davWalk(clProbe, ep, path.Join(rel, it.rel), it.rel, 1, &files, 5000)
+			davFails += davWalk(clProbe, ep, path.Join(rel, it.rel), it.rel, 1, &files, 5000)
 			continue
 		}
 		files = append(files, it)
@@ -485,7 +492,11 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 		}
 	}
 	if len(missing) == 0 {
-		return 0, 0, fmt.Sprintf("一致%d", len(files)), true
+		note := fmt.Sprintf("%d/%d", len(have), len(files))
+		if davFails > 0 {
+			note += fmt.Sprintf(" 错%d", davFails)
+		}
+		return 0, 0, note, true
 	}
 
 	var n int
@@ -509,7 +520,11 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 		}
 	}
 	log.Printf("[同步] %s 直连接入服务：挂载看到 %d 项，远端 %d 项，补收 %d 个", task.ID, len(have), len(files), n)
-	return n, bytes, fmt.Sprintf("补收%d", n), true
+	note := fmt.Sprintf("+%d", n)
+	if davFails > 0 {
+		note += fmt.Sprintf(" 错%d", davFails)
+	}
+	return n, bytes, note, true
 }
 
 // localDavSockets 本机可能提供接入服务的 socket（名字里带 dav/cloud/trim 的）

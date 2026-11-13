@@ -245,6 +245,14 @@ type srcEntry struct {
 func scanSource(root string, excludes []string, onProg func(int), aborted func() bool) ([]srcEntry, error) {
 	var out []srcEntry
 	root = filepath.Clean(root)
+	// 源目录本身不可访问时必须明确报错：遍历时单个条目读不到会被忽略，
+	// 但根目录不存在同样走那条路，结果就是「扫描 0 项、耗时几毫秒」这种
+	// 看起来正常的假象——同步永远没内容可做，却没人知道是路径不对。
+	if fi, err := os.Stat(root); err != nil {
+		return nil, fmt.Errorf("源目录不可访问（%s）：%v", root, err)
+	} else if !fi.IsDir() {
+		return nil, fmt.Errorf("源路径不是目录：%s", root)
+	}
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if aborted != nil && aborted() {
 			return errSyncPaused // 暂停：中断遍历
@@ -557,6 +565,16 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		return st, errSyncPaused
 	}
 	st.Scanned = len(files)
+	if len(files) == 0 {
+		// 目录能打开但一个文件都没有：要么源目录确实是空的，要么挂载层
+		// 没把内容交出来。这句提示让人一眼区别于「有文件但没变化」。
+		if st.RefreshHint == "" {
+			st.RefreshHint = "源目录为空"
+		} else {
+			st.RefreshHint += " · 源目录为空"
+		}
+		setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = st.RefreshHint })
+	}
 
 	// 阶段一：确定待处理清单（索引未命中或内容有变的文件）
 	idx := cachedSyncIndex(task.ID) // 只读内存，轮询期间不读盘
