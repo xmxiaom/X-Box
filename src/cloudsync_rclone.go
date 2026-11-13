@@ -30,13 +30,20 @@ import (
 	"time"
 )
 
+// 刷新结论按「源目录」分别缓存：同一台机器上可能挂着多个网盘，
+// 共用一个全局节流会让后一个任务直接拿到前一个任务的结论（显示成别人的路径），
+// 既误导判断、也真的跳过了它自己的刷新。
 var (
-	rcloneMu     sync.Mutex
-	rcloneLastAt time.Time
-	rcloneLastOK bool
-	rcloneNote   string
+	rcloneMu   sync.Mutex
+	rcloneSeen = map[string]*rcRefresh{} // key: 源目录
 	rclonePrevNote string
 )
+
+type rcRefresh struct {
+	at   time.Time
+	ok   bool
+	note string
+}
 
 // rcloneSockets 列出所有 rclone rc socket（不同用户各有一个）
 func rcloneSockets() []string {
@@ -136,28 +143,38 @@ func pickMount(mounts []rcMount, srcPath string) (rcMount, string, bool) {
 func refreshMountCache(srcPath string) (bool, string) {
 	rcloneMu.Lock()
 	defer rcloneMu.Unlock()
-	if time.Since(rcloneLastAt) < 10*time.Second {
-		return rcloneLastOK, rcloneNote // 节流窗口内复用上次结论
+	key := path.Clean(srcPath)
+	st := rcloneSeen[key]
+	if st != nil && time.Since(st.at) < 10*time.Second {
+		return st.ok, st.note // 同一源目录的节流窗口内复用上次结论
 	}
-	rcloneLastAt = time.Now()
+	if st == nil {
+		st = &rcRefresh{}
+		rcloneSeen[key] = st
+	}
+	st.at = time.Now()
 
 	// 缓存有两层：平台接入服务一层、挂载服务(VFS)一层。两层都要破，
 	// 只破其中一层，扫描看到的仍是旧目录列表。
 	platOK, platNote := refreshViaPlatform()
-	plat := ""
+	plat, platSuffix := "", ""
 	if platOK {
 		plat = "平台已刷新 · "
+	} else if platNote != "" {
+		// 平台刷新失败的原因必须一并显示：缓存很可能就压在平台那层，
+		// 只写「已重列」会让人误以为刷新已经做到位。
+		platSuffix = "（" + platNote + "）"
 	}
 
 	socks := rcloneSockets()
 	if len(socks) == 0 {
-		rcloneNote = plat + "未找到挂载服务控制接口"
+		st.note = plat + "未找到挂载服务控制接口"
 		if !platOK {
-			rcloneNote += "（" + platNote + "）"
+			st.note += "（" + platNote + "）"
 		}
-		rcloneLastOK = platOK
-		noteOnce("sock", "[同步] %s", rcloneNote)
-		return platOK, rcloneNote
+		st.ok = platOK
+		noteOnce("sock", "[同步] %s", st.note)
+		return platOK, st.note
 	}
 
 	var lastErr error
@@ -195,26 +212,26 @@ func refreshMountCache(srcPath string) (bool, string) {
 			lastErr = err
 			continue
 		}
-		rcloneNote = plat + "已重列 " + m.MountPoint + rel
-		rcloneLastOK = true
-		log.Printf("[同步] %s", rcloneNote)
-		return true, rcloneNote
+		st.note = plat + "已重列 " + m.MountPoint + rel + platSuffix
+		st.ok = true
+		log.Printf("[同步] %s", st.note)
+		return true, st.note
 	}
 	if lastErr != nil {
-		rcloneNote = plat + "重列失败：" + lastErr.Error()
+		st.note = plat + "重列失败：" + lastErr.Error()
 	} else {
 		// 一个挂载都没匹配上：把现有挂载点列出来，便于一眼看出路径对不对
-		rcloneNote = plat + "源目录不在网盘挂载内（现有：" + mountListHint() + "）"
+		st.note = plat + "源目录不在网盘挂载内（现有：" + mountListHint() + "）"
 	}
 	if !platOK {
-		rcloneNote += "（" + platNote + "）"
+		st.note += "（" + platNote + "）"
 	}
-	rcloneLastOK = false
-	if rcloneNote != rclonePrevNote {
-		log.Printf("[同步] %s", rcloneNote)
-		rclonePrevNote = rcloneNote
+	st.ok = false
+	if st.note != rclonePrevNote {
+		log.Printf("[同步] %s", st.note)
+		rclonePrevNote = st.note
 	}
-	return false, rcloneNote
+	return false, st.note
 }
 
 // mountListHint 汇总所有 socket 上的挂载点，供诊断文案使用

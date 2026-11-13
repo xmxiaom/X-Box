@@ -620,7 +620,18 @@ func syncOnce(task SyncTask) (SyncState, error) {
 		for _, f := range files {
 			have[f.rel] = struct{}{}
 		}
-		n, _, note := fillMissingFromRemote(task, excludes, have, idx, newIdx, &st, isAborted)
+		// 首选按 WebDAV 协议直连平台接入服务（不依赖挂载服务的控制接口）；
+		// 拿不到接入地址/凭据时，退回挂载服务自己的文件层。
+		n, _, note, davOK := davFill(task, excludes, have, idx, newIdx, &st, isAborted)
+		if !davOK {
+			// 直连不可用时退回挂载服务文件层；两边都没话可说时，
+			// 至少把「为什么没用直连」写出来，避免又变成静默失败。
+			n2, _, note2 := fillMissingFromRemote(task, excludes, have, idx, newIdx, &st, isAborted)
+			if note2 != "" {
+				note = note2
+			}
+			n = n2
+		}
 		if note != "" {
 			if st.RefreshHint == "" {
 				st.RefreshHint = note
