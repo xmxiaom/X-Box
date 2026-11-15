@@ -564,6 +564,23 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	if isAborted() {
 		return st, errSyncPaused
 	}
+	// 扫描到 0 项但挂载目录本该有内容：多半是挂载层的目录缓存还没更新
+	// （实测：文件管理里点一次刷新就能看到）。这里自动重建一次挂载再扫，
+	// 每个任务 30 分钟最多一次，避免频繁中断挂载。
+	if len(files) == 0 && !isAborted() && syncRemountAllowed(task.ID) {
+		if done, note := restartMountService(mountPointOfSource(task.Source)); done {
+			if st.RefreshHint == "" {
+				st.RefreshHint = "已重建挂载"
+			} else {
+				st.RefreshHint += " · 已重建挂载"
+			}
+			setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = st.RefreshHint })
+			if files2, err2 := scanSource(task.Source, excludes, nil, isAborted); err2 == nil {
+				files = files2
+			}
+			_ = note
+		}
+	}
 	st.Scanned = len(files)
 	if len(files) == 0 {
 		// 目录能打开但一个文件都没有：要么源目录确实是空的，要么挂载层
@@ -1110,6 +1127,45 @@ func (s *Server) handleSyncPause(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	ok(w, map[string]any{"id": id, "paused": !on})
+}
+
+// handleSyncRefreshMount POST /api/sync/refreshmount —— 重建网盘挂载。
+// 挂载目录的内容受平台接入层缓存支配，缓存未过期时网盘侧刚转存的文件
+// 在挂载目录里看不到（实测：文件管理里点一次刷新就能看到）。
+// 平台那层的刷新入口需要登录凭据，应用这边用「重建挂载」达到同样效果：
+// 重新挂载必然重新拉取目录，代价是挂载点会短暂不可用（通常几秒）。
+func (s *Server) handleSyncRefreshMount(w http.ResponseWriter, r *http.Request) {
+	if syncRefreshBusy.Swap(true) {
+		fail(w, 409, "正在重建挂载，请稍候")
+		return
+	}
+	defer syncRefreshBusy.Store(false)
+
+	mp := ""
+	for _, t := range cachedSyncTasks() {
+		if v := mountPointOfSource(t.Source); v != "" {
+			mp = v
+			break
+		}
+	}
+	start := time.Now()
+	done, note := restartMountService(mp)
+	if !done {
+		fail(w, 500, note)
+		return
+	}
+	// 重建后把每个任务的刷新节流清掉，让下一轮立刻真正刷新一次
+	rcloneMu.Lock()
+	rcloneSeen = map[string]*rcRefresh{}
+	rcloneMu.Unlock()
+	syncRemoteMu.Lock()
+	syncRemoteAt = map[string]time.Time{}
+	syncRemoteMu.Unlock()
+
+	ok(w, map[string]any{
+		"message":  note,
+		"duration": time.Since(start).Round(time.Millisecond).String(),
+	})
 }
 
 // handleSyncDirs 简单的目录候选（便于前端提示当前卷）

@@ -1102,7 +1102,9 @@ async function loadSyncTasks(){
     const head = '<div class="proxy-hint">原理：网盘由飞牛「文件管理 → 远程挂载」挂到本机，本板块只负责比对文件变化并复制到本地目录（不接管挂载）。' +
       '同步规则：<b>网盘有 → 本地没有/有变化</b> 则复制/覆盖；<b>网盘没有、本地有</b> 默认<b>保留本地</b>（勾选"镜像删除"才会删除）。' +
       '你手动删掉本地文件后，下一轮会被网盘版本恢复；恢复节奏由检测间隔决定。</div>' +
-      '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openSyncForm(null)">+ 添加同步任务</button></div>';
+      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:4px">' +
+        '<button class="btn btn-text btn-sm" onclick="refreshMountNow()">刷新挂载目录</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="openSyncForm(null)">+ 添加同步任务</button></div>';
     c.innerHTML = head + (syncCache.map(t => {
       const st = t.state || {};
       let badge = '<span class="badge badge-gray"><span class="dot"></span>待运行</span>';
@@ -1173,6 +1175,21 @@ async function loadSyncTasks(){
     if(syncTimer) clearTimeout(syncTimer);
     syncTimer = setTimeout(syncPollTick, 1500);
   }
+}
+// 刷新挂载目录：网盘挂载的目录列表由平台接入层缓存，缓存未过期时网盘侧
+// 刚转存的文件在挂载目录里看不到（文件管理里点刷新就能看到）。
+// 这里用「重建挂载」达到同样效果，代价是这些目录会短暂不可用。
+function refreshMountNow(){
+  confirmDialog('刷新挂载目录',
+    '<div style="font-size:13px;line-height:1.7">会重新挂载所有网盘，让目录内容立刻重新拉取。<br>' +
+    '<span style="color:var(--text3)">期间这些挂载目录会短暂不可用（通常几秒），正在读写它们的程序可能报错。</span></div>',
+    async ()=>{
+      try{
+        const j = await apiRetry('/api/sync/refreshmount', {method:'POST'});
+        toast('已重建挂载（' + (j.duration||'') + '）', 'ok');
+        loadSyncTasks();
+      }catch(e){ toast(e.message || '重建失败', 'err'); }
+    });
 }
 function openSyncForm(id){
   const t = id ? syncCache.find(x => x.id === id) : null;

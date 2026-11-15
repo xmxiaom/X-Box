@@ -464,19 +464,32 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 		return 0, 0, "✗" + shortErr(ferr), true
 	}
 	if len(first) == 0 {
-		log.Printf("[同步] %s 直连返回空目录（HTTP %d，%s）", task.ID, status, davURL(ep, rel))
-		return 0, 0, fmt.Sprintf("✗空(%d)", status), true
+		// 再看一眼接入服务的根目录：如果根里有内容、这一层却是空的，
+		// 说明是路径层级对不上；根里也空，说明接入服务本身没拿到数据。
+		extra := ""
+		if rel != "" {
+			if rootItems, _, rerr := davListOnce(clProbe, ep, ""); rerr == nil {
+				extra = fmt.Sprintf(" 根%d", len(rootItems))
+			}
+		}
+		log.Printf("[同步] %s 直连返回空目录（HTTP %d，%s）%s", task.ID, status, davURL(ep, rel), extra)
+		return 0, 0, fmt.Sprintf("✗空(%d)%s", status, extra), true
 	}
 
 	var files []davItem
 	davFails := 0
+	nDir := 0
 	for _, it := range first {
 		if it.isDir {
+			nDir++
 			davFails += davWalk(clProbe, ep, path.Join(rel, it.rel), it.rel, 1, &files, 5000)
 			continue
 		}
 		files = append(files, it)
 	}
+	// 首层构成一并带出：直连比本地少时，能立刻区分「首层全是目录且下面没东西」
+	// 和「确实少了几个文件」。
+	shape := fmt.Sprintf(" %d文%d目", len(first)-nDir, nDir)
 
 	var missing []davItem
 	for _, f := range files {
@@ -493,6 +506,9 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 	}
 	if len(missing) == 0 {
 		note := fmt.Sprintf("%d/%d", len(have), len(files))
+		if len(files) == 0 {
+			note += shape // 直连一个文件都没列到，把首层构成说出来
+		}
 		if davFails > 0 {
 			note += fmt.Sprintf(" 错%d", davFails)
 		}
