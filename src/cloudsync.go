@@ -564,31 +564,14 @@ func syncOnce(task SyncTask) (SyncState, error) {
 	if isAborted() {
 		return st, errSyncPaused
 	}
-	// 扫描到 0 项但挂载目录本该有内容：多半是挂载层的目录缓存还没更新
-	// （实测：文件管理里点一次刷新就能看到）。这里自动重建一次挂载再扫，
-	// 每个任务 30 分钟最多一次，避免频繁中断挂载。
-	if len(files) == 0 && !isAborted() && syncRemountAllowed(task.ID) {
-		if done, note := restartMountService(mountPointOfSource(task.Source)); done {
-			if st.RefreshHint == "" {
-				st.RefreshHint = "已重建挂载"
-			} else {
-				st.RefreshHint += " · 已重建挂载"
-			}
-			setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = st.RefreshHint })
-			if files2, err2 := scanSource(task.Source, excludes, nil, isAborted); err2 == nil {
-				files = files2
-			}
-			_ = note
-		}
-	}
 	st.Scanned = len(files)
 	if len(files) == 0 {
 		// 目录能打开但一个文件都没有：要么源目录确实是空的，要么挂载层
 		// 没把内容交出来。这句提示让人一眼区别于「有文件但没变化」。
 		if st.RefreshHint == "" {
-			st.RefreshHint = "源目录为空"
+			st.RefreshHint = "源目录为空·可点上方刷新挂载"
 		} else {
-			st.RefreshHint += " · 源目录为空"
+			st.RefreshHint += " · 源目录为空·可点上方刷新挂载"
 		}
 		setSyncState(task.ID, func(x *SyncState) { x.RefreshHint = st.RefreshHint })
 	}

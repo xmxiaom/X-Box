@@ -65,23 +65,6 @@ var (
 // 重建挂载是重操作，同一时间只允许一个
 var syncRefreshBusy atomic.Bool
 
-// 自动重建挂载的冷却（每任务 30 分钟一次）
-var (
-	syncRemountMu sync.Mutex
-	syncRemountAt = map[string]time.Time{}
-)
-
-// syncRemountAllowed 判断该任务现在是否可以自动重建挂载
-func syncRemountAllowed(taskID string) bool {
-	syncRemountMu.Lock()
-	defer syncRemountMu.Unlock()
-	if time.Since(syncRemountAt[taskID]) < 30*time.Minute {
-		return false
-	}
-	syncRemountAt[taskID] = time.Now()
-	return true
-}
-
 // rcFile 远端文件条目（相对同步源目录的路径）
 type rcFile struct {
 	Rel  string
