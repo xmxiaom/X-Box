@@ -140,6 +140,18 @@ func refreshViaPlatform() (bool, string) {
 		return false, fnosLastNote
 	}
 
+	// 首选用户一次性配置的平台访问令牌：它才是平台刷新接口的正规凭据
+	if loadFnosToken() != "" {
+		if ok, note := refreshViaToken(); ok {
+			fnosLastNote = note
+			return true, note
+		} else if strings.Contains(note, "失效") {
+			fnosLastNote = note
+			fnosDeadAt = time.Now().Add(10 * time.Minute)
+			return false, note
+		}
+	}
+
 	gwAuthMu.RLock()
 	auth := gwAuth
 	seen := append([]string(nil), gwSeen...)

@@ -1151,6 +1151,28 @@ func (s *Server) handleSyncRefreshMount(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleSyncToken GET/POST /api/sync/token —— 保存平台访问令牌并立即验证
+func (s *Server) handleSyncToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "POST" {
+		tok := strings.TrimSpace(r.URL.Query().Get("token"))
+		if err := saveFnosToken(tok); err != nil {
+			fail(w, 500, "保存失败："+err.Error())
+			return
+		}
+		if tok == "" {
+			ok(w, map[string]any{"configured": false, "message": "已清除令牌"})
+			return
+		}
+		good, msg := verifyFnosToken(tok)
+		if !good {
+			_ = saveFnosToken("") // 验证不过就不留，避免反复无效调用
+		}
+		ok(w, map[string]any{"configured": good, "ok": good, "message": msg})
+		return
+	}
+	ok(w, map[string]any{"configured": loadFnosToken() != ""})
+}
+
 // handleSyncDirs 简单的目录候选（便于前端提示当前卷）
 func (s *Server) handleSyncDirs(w http.ResponseWriter, r *http.Request) {
 	out := []string{}
