@@ -86,8 +86,23 @@ type dnspodRecord struct {
 func (d *dnspodDDNS) describe(domain, sub, rt string) ([]dnspodRecord, error) {
 	body, err := d.post("Record.List", domain, sub, rt, "", 0)
 	if err != nil {
+		// 记录为空时接口会回一个业务码，这里不该当成失败
+		if recs, perr := parseDnspodRecordList(body); perr == nil {
+			return filterDnspod(recs, sub, rt), nil
+		}
 		return nil, err
 	}
+	recs, perr := parseDnspodRecordList(body)
+	if perr != nil {
+		return nil, perr
+	}
+	return filterDnspod(recs, sub, rt), nil
+}
+
+// parseDnspodRecordList 解析 Record.List 响应（纯函数，便于单测）。
+// 注意 code 10：表示这个域名下「该记录类型一条都没有」，属于正常情况——
+// 当成错误返回的话，首次同步永远走不到创建那一步。
+func parseDnspodRecordList(body []byte) ([]dnspodRecord, error) {
 	var j struct {
 		Status struct {
 			Code    string `json:"code"`
@@ -98,16 +113,24 @@ func (d *dnspodDDNS) describe(domain, sub, rt string) ([]dnspodRecord, error) {
 	if err := jsonUnmarshal(body, &j); err != nil {
 		return nil, fmt.Errorf("DNSPod 响应解析失败: %s", string(body))
 	}
-	if j.Status.Code != "1" {
-		return nil, fmt.Errorf("DNSPod 错误 %s: %s", j.Status.Code, j.Status.Message)
+	if j.Status.Code == "1" {
+		return j.Records, nil
 	}
+	if j.Status.Code == "10" {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("DNSPod 错误 %s: %s", j.Status.Code, j.Status.Message)
+}
+
+// filterDnspod 只保留与主机名/记录类型匹配的记录
+func filterDnspod(in []dnspodRecord, sub, rt string) []dnspodRecord {
 	var out []dnspodRecord
-	for _, r := range j.Records {
+	for _, r := range in {
 		if r.Name == sub && r.Type == rt {
 			out = append(out, r)
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (d *dnspodDDNS) create(id, token, domain, sub, rt, ip string, ttl int) error {
