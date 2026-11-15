@@ -1102,15 +1102,7 @@ async function loadSyncTasks(){
     const head = '<div class="proxy-hint">原理：网盘由飞牛「文件管理 → 远程挂载」挂到本机，本板块只负责比对文件变化并复制到本地目录（不接管挂载）。' +
       '同步规则：<b>网盘有 → 本地没有/有变化</b> 则复制/覆盖；<b>网盘没有、本地有</b> 默认<b>保留本地</b>（勾选"镜像删除"才会删除）。' +
       '你手动删掉本地文件后，下一轮会被网盘版本恢复；恢复节奏由检测间隔决定。</div>' +
-      '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">' +
-        '<span style="font-size:12px;color:var(--text2)">平台令牌：</span>' +
-        '<input type="password" id="fnos-token" placeholder="粘贴后点右侧验证" style="width:220px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">' +
-        '<button class="btn btn-text btn-sm" onclick="saveFnosTokenUI()">保存并验证</button>' +
-        '<span id="fnos-token-state" style="font-size:12px;color:var(--text3)"></span>' +
-      '</div>' +
-      '<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:4px">' +
-        '<button class="btn btn-text btn-sm" onclick="refreshMountNow()">刷新挂载目录</button>' +
-        '<button class="btn btn-primary btn-sm" onclick="openSyncForm(null)">+ 添加同步任务</button></div>';
+      '<div style="display:flex;justify-content:flex-end;margin-bottom:4px"><button class="btn btn-primary btn-sm" onclick="openSyncForm(null)">+ 添加同步任务</button></div>';
     c.innerHTML = head + (syncCache.map(t => {
       const st = t.state || {};
       let badge = '<span class="badge badge-gray"><span class="dot"></span>待运行</span>';
@@ -1172,7 +1164,6 @@ async function loadSyncTasks(){
           '<button class="btn btn-text btn-sm" style="color:var(--danger)" onclick="syncDelete(\'' + esc(t.id) + '\')">删除</button>' +
         '</div></div>';
     }).join('') || '<div class="empty">还没有同步任务，点右上角「添加同步任务」</div>');
-    refreshFnosTokenState();
   }catch(e){
     // 同步页轮询失败（多为网关忙的瞬时 HTTP 0/5xx）：静默，心跳会自动重试
     if(!/HTTP (0|5\d\d)/.test(String(e.message))){ toast(e.message,'err'); }
@@ -1182,49 +1173,6 @@ async function loadSyncTasks(){
     if(syncTimer) clearTimeout(syncTimer);
     syncTimer = setTimeout(syncPollTick, 1500);
   }
-}
-// 刷新挂载目录：网盘挂载的目录列表由平台接入层缓存，缓存未过期时网盘侧
-// 刚转存的文件在挂载目录里看不到（文件管理里点刷新就能看到）。
-// 这里用「重建挂载」达到同样效果，代价是这些目录会短暂不可用。
-// 平台令牌：用于调用平台自己的「刷新挂载目录缓存」接口。
-// 只有它能真正让挂载目录看到网盘侧刚转存的文件，且不需要重建挂载。
-async function refreshFnosTokenState(){
-  const el = document.getElementById('fnos-token-state');
-  if(!el) return;
-  try{
-    const j = await apiRetry('/api/sync/token');
-    el.textContent = j.configured ? '已配置（刷新已自动）' : '未配置';
-    el.style.color = j.configured ? 'var(--success)' : 'var(--text3)';
-  }catch(e){ el.textContent = ''; }
-}
-async function saveFnosTokenUI(){
-  const inp = document.getElementById('fnos-token');
-  if(!inp) return;
-  const v = (inp.value || '').trim();
-  const el = document.getElementById('fnos-token-state');
-  if(el) { el.textContent = '验证中…'; el.style.color = 'var(--text3)'; }
-  try{
-    const j = await apiRetry('/api/sync/token?token=' + encodeURIComponent(v), {method:'POST'});
-    inp.value = '';
-    toast(j.message || '已保存', j.ok === false ? 'err' : 'ok');
-    refreshFnosTokenState();
-    loadSyncTasks();
-  }catch(e){
-    if(el) el.textContent = '';
-    toast(e.message || '验证失败', 'err');
-  }
-}
-function refreshMountNow(){
-  confirmDialog('刷新挂载目录',
-    '<div style="font-size:13px;line-height:1.7">会重新挂载所有网盘，让目录内容立刻重新拉取。<br>' +
-    '<span style="color:var(--text3)">期间这些挂载目录会短暂不可用（通常几秒），正在读写它们的程序可能报错。</span></div>',
-    async ()=>{
-      try{
-        const j = await apiRetry('/api/sync/refreshmount', {method:'POST'});
-        toast('已重建挂载（' + (j.duration||'') + '）', 'ok');
-        loadSyncTasks();
-      }catch(e){ toast(e.message || '重建失败', 'err'); }
-    });
 }
 function openSyncForm(id){
   const t = id ? syncCache.find(x => x.id === id) : null;

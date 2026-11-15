@@ -37,7 +37,7 @@ import (
 var indexHTML []byte
 
 const (
-	version = "1.3.107"
+	version = "1.3.108"
 	// 面板监听策略：生产形态只监听 fnOS 统一网关 unix socket（XBOX_SOCKET），
 	// 登录态由网关注入；不监听任何 TCP 端口。仅 XBOX_DEV=1 时开 127.0.0.1 回环
 	// 端口供本地开发/自动化测试。请勿改为 ":8899" 通配绑定。
@@ -116,9 +116,6 @@ func main() {
 	mux.HandleFunc("POST /api/sync/run", srv.handleSyncRun)
 	mux.HandleFunc("POST /api/sync/pause", srv.handleSyncPause)
 	mux.HandleFunc("GET /api/sync/dirs", srv.handleSyncDirs)
-	mux.HandleFunc("POST /api/sync/refreshmount", srv.handleSyncRefreshMount)
-	mux.HandleFunc("GET /api/sync/token", srv.handleSyncToken)
-	mux.HandleFunc("POST /api/sync/token", srv.handleSyncToken)
 	// 媒体管理：按目录批量整理视频/音频文件名与元数据
 	mux.HandleFunc("GET /api/media/list", srv.handleMediaList)
 	mux.HandleFunc("POST /api/media/save", srv.handleMediaSave)
@@ -180,7 +177,7 @@ func main() {
 	startPTYIdleReaper()     // 终端 PTY 空闲会话回收
 	srv.startSyncScheduler() // 网盘同步定时任务
 	cleanupLegacyReverseProxy() // 反向代理功能已移除，清掉早期版本留下的实例
-	handler := captureGatewayAuth(formBridge(tunnelBridge(panelActivity(mux))))
+	handler := formBridge(tunnelBridge(panelActivity(mux)))
 	if appBase != "" {
 		// 网关入口：先剥前缀，再交给正常路由
 		inner := handler

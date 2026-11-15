@@ -1112,67 +1112,6 @@ func (s *Server) handleSyncPause(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{"id": id, "paused": !on})
 }
 
-// handleSyncRefreshMount POST /api/sync/refreshmount —— 重建网盘挂载。
-// 挂载目录的内容受平台接入层缓存支配，缓存未过期时网盘侧刚转存的文件
-// 在挂载目录里看不到（实测：文件管理里点一次刷新就能看到）。
-// 平台那层的刷新入口需要登录凭据，应用这边用「重建挂载」达到同样效果：
-// 重新挂载必然重新拉取目录，代价是挂载点会短暂不可用（通常几秒）。
-func (s *Server) handleSyncRefreshMount(w http.ResponseWriter, r *http.Request) {
-	if syncRefreshBusy.Swap(true) {
-		fail(w, 409, "正在重建挂载，请稍候")
-		return
-	}
-	defer syncRefreshBusy.Store(false)
-
-	mp := ""
-	for _, t := range cachedSyncTasks() {
-		if v := mountPointOfSource(t.Source); v != "" {
-			mp = v
-			break
-		}
-	}
-	start := time.Now()
-	done, note := restartMountService(mp)
-	if !done {
-		fail(w, 500, note)
-		return
-	}
-	// 重建后把每个任务的刷新节流清掉，让下一轮立刻真正刷新一次
-	rcloneMu.Lock()
-	rcloneSeen = map[string]*rcRefresh{}
-	rcloneMu.Unlock()
-	syncRemoteMu.Lock()
-	syncRemoteAt = map[string]time.Time{}
-	syncRemoteMu.Unlock()
-
-	ok(w, map[string]any{
-		"message":  note,
-		"duration": time.Since(start).Round(time.Millisecond).String(),
-	})
-}
-
-// handleSyncToken GET/POST /api/sync/token —— 保存平台访问令牌并立即验证
-func (s *Server) handleSyncToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "POST" {
-		tok := strings.TrimSpace(r.URL.Query().Get("token"))
-		if err := saveFnosToken(tok); err != nil {
-			fail(w, 500, "保存失败："+err.Error())
-			return
-		}
-		if tok == "" {
-			ok(w, map[string]any{"configured": false, "message": "已清除令牌"})
-			return
-		}
-		good, msg := verifyFnosToken(tok)
-		if !good {
-			_ = saveFnosToken("") // 验证不过就不留，避免反复无效调用
-		}
-		ok(w, map[string]any{"configured": good, "ok": good, "message": msg})
-		return
-	}
-	ok(w, map[string]any{"configured": loadFnosToken() != ""})
-}
-
 // handleSyncDirs 简单的目录候选（便于前端提示当前卷）
 func (s *Server) handleSyncDirs(w http.ResponseWriter, r *http.Request) {
 	out := []string{}

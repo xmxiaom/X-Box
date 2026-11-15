@@ -154,20 +154,12 @@ func refreshMountCache(srcPath string) (bool, string) {
 	}
 	st.at = time.Now()
 
-	// 缓存有两层：平台接入服务一层、挂载服务(VFS)一层。两层都要破，
-	// 只破其中一层，扫描看到的仍是旧目录列表。
-	platOK, platNote := refreshViaPlatform()
-	_ = platNote
-
 	socks := rcloneSockets()
 	if len(socks) == 0 {
 		st.note = "✗无控制接口"
-		if !platOK {
-			st.note += "（" + platNote + "）"
-		}
-		st.ok = platOK
+		st.ok = false
 		noteOnce("sock", "[同步] %s", st.note)
-		return platOK, st.note
+		return false, st.note
 	}
 
 	var lastErr error
@@ -195,7 +187,9 @@ func refreshMountCache(srcPath string) (bool, string) {
 		// 实测语义：vfs/refresh 带 fs 会重新列该目录（返回 {"result":{"/xx":"OK"}}），
 		// 之后新转存的文件/目录立刻可见；不带 dir 或只传 fs 都不生效。
 		// recursive 让子目录一并重列（子目录里的新文件也要能同步到）。
-		params := map[string]any{"fs": m.Fs, "recursive": "true"}
+		// recursive 用布尔值：控制接口按 JSON 类型解析，传字符串会被当成未设置，
+		// 结果只刷新了同步目录这一层，子目录里的新文件照样读不到。
+		params := map[string]any{"fs": m.Fs, "recursive": true}
 		// 实测：dir 传空串或 "/" 会被当成不存在的路径（file does not exist），
 		// 源目录正好是挂载根时必须整个省略 dir。
 		if rel != "/" {
@@ -215,9 +209,6 @@ func refreshMountCache(srcPath string) (bool, string) {
 	} else {
 		// 一个挂载都没匹配上：把现有挂载点列出来，便于一眼看出路径对不对
 		st.note = "✗未匹配挂载"
-	}
-	if !platOK {
-		st.note += "（" + platNote + "）"
 	}
 	st.ok = false
 	if st.note != rclonePrevNote {
@@ -281,4 +272,13 @@ func shortErr(err error) string {
 		t = strings.TrimSpace(t[i+1:])
 	}
 	return " " + firstN(t, 14)
+}
+
+// firstN 截断过长的错误/响应文本，避免把界面撑开
+func firstN(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
