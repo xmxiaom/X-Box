@@ -187,9 +187,9 @@ func refreshMountCache(srcPath string) (bool, string) {
 		// 实测语义：vfs/refresh 带 fs 会重新列该目录（返回 {"result":{"/xx":"OK"}}），
 		// 之后新转存的文件/目录立刻可见；不带 dir 或只传 fs 都不生效。
 		// recursive 让子目录一并重列（子目录里的新文件也要能同步到）。
-		// recursive 用布尔值：控制接口按 JSON 类型解析，传字符串会被当成未设置，
-		// 结果只刷新了同步目录这一层，子目录里的新文件照样读不到。
-		params := map[string]any{"fs": m.Fs, "recursive": true}
+		// recursive 必须是字符串：这个精简版控制接口把该字段声明成文本，
+		// 传布尔值会直接被拒（value must be a string），整次刷新就不执行了。
+		params := map[string]any{"fs": m.Fs, "recursive": "true"}
 		// 实测：dir 传空串或 "/" 会被当成不存在的路径（file does not exist），
 		// 源目录正好是挂载根时必须整个省略 dir。
 		if rel != "/" {

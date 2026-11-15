@@ -42,7 +42,6 @@ const (
 	btMetaMaxPeers   = 64              // 元数据阶段并发拨号上限（先到先得；调大加速出种。v1.3.49 从 24 提高——48+ peer 的热门种 24 路不够吃，拨号失败快速回收后空槽闲置）
 	btMetaIPCap      = 3               // 同一 IP 最多尝试的端口数（防假 seeder 农场占满并发槽）
 	btMaxTrackers    = 40              // 合并磁力自带(含 udp://) + 公共 tracker 的上限（v1.3.53 从 20 提高，让公共 tracker 全量进列表）
-	btMaxTorrentSz   = int64(4) << 30
 	btBlockLen       = 16 << 10 // 分块 16KB（协议标准值，不能改）
 	btStalePiece     = 40 * time.Second
 	btPeersChCap     = 256
@@ -1116,9 +1115,7 @@ type btPrepared struct {
 
 // btPrepareFiles 建目录 + 预创建文件（单文件 / 多文件两种布局）
 func btPrepareFiles(t *btTask, meta *btMeta) (*btPrepared, error) {
-	if total := meta.btTotalSize(); total > btMaxTorrentSz {
-		return nil, fmt.Errorf("种子总大小 %dMB 超过上限（%dMB）", total>>20, btMaxTorrentSz>>20)
-	}
+	// 不做总大小限制：文件是边下边写、不预分配空间，大种子不会一次性占满磁盘。
 	var off int64
 	var outs []btFileOut
 	reuse := t.reuseFiles // 断点恢复：沿用原文件名（否则每次重启都会多一个「xxx (1)」）

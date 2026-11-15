@@ -32,10 +32,11 @@ import (
 )
 
 type davEP struct {
-	base string // http://localhost:15244
-	root string // /cloud-storage/v1/dav
-	user string
-	pass string
+	base   string // http://localhost:15244
+	root   string // /cloud-storage/v1/dav
+	user   string
+	pass   string
+	remote string // 挂载标识（部分网盘的接入结构会多一层这个目录）
 }
 
 var (
@@ -64,7 +65,7 @@ func davEndpointFor(srcPath string) (ep davEP, rel string, ok bool) {
 	if cfg == nil {
 		return davEP{}, "", false
 	}
-	ep = davEP{root: root, user: cfg["user"], pass: revealPass(cfg["pass"])}
+	ep = davEP{root: root, user: cfg["user"], pass: revealPass(cfg["pass"]), remote: remote}
 
 	// 配置里写的地址未必是应用能直接连的那个（可能只给挂载进程内部用、
 	// 也可能实际走的是本机 socket）。这里按候选顺序逐个探一次，用能通的。
@@ -336,19 +337,25 @@ func davListOnce(cl *http.Client, ep davEP, rel string) ([]davItem, int, error) 
 			continue
 		}
 		it := davItem{rel: name}
-		if strings.HasSuffix(r.Href, "/") {
-			it.isDir = true // 有些实现靠尾斜杠表示目录
-		}
+		dirByType := false
+		hasLen := false
 		for _, ps := range r.Propstat {
 			if ps.Prop.ResourceType.Collection != nil {
-				it.isDir = true
+				dirByType = true
 			}
 			if ps.Prop.ContentLength != "" {
+				// 带了内容长度只能是文件：个别实现会给所有资源都挂上 collection 标记，
+				// 单看类型会把文件误判成目录，进而递归进一个文件、结果一个都没列到。
+				hasLen = true
 				fmt.Sscanf(ps.Prop.ContentLength, "%d", &it.size)
 			}
 			if t, perr := http.ParseTime(ps.Prop.LastModified); perr == nil {
 				it.mod = t
 			}
+		}
+		it.isDir = dirByType && !hasLen
+		if !dirByType && strings.HasSuffix(r.Href, "/") {
+			it.isDir = true // 兜底：靠尾斜杠表示目录
 		}
 		out = append(out, it)
 	}
@@ -456,9 +463,24 @@ func davFillWith(task SyncTask, ep davEP, rel string, excludes []string, have ma
 	clProbe := davHTTPClient(ep, 20*time.Second)
 	clGet := davHTTPClient(ep, 30*time.Minute)
 
-	// 先探一次：拿到状态码与首层条目，空目录时能说清是「返回 207 但没内容」
-	// 还是「路径不对被拒」，避免只给一句没信息量的「空目录」。
-	first, status, ferr := davListOnce(clProbe, ep, rel)
+	// 不同网盘在接入服务里的层级不完全一致：有的根下直接就是网盘目录，
+	// 有的还会多一层挂载标识。两个候选都试，用第一个能列出内容的。
+	cands := []string{rel}
+	if ep.remote != "" && rel != "" {
+		cands = append(cands, ep.remote+"/"+rel)
+	}
+	var first []davItem
+	var status int
+	var ferr error
+	usedRel := rel
+	for _, cand := range cands {
+		first, status, ferr = davListOnce(clProbe, ep, cand)
+		if ferr == nil && len(first) > 0 {
+			usedRel = cand
+			break
+		}
+	}
+	rel = usedRel
 	if ferr != nil {
 		log.Printf("[同步] %s 直连接入服务失败（%s）：%v", task.ID, davURL(ep, rel), ferr)
 		return 0, 0, "✗" + shortErr(ferr), true
