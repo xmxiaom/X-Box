@@ -1,6 +1,6 @@
 package main
 
-// 检查更新：对比本地版本与 GitHub Release，支持下载新版本 fpk 到本地，引导用户在
+// 检查更新：对比本地版本与 Gitee Release，支持下载新版本 fpk 到本地，引导用户在
 // 飞牛应用中心覆盖安装（不自动替换运行中的二进制——X-Box 服务自身正在运行，
 // 自动安装有自杀风险；下载 + 手动覆盖安装是安全路径）。
 
@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,10 +21,10 @@ import (
 )
 
 const (
-	ghRepo       = "xmxiaom/X-Box"
-	ghReleaseAPI = "https://api.github.com/repos/" + ghRepo + "/releases/latest"
-	// raw manifest：走 GitHub raw CDN，无 API 限流、无需认证，是版本检测的主路径
-	ghRawManifest = "https://raw.githubusercontent.com/" + ghRepo + "/main/pkg/manifest"
+	giteeRepo       = "xiaomao8/X-Box"
+	giteeReleaseAPI = "https://gitee.com/api/v5/repos/" + giteeRepo + "/releases/latest"
+	// raw manifest：Gitee 仓库源文件，无需认证，是版本检测的主路径
+	giteeRawManifest = "https://gitee.com/" + giteeRepo + "/raw/main/pkg/manifest"
 )
 
 // UpdateInfo 检查更新结果。
@@ -82,6 +83,7 @@ type ghRelease struct {
 	Name        string `json:"name"`
 	Body        string `json:"body"`
 	PublishedAt string `json:"published_at"`
+	CreatedAt   string `json:"created_at"` // Gitee 用这个字段
 	Assets      []struct {
 		ID                 int64  `json:"id"`
 		Name               string `json:"name"`
@@ -90,11 +92,21 @@ type ghRelease struct {
 	} `json:"assets"`
 }
 
-// ghAssetAPIURL 资产下载走 GitHub API 端点（Accept: application/octet-stream 返回二进制）。
-// 不用 browser_download_url：它会 302 到 objects.githubusercontent.com，国内网络大量
-// 不可达（更新下载 HTTP 0 的根因）；api.github.com 与版本检测同域，实测可达。
-func ghAssetAPIURL(assetID int64) string {
-	return fmt.Sprintf("https://api.github.com/repos/%s/releases/assets/%d", ghRepo, assetID)
+// giteeDownloadURL 从 Release 资产里取下载地址；没有资产时按约定规则拼。
+// Gitee 国内直连即可，不需要 GitHub 那套 CDN 绕行。
+func giteeDownloadURL(a struct {
+	ID                 int64  `json:"id"`
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
+}, tag string) string {
+	if a.BrowserDownloadURL != "" {
+		return a.BrowserDownloadURL
+	}
+	if a.Name != "" && tag != "" {
+		return fmt.Sprintf("https://gitee.com/%s/releases/download/%s/%s", giteeRepo, tag, url.PathEscape(a.Name))
+	}
+	return ""
 }
 
 // fmtGhTime GitHub 时间（RFC3339 UTC）→ 本地可读格式；解析失败原样返回。
@@ -108,7 +120,7 @@ func fmtGhTime(s string) string {
 // fetchRawVersion 从 raw manifest 读取远程版本号（无限流主路径）。
 func fetchRawVersion() string {
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(ghRawManifest)
+	resp, err := client.Get(giteeRawManifest)
 	if err != nil || resp.StatusCode != 200 {
 		if resp != nil {
 			resp.Body.Close()
@@ -128,7 +140,7 @@ var updateInProgress int64 // atomic：检查更新进行中（同步引擎见�
 
 func checkUpdate() UpdateInfo {
 	info := UpdateInfo{Current: version, CheckedAt: time.Now().Format("2006-01-02 15:04:05")}
-	// 检查更新需要外网带宽（GitHub），与同步争抢；进行中标记让同步引擎让路
+	// 检查更新需要外网带宽，与同步争抢；进行中标记让同步引擎让路
 	atomic.StoreInt64(&updateInProgress, 1)
 	defer atomic.StoreInt64(&updateInProgress, 0)
 
@@ -155,16 +167,16 @@ func checkUpdate() UpdateInfo {
 			for _, a := range rel.Assets {
 				if strings.HasSuffix(a.Name, ".fpk") {
 					info.AssetName = a.Name
-					info.DownloadURL = ghAssetAPIURL(a.ID) // API 资产端点（穿透 objects.githubusercontent.com 不可达）
+					info.DownloadURL = giteeDownloadURL(a, "v"+info.Latest)
 					break
 				}
 			}
 		} else {
-			info.Note = "未能获取 Release 详情（可能触发 GitHub 匿名 API 限流），下载地址按版本号推断"
+			info.Note = "未能获取 Release 详情，下载地址按版本号推断"
 		}
 		if info.DownloadURL == "" {
 			info.AssetName = "X-Box.fpk"
-			info.DownloadURL = fmt.Sprintf("https://github.com/%s/releases/download/v%s/X-Box.fpk", ghRepo, info.Latest)
+			info.DownloadURL = fmt.Sprintf("https://gitee.com/%s/releases/download/v%s/X-Box.fpk", giteeRepo, info.Latest)
 		}
 	}
 	return info
@@ -173,33 +185,36 @@ func checkUpdate() UpdateInfo {
 // checkUpdateViaAPI releases/latest API 路径（raw 失败时的回退）。
 func checkUpdateViaAPI(info UpdateInfo) UpdateInfo {
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(ghReleaseAPI)
+	resp, err := client.Get(giteeReleaseAPI)
 	if err != nil {
-		info.Note = "无法连接 GitHub（网络或 DNS 异常）：" + err.Error()
+		info.Note = "无法连接 Gitee（网络或 DNS 异常）：" + err.Error()
 		return info
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 404 {
-		info.Note = "GitHub 仓库尚未发布任何 Release（维护者发版后即可检测更新）"
+		info.Note = "Gitee 仓库尚未发布任何 Release（维护者发版后即可检测更新）"
 		return info
 	}
 	if resp.StatusCode != 200 {
-		info.Note = fmt.Sprintf("GitHub 查询失败（HTTP %d，匿名 API 每小时限 60 次，可稍后再试）", resp.StatusCode)
+		info.Note = fmt.Sprintf("Gitee 查询失败（HTTP %d，仓库是否公开？可稍后再试）", resp.StatusCode)
 		return info
 	}
 	var rel ghRelease
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
-		info.Note = "GitHub 响应解析失败：" + err.Error()
+		info.Note = "Gitee 响应解析失败：" + err.Error()
 		return info
 	}
 	info.Source = "release-api"
 	info.Latest = strings.TrimPrefix(rel.TagName, "v")
 	info.Notes = strings.TrimSpace(rel.Body)
 	info.PublishedAt = fmtGhTime(rel.PublishedAt)
+	if info.PublishedAt == "" {
+		info.PublishedAt = fmtGhTime(rel.CreatedAt)
+	}
 	for _, a := range rel.Assets {
 		if strings.HasSuffix(a.Name, ".fpk") {
 			info.AssetName = a.Name
-			info.DownloadURL = ghAssetAPIURL(a.ID) // API 资产端点（穿透 objects.githubusercontent.com 不可达）
+			info.DownloadURL = giteeDownloadURL(a, "v"+info.Latest)
 			break
 		}
 	}
@@ -217,7 +232,7 @@ func checkUpdateViaAPI(info UpdateInfo) UpdateInfo {
 // fetchLatestRelease 取最新 Release 详情（限流/失败返回 ok=false，不影响主判定）。
 func fetchLatestRelease() (ghRelease, bool) {
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(ghReleaseAPI)
+	resp, err := client.Get(giteeReleaseAPI)
 	if err != nil || resp.StatusCode != 200 {
 		if resp != nil {
 			resp.Body.Close()
@@ -433,16 +448,13 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "参数错误")
 		return
 	}
-	// 只允许 GitHub 官方下载地址（防 SSRF）：
-	//   1) api.github.com 资产端点（首选，穿透 objects.githubusercontent.com 不可达）
-	//   2) github.com/.../releases/download/ 直链（兜底）
-	apiAssetPrefix := "https://api.github.com/repos/" + ghRepo + "/releases/assets/"
-	dlPrefix := "https://github.com/" + ghRepo + "/releases/download/"
-	isAPI := strings.HasPrefix(req.URL, apiAssetPrefix) && strings.TrimPrefix(req.URL, apiAssetPrefix) != "" && isAllDigits(strings.TrimPrefix(req.URL, apiAssetPrefix))
-	if !isAPI && !strings.HasPrefix(req.URL, dlPrefix) {
-		fail(w, 400, "仅支持从 GitHub Release 下载")
+	// 只允许本仓库 Gitee Release 的下载地址（防 SSRF）
+	dlPrefix := "https://gitee.com/" + giteeRepo + "/releases/download/"
+	if !strings.HasPrefix(req.URL, dlPrefix) {
+		fail(w, 400, "仅支持从 Gitee Release 下载")
 		return
 	}
+	isAPI := false
 	name := filepath.Base(req.Name)
 	if name == "" || name == "." || !strings.HasSuffix(name, ".fpk") {
 		fail(w, 400, "非法文件名")
@@ -476,13 +488,11 @@ func handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 
 // runDownload 执行后台下载（结果写回全局状态）。
 // v1.3.49 起改用与音乐下载器同源的断点续传方案（.part + HTTP Range + 自动重试）：
-// 此前是一次性 GET（10min 总超时、无续传），GitHub 大文件传输途中任何一次抖动
+// 此前是一次性 GET（10min 总超时、无续传），大文件传输途中任何一次抖动
 // 都整单作废——这就是「更新下载不稳定」的根因。现在：网络中断自动从 .part 续传，
 // 30s 无进展判定空转主动重试，全部字节到齐才落正名。
-// v1.3.51 起加多源轮换：api.github.com 资产端点 302 后真实字节仍来自
-// objects.githubusercontent.com（国内大量不可达，「下载老是报错」的根子），
-// 候选链 = S3 签名直链 → 公共加速镜像 × N + github 直链 → 原始 URL 兜底，
-// 每轮换一个源；同一 Release 资产字节一致，断点续传跨源续接。
+// 多轮重试：每轮从 .part 断点续传，网络中断后自动继续，不因抖动整单作废。
+// 更新源为 Gitee Release 直连（国内可达），不需要镜像轮换。
 var downloadInProgress int64 // atomic：后台下载 fpk 进行中（同步引擎让路）
 
 const (
@@ -492,66 +502,15 @@ const (
 	updDlMaxSize     = 512 << 20        // fpk 大小上限
 )
 
-// updMirrors 公共 GitHub 加速镜像（仅代理 github.com 直链；个别失效会被源轮换自然跳过）。
-func updMirrors() []string {
-	return []string{"https://ghfast.top/", "https://gh-proxy.com/", "https://ghproxy.net/"}
-}
-
-// updCandidates 构建下载候选源（按优先级去重）。
+// updCandidates 下载候选源。
+// Gitee 国内直连即可，不再需要 GitHub 那套「CDN 302 → S3 签名直链 → 公共加速镜像」
+// 的绕行链（那套是为了绕开 objects.githubusercontent.com 在国内不可达）。
+// 断点续传与多轮重试仍由 runDownload 负责。
 func updCandidates(rawURL string, isAPI bool) []string {
-	ghDirect := "" // github.com/.../releases/download/... 直链（镜像可代理的形态）
-	if isAPI {
-		// 资产元数据（默认 Accept 即 JSON）：拿 browser_download_url 推导直链
-		cli := &http.Client{Timeout: 15 * time.Second}
-		if resp, err := cli.Get(rawURL); err == nil {
-			var meta struct {
-				BrowserDownloadURL string `json:"browser_download_url"`
-			}
-			if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&meta) == nil {
-				if u := meta.BrowserDownloadURL; strings.HasPrefix(u, "https://github.com/"+ghRepo+"/releases/download/") {
-					ghDirect = u
-				}
-			}
-			resp.Body.Close()
-		}
-	} else {
-		ghDirect = rawURL
+	if rawURL == "" {
+		return nil
 	}
-	var out []string
-	// S3 签名直链：资产端点不跟随 302 拿 Location——绕开 api.github.com 每小时 60 次匿名限流，
-	// 且后续续传轮直接打 S3（Range 可用）
-	if isAPI {
-		cli := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}}
-		if req, err := http.NewRequest("GET", rawURL, nil); err == nil {
-			req.Header.Set("Accept", "application/octet-stream")
-			if resp, err := cli.Do(req); err == nil {
-				if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-					if loc := resp.Header.Get("Location"); loc != "" {
-						out = append(out, loc)
-					}
-				}
-				resp.Body.Close()
-			}
-		}
-	}
-	if ghDirect != "" {
-		for _, m := range updMirrors() {
-			out = append(out, m+ghDirect)
-		}
-		out = append(out, ghDirect)
-	}
-	out = append(out, rawURL)
-	seen := map[string]bool{}
-	uniq := out[:0]
-	for _, u := range out {
-		if u != "" && !seen[u] {
-			seen[u] = true
-			uniq = append(uniq, u)
-		}
-	}
-	return uniq
+	return []string{rawURL}
 }
 
 func runDownload(rawURL string, isAPI bool, dst string) {
